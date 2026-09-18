@@ -96,6 +96,22 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .side .head small { color: var(--ink-2); }
 .side .hint { padding: 10px 16px; font-size: .92rem; border-bottom: 1px solid var(--rule); background: var(--usenet-soft); }
 .side .filter { padding: 10px 16px; border-bottom: 1px solid var(--rule); }
+.findrow { display: flex; gap: 8px; }
+.earlier { border-top: 4px solid var(--rule); }
+.earlier .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 16px 0; }
+.earlier .head small { color: var(--ink-2); }
+.earlier .ehint { margin: 2px 16px 8px; color: var(--ink-2); font-size: .88rem; }
+.erow { padding: 9px 16px; border-top: 1px solid var(--rule); }
+.erow .title { word-break: break-all; font-weight: 700; line-height: 1.35; }
+.erow .meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: .88rem; margin-top: 2px; }
+.erow .st { font-weight: 700; }
+.erow .st.finished { color: var(--ok); }
+.erow .st.failed { color: var(--bad); }
+.erow .st.downloading { color: var(--torrent); }
+.erow .st.used, .erow .st.gone, .erow .st.unknown { color: var(--ink-2); }
+.findrow .btn { white-space: nowrap; border-color: var(--usenet); color: var(--usenet); font-weight: 700; }
+.findrow .btn:disabled { opacity: .5; }
+.row .new { color: var(--torrent); font-weight: 700; }
 .rows { max-height: 58vh; overflow-y: auto; }
 .row { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--rule); cursor: pointer; }
 .row:last-child { border-bottom: 0; }
@@ -137,6 +153,14 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .dot.done { background: var(--ok); }
 .dot.failed { background: var(--bad); }
 .dot.cancelled, .dot.interrupted { background: var(--warn); }
+.dot.waiting { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
+.ask { margin: 18px 0 6px; border: 2px solid var(--warn); border-radius: 10px; padding: 16px 18px; }
+.ask h3 { margin: 0 0 4px; font-size: 1.05rem; }
+.ask p { margin: 0 0 12px; color: var(--ink-2); }
+.ask .rows { max-height: 44vh; border: 1px solid var(--rule); border-radius: 8px; }
+.ask .row.on { background: var(--usenet-soft); }
+.ask .row .why { color: var(--warn); }
+.ask .actions { margin-top: 12px; }
 @keyframes pulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .dot.running { animation: none; } }
 
@@ -240,8 +264,16 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
       <div class="side usenet">
         <div class="head"><h2>Usenet</h2><small id="ucount"></small></div>
         <div class="hint hidden" id="pairhint"></div>
-        <div class="filter"><input type="text" id="ufilter" placeholder="Filter NZBs" aria-label="Filter NZBs"></div>
+        <form class="filter findrow" id="ufind">
+          <input type="text" id="ufilter" placeholder="Filter, or search Usenet for other NZBs" aria-label="Filter NZBs, or search Usenet">
+          <button class="btn" id="ufindbtn">Search Usenet</button>
+        </form>
         <div class="rows" id="urows" aria-label="NZBs to download"></div>
+        <div class="earlier hidden" id="earlier">
+          <div class="head"><h2>Downloaded on earlier attempts</h2><small id="ecount"></small></div>
+          <p class="ehint">nzb2seed reuses finished ones automatically and skips ones that failed.</p>
+          <div id="erows"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -258,6 +290,15 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
         <div class="map" id="jmap">
           <canvas id="jcanvas" height="34" aria-label="Torrent pieces"></canvas>
           <div class="legend" id="jlegend"></div>
+        </div>
+        <div class="ask hidden" id="jask">
+          <h3>Pick the NZB to use</h3>
+          <p id="jaskprompt"></p>
+          <div class="rows" id="jaskrows" role="radiogroup" aria-label="Search results"></div>
+          <div class="actions">
+            <button class="btn primary" id="jaskuse" disabled>Download this NZB</button>
+            <button class="btn danger" id="jaskstop">Stop the build</button>
+          </div>
         </div>
         <ol class="steps" id="jsteps"></ol>
         <div class="progress" id="jprogress"></div>
@@ -366,6 +407,7 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
           </select></label>
         <label class="check"><input type="checkbox" data-k="behaviour.cleanup"> Delete files that are not part of the torrent (.nzb, .par2 and extras)</label>
         <label class="check"><input type="checkbox" data-k="behaviour.local_verify"> Hash every piece here before handing the torrent to qBittorrent</label>
+        <label class="check"><input type="checkbox" data-k="behaviour.retry_bad_pieces"> If pieces fail, download other posts of the same release until every piece verifies (switches hashing on)</label>
       </fieldset>
       <div class="actions">
         <button class="btn primary">Save settings</button>
@@ -443,6 +485,8 @@ function optionControls(prefix) {
         h("option", { value: "repair", selected: b.post_processing === "repair" }, "+Repair"),
         h("option", { value: "unpack", selected: b.post_processing === "unpack" }, "+Repair/Unpack"))),
     h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "verify", checked: !!b.local_verify }), "Hash pieces here first"),
+    h("label", { class: "check", title: "If pieces fail the check, download other posts of the same release until every piece verifies (needs hashing, which it switches on)" },
+      h("input", { type: "checkbox", id: prefix + "retry", checked: b.retry_bad_pieces !== false }), "Try other posts if pieces fail"),
     h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "start", checked: !!q.start_when_complete }), "Start seeding at 100%"),
     h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "keep", checked: b.cleanup === false }), "Keep extra files"),
   ];
@@ -450,6 +494,7 @@ function optionControls(prefix) {
 function readOptions(prefix) {
   return {
     pp: $(prefix + "pp").value, local_verify: $(prefix + "verify").checked,
+    retry_bad: $(prefix + "retry") ? $(prefix + "retry").checked : undefined,
     start: $(prefix + "start").checked, no_cleanup: $(prefix + "keep").checked,
   };
 }
@@ -460,7 +505,7 @@ function renderOptions() {
 }
 
 /* ================= build */
-const state = { torrents: [], usenet: [], torrent: null, picked: new Set(), how: "", pairing: false };
+const state = { torrents: [], usenet: [], torrent: null, picked: new Set(), how: "", pairing: false, found: new Set() };
 
 $("searchform").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -469,7 +514,7 @@ $("searchform").addEventListener("submit", async (e) => {
   $("searchbtn").disabled = true; $("searchbtn").textContent = "Searching…";
   try {
     const r = await api("/api/search", { query });
-    Object.assign(state, { torrents: r.torrents, usenet: r.usenet, torrent: null, picked: new Set(), how: "" });
+    Object.assign(state, { torrents: r.torrents, usenet: r.usenet, torrent: null, picked: new Set(), how: "", found: new Set() });
     const key = norm(query);
     state.torrents.sort((a, b) => (norm(b.title) === key) - (norm(a.title) === key) || a.title.localeCompare(b.title));
     $("intro").classList.add("hidden"); $("results").classList.remove("hidden");
@@ -482,6 +527,26 @@ $("searchform").addEventListener("submit", async (e) => {
 });
 $("tfilter").addEventListener("input", renderResults);
 $("ufilter").addEventListener("input", renderResults);
+$("ufind").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const query = $("ufilter").value.trim();
+  if (!query) return $("ufilter").focus();
+  const btn = $("ufindbtn");
+  btn.disabled = true; btn.textContent = "Searching…";
+  try {
+    const r = await api("/api/search", { query, protocol: "usenet" });
+    const known = new Set(state.usenet.map(u => u.guid));
+    const fresh = r.usenet.filter(u => !known.has(u.guid));
+    state.usenet = state.usenet.concat(fresh);
+    state.found = new Set(fresh.map(u => u.guid));
+    $("ufilter").value = "";            // show the new results, not a filtered view
+    renderResults();
+    $("urows").scrollTop = 0;
+    toast(fresh.length ? `${fresh.length} more NZB${fresh.length > 1 ? "s" : ""} found for “${query}”. Tick the ones that hold the torrent's files.`
+                       : `No new NZBs for “${query}”.`);
+  } catch (err) { toast("Usenet search failed: " + err.message); }
+  finally { btn.disabled = false; btn.textContent = "Search Usenet"; }
+});
 
 function releaseRow(r, kind, on, onpick) {
   const meta = [r.indexer, size(r.size), r.files ? r.files + " files" : null,
@@ -491,7 +556,8 @@ function releaseRow(r, kind, on, onpick) {
   const row = h("label", { class: "row" + (on ? " on" : "") }, input,
     h("div", {}, h("div", { class: "title" }, r.title),
       h("div", { class: "meta" }, meta.map(m => h("span", {}, m)),
-        kind === "usenet" && state.torrent && norm(r.title) === norm(state.torrent.title) ? h("span", { class: "same" }, "same name as the torrent") : null)));
+        kind === "usenet" && state.torrent && norm(r.title) === norm(state.torrent.title) ? h("span", { class: "same" }, "same name as the torrent") : null,
+        kind === "usenet" && state.found.has(r.guid) ? h("span", { class: "new" }, "from your Usenet search") : null)));
   input.addEventListener("change", () => onpick(input.checked));
   return row;
 }
@@ -504,7 +570,8 @@ function renderResults() {
 
   // picked NZBs first, then the rest
   const us = state.usenet.filter(u => (u.title + " " + u.indexer).toLowerCase().includes(uf) || state.picked.has(u.guid))
-    .sort((a, b) => state.picked.has(b.guid) - state.picked.has(a.guid) || (b.grabs || 0) - (a.grabs || 0));
+    .sort((a, b) => state.picked.has(b.guid) - state.picked.has(a.guid)
+      || state.found.has(b.guid) - state.found.has(a.guid) || (b.grabs || 0) - (a.grabs || 0));
   $("ucount").textContent = `${state.usenet.length} found`;
   $("urows").replaceChildren(...(us.length ? us.map(u => releaseRow(u, "usenet", state.picked.has(u.guid), (on) => {
       on ? state.picked.add(u.guid) : state.picked.delete(u.guid); state.how = ""; renderResults(); renderBar();
@@ -515,9 +582,26 @@ function renderResults() {
   hint.classList.toggle("hidden", !(state.pairing || state.how));
   renderBar();
 }
+async function loadEarlier(t) {
+  const box = $("earlier");
+  box.classList.add("hidden");
+  try {
+    const r = await api("/api/previous", { title: t.title });
+    if (state.torrent !== t || !r.previous.length) return;
+    const label = { finished: "Finished", failed: "Failed", downloading: "Downloading", used: "Used", gone: "Gone", unknown: "Unknown" };
+    $("ecount").textContent = `${r.previous.length} earlier download${r.previous.length > 1 ? "s" : ""}`;
+    $("erows").replaceChildren(...r.previous.map(p => h("div", { class: "erow" },
+      h("div", { class: "title" }, p.title),
+      h("div", { class: "meta" }, h("span", { class: "st " + p.state }, label[p.state] || p.state),
+        p.indexer ? h("span", {}, p.indexer) : null, p.size ? h("span", {}, size(p.size)) : null,
+        p.submitted ? h("span", {}, age(new Date(p.submitted * 1000).toISOString())) : null,
+        h("span", {}, p.note)))));
+    box.classList.remove("hidden");
+  } catch { /* the list is a convenience; a failure here must not block building */ }
+}
 async function selectTorrent(t) {
   state.torrent = t; state.picked = new Set(); state.how = ""; state.pairing = true;
-  renderResults(); route();
+  renderResults(); route(); loadEarlier(t);
   try {
     const r = await api("/api/pair", { torrent: t, usenet: state.usenet });
     if (state.torrent !== t) return;
@@ -527,7 +611,7 @@ async function selectTorrent(t) {
     state.how = r.groups.length
       ? (r.how.startsWith("exact") ? `Same name as the torrent on ${r.groups[0].length} indexer${r.groups[0].length > 1 ? "s" : ""}.` : `Season pack: ${r.groups.length} episode NZBs.`)
         + (fallbacks ? " nzb2seed looks inside them, skips any smaller than the torrent and downloads the most complete post first; the rest are backups." : "")
-      : "No NZB has the torrent's name. Tick the ones that contain its files.";
+      : "Nothing is ticked, so nzb2seed finds the NZBs itself: an NZB of the whole torrent first, then per season, then per episode - always from the release group of the torrent's own files. Tick NZBs to have those tried first.";
   } catch (err) { state.how = "Could not match NZBs: " + err.message; }
   state.pairing = false; renderResults();
 }
@@ -540,8 +624,8 @@ function renderBar() {
   bar.replaceChildren(h("b", {}, t.title),
     h("small", {}, picked.length
       ? `from ${groups.size} Usenet release${groups.size > 1 ? "s" : ""}: ${size(total)} of Usenet for ${size(t.size)} of torrent` + (total < t.size * 0.97 ? ". This looks too small; some files may be missing." : "")
-      : "Tick at least one NZB on the right."));
-  $("buildbtn").disabled = !picked.length || state.pairing;
+      : "nzb2seed finds the NZBs itself, closest match first."));
+  $("buildbtn").disabled = state.pairing;
 }
 $("buildbtn").addEventListener("click", async () => {
   const nzbs = state.usenet.filter(u => state.picked.has(u.guid));
@@ -556,12 +640,13 @@ $("buildbtn").addEventListener("click", async () => {
 let jobs = [], current = null, cursor = 0, logSteps = [], pollTimer = null;
 async function refreshJobs() {
   try { jobs = await api("/api/jobs"); } catch { return; }
-  const running = jobs.filter(j => j.status === "running").length;
+  const running = jobs.filter(j => j.status === "running" || j.status === "waiting").length;
   $("runcount").textContent = running; $("runcount").classList.toggle("hidden", !running);
   if (location.hash !== "#jobs") return;
   $("joblist").replaceChildren(...(jobs.length ? jobs.map(j => h("button", { "aria-current": String(j.id === current), onclick: () => openJob(j.id) },
       h("div", { class: "t" }, h("span", { class: "dot " + j.status }), j.title),
-      h("div", { class: "s" }, j.status === "running" ? (j.steps.at(-1) || "Starting") : (j.result || j.status))))
+      h("div", { class: "s" }, j.status === "waiting" ? "Waiting for you: pick an NZB"
+        : j.status === "running" ? (j.steps.at(-1) || "Starting") : (j.result || j.status))))
     : [h("div", { class: "empty" }, "No builds yet. Start one from Build.")]));
   if (!current && jobs.length) openJob(jobs[0].id, false);
 }
@@ -578,9 +663,11 @@ async function pollJob() {
   try { j = await api(`/api/jobs/${current}?since=${cursor}`); } catch { pollTimer = setTimeout(pollJob, 3000); return; }
   $("jtitle").textContent = j.title;
   const res = $("jresult");
-  res.textContent = j.status === "running" ? "Building…" : j.status === "cancelled" ? "Cancelled" : j.result;
+  res.textContent = j.status === "running" ? "Building…" : j.status === "waiting" ? "Waiting for you"
+    : j.status === "cancelled" ? "Cancelled" : j.result;
+  renderQuestion(j);
   res.className = "result " + j.status;
-  $("jcancel").classList.toggle("hidden", j.status !== "running");
+  $("jcancel").classList.toggle("hidden", j.status !== "running" && j.status !== "waiting");
 
   const pre = $("jlog"); const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
   for (const l of j.lines) {
@@ -594,9 +681,42 @@ async function pollJob() {
   steps.replaceChildren(...logSteps.map((s, i) => h("li", { class: i === logSteps.length - 1 && j.status !== "done" ? "now" + (["failed", "cancelled", "interrupted"].includes(j.status) ? " failed" : "") : "" }, s)));
   $("jprogress").textContent = j.progress || "";
   drawPieces(j.pieces);
-  if (j.status === "running") pollTimer = setTimeout(pollJob, 1000);
+  if (j.status === "running" || j.status === "waiting") pollTimer = setTimeout(pollJob, 1000);
   else refreshJobs();
 }
+/* a build waiting for the person to pick an NZB */
+let askKey = "", askPick = null;
+function renderQuestion(j) {
+  const box = $("jask");
+  if (!j.question) { box.classList.add("hidden"); askKey = ""; return; }
+  box.classList.remove("hidden");
+  const key = j.id + "|" + j.question.prompt;
+  if (key === askKey) return;                 // keep the person's selection while polling
+  askKey = key; askPick = null; $("jaskuse").disabled = true;
+  $("jaskprompt").textContent = j.question.prompt;
+  $("jaskrows").replaceChildren(...j.question.choices.map((c, i) => {
+    const input = h("input", { type: "radio", name: "askpick", "aria-label": c.title });
+    const row = h("label", { class: "row" }, input,
+      h("div", {}, h("div", { class: "title" }, c.title),
+        h("div", { class: "meta" }, h("span", {}, c.indexer), h("span", {}, c.size_text),
+          c.grabs != null ? h("span", {}, c.grabs + " grabs") : null,
+          c.note ? h("span", { class: "why" }, c.note) : h("span", { class: "same" }, "fits"))));
+    input.addEventListener("change", () => {
+      askPick = i; $("jaskuse").disabled = false;
+      $("jaskrows").querySelectorAll(".row").forEach(r => r.classList.toggle("on", r === row));
+    });
+    return row;
+  }));
+}
+async function answer(choice) {
+  $("jaskuse").disabled = true; $("jaskstop").disabled = true;
+  try { await api(`/api/jobs/${current}/answer`, { choice }); askKey = ""; pollJob(); }
+  catch (err) { toast(err.message); }
+  finally { $("jaskstop").disabled = false; }
+}
+$("jaskuse").addEventListener("click", () => askPick != null && answer(askPick));
+$("jaskstop").addEventListener("click", () => answer(null));
+
 $("jcancel").addEventListener("click", async () => {
   try { await api(`/api/jobs/${current}/cancel`, {}); toast("Cancelling after the current step…"); } catch (err) { toast(err.message); }
 });

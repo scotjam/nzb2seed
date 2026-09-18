@@ -89,7 +89,7 @@ def test_job_dir_uses_folder_when_sab_reports_a_file(tmp_path):
     job = tmp_path / "downloads" / f"{MKV}"
     job.mkdir(parents=True)
     (job / "a.mkv").write_bytes(b"x")
-    cfg = Config(path="x", sab_to_local=[["/downloads", str(tmp_path / "downloads")]])
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/downloads", str(tmp_path / "downloads")]])
     assert pipeline.job_dir(cfg, {"storage": f"/downloads/{MKV}/a.mkv"}, MKV) == str(job)
     # a file directly in the shared complete folder is never widened to that folder
     (tmp_path / "downloads" / "loose.mkv").write_bytes(b"x")
@@ -116,8 +116,12 @@ def test_nzb_score_prefers_post_with_torrent_names():
 
 
 class FakeProwlarr:
-    def __init__(self, nzbs):
-        self.nzbs, self.fetched = nzbs, []
+    def __init__(self, nzbs, results=()):
+        self.nzbs, self.fetched, self.results, self.queries = nzbs, [], list(results), []
+
+    def search(self, query, *a):
+        self.queries.append(query)
+        return list(self.results)
 
     def fetch(self, r):
         self.fetched.append(r.guid)
@@ -171,7 +175,7 @@ def test_usenet_single_moves_on_to_the_next_post(tmp_path):
     names = [(f.name, int(f.length * 1.02)) for f in t.real_files]
     pr = FakeProwlarr({"a": nzb_xml(names), "b": nzb_xml(names[:-1])})
     sab = RetrySAB(str(tmp_path))
-    cfg = Config(path="x", sab_to_local=[["/dl", str(tmp_path)]])
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
     dirs, nzos = pipeline.usenet_single(cfg, Options(), pr, sab, t,
                                         [rel("a", T + 50, 10), rel("b", T + 60, 5)], PP_REPAIR)
     assert nzos == ["nzo2"] and dirs[0].endswith(".2")
@@ -181,7 +185,7 @@ def test_usenet_single_moves_on_to_the_next_post(tmp_path):
 def test_usenet_single_refuses_when_every_nzb_is_too_small(tmp_path):
     t = parse(make_torrent(NAME, scene_layout()))
     with pytest.raises(Abort):
-        pipeline.usenet_single(Config(path="x"), Options(), FakeProwlarr({}), None, t,
+        pipeline.usenet_single(Config(path=str(tmp_path / "c.toml")), Options(), FakeProwlarr({}), None, t,
                                [rel("a", t.total_size - 1)], PP_REPAIR)
 
 
@@ -194,3 +198,15 @@ def test_complete_bytes_beat_a_name_hit():
         [(nfo.name, nfo.length), ("a.rar", int(t.total_size * 0.95))])), t)
     full = nzbinfo.score(nzbinfo.parse(nzb_xml([("b.rar", int(t.total_size * 1.0))])), t)
     assert full.key > short.key
+
+
+def test_loose_post_with_fewer_files_than_the_torrent_is_not_plausible():
+    """A bare re-post of the video can have almost exactly the right byte count but still
+    lack the .nfo and screenshots; without archives, every torrent file needs its own file."""
+    t = parse(make_torrent(MKV, unpacked_layout()))
+    biggest = max(t.real_files, key=lambda f: f.length)
+    full = nzbinfo.score(nzbinfo.parse(nzb_xml([(f.name, f.length) for f in t.real_files])), t)
+    assert full.plausible
+    bare = nzbinfo.score(nzbinfo.parse(nzb_xml(
+        [(biggest.name, t.total_size), ("junk1.txt", 30), ("junk2.txt", 13)])), t)
+    assert not bare.plausible and "loose files" in bare.summary
