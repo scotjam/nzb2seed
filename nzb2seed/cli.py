@@ -163,6 +163,40 @@ def cmd_run(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_season(cfg: Config, args) -> int:
+    from . import metadata
+    from . import season as season_mod
+    shows = metadata.tvmaze_search(args.show)
+    if args.year:
+        shows = [s for s in shows if s["premiered"].startswith(str(args.year))] or shows
+    if not shows:
+        raise Abort(f"TVmaze does not know {args.show!r}")
+    show = shows[0]
+    eps = metadata.tvmaze_episodes(show["id"], args.season)
+    wanted = [e["number"] for e in eps]
+    step(f"{show['name']} ({show['premiered'][:4]}) season {args.season}: {len(wanted)} episodes on TVmaze")
+    for k, u in metadata.links(show).items():
+        info(f"{k}: {u}")
+    opts = season_mod.find_options(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), show["name"], args.season, wanted)
+    for i, o in enumerate(opts, 1):
+        s = o.summary(wanted)
+        cov = (f"{s['season_nzbs']} season NZB(s), " if s["season_nzbs"] else "") +             f"{len(s['episodes_found'])}/{len(wanted)} episodes"
+        print(f"  {i:>3}  {s['group']:<12} {s['res'] or '':<6} {cov:<32} {gb(s['size']):>10}  {s['name']}")
+    if not args.group:
+        info("add --group (and --res) to grab one of these")
+        return 0
+    pick = [o for o in opts if o.group == args.group.lower() and (not args.res or o.res == args.res.lower())]
+    if args.year:
+        pick = [o for o in pick if str(args.year) in o.prefix] or pick
+    if len(pick) != 1:
+        raise Abort(f"{len(pick)} options match --group {args.group}" + (f" --res {args.res}" if args.res else "")
+                    + "; narrow it down with --res / --year")
+    out = season_mod.grab_season(cfg, show["id"], args.season, pick[0].key,
+                                 packing="unpack" if args.unpack else None)
+    info(out["result"])
+    return 0
+
+
 def cmd_assemble(cfg: Config, args) -> int:
     execute_assemble(cfg, options(args), args.torrent, args.source)
     return 0
@@ -212,6 +246,15 @@ def main(argv=None) -> int:
                         "+Repair/Unpack when it holds unpacked files), repair, or unpack; never +Delete")
     r.add_argument("-y", "--yes", action="store_true", help="no prompts; requires an unambiguous match")
 
+    sn = sub.add_parser("season", help="grab a whole season from one release group (list options without --group)")
+    sn.add_argument("show", help="show name, as TVmaze knows it")
+    sn.add_argument("season", type=int)
+    sn.add_argument("--year", type=int, help="the show's first year, to tell same-named shows apart")
+    sn.add_argument("--group", help="release group to grab")
+    sn.add_argument("--res", help="resolution, e.g. 720p")
+    sn.add_argument("--unpack", action="store_true",
+                    help="unpack everything (default: keep - or rebuild from srrDB - the scene RARs)")
+
     a = sub.add_parser("assemble", parents=[common], help="build from a .torrent and existing folder(s)")
     a.add_argument("torrent", help=".torrent file")
     a.add_argument("source", nargs="+", help="folder(s) holding the NZB download(s)")
@@ -232,7 +275,8 @@ def main(argv=None) -> int:
     report.interactive = not getattr(args, "yes", False) and sys.stdin.isatty()
     cfg = load(args.config)
     try:
-        return {"search": cmd_search, "run": cmd_run, "assemble": cmd_assemble}[args.cmd](cfg, args)
+        return {"search": cmd_search, "run": cmd_run, "assemble": cmd_assemble,
+                "season": cmd_season}[args.cmd](cfg, args)
     except (Abort, Cancelled) as e:
         print(f"\n!! {e}", file=sys.stderr)
         return 2

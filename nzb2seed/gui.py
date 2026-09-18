@@ -23,6 +23,8 @@ from urllib.parse import urlsplit
 from . import config as config_mod
 from . import report
 from .clients import ApiError, Prowlarr, QBittorrent, Release, SABnzbd
+from . import metadata
+from . import season as season_mod
 from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
                        previous_downloads, search)
 
@@ -352,6 +354,10 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._send(200, page, "text/html; charset=utf-8")
             if path == "/api/settings":
                 return self._json(self.settings_payload())
+            if path == "/api/season/reports":
+                return self._json(season_mod.reports(app.cfg, SABnzbd(app.cfg.sab_url, app.cfg.sab_key)))
+            if path in ("/api/season/report", "/api/season/file"):
+                return self.season_file(path)
             if path == "/api/jobs":
                 with app.lock:
                     jobs = [j.summary() for j in sorted(app.jobs.values(), key=lambda j: -j.id)]
@@ -391,6 +397,14 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                        "usenet": [dataclasses.asdict(r) for r in nzbs]})
                 if path == "/api/pair":
                     return self.pair(body)
+                if path == "/api/season/shows":
+                    return self._json(metadata.tvmaze_search((body.get("query") or "").strip()))
+                if path == "/api/season/seasons":
+                    return self._json(metadata.tvmaze_seasons(int(body["show_id"])))
+                if path == "/api/season/options":
+                    return self.season_options(body)
+                if path == "/api/season/grab":
+                    return self.season_grab(body)
                 if path == "/api/previous":
                     sab = SABnzbd(app.cfg.sab_url, app.cfg.sab_key)
                     return self._json({"previous": previous_downloads(app.cfg, sab, body.get("title") or "")})
@@ -435,6 +449,52 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             config_mod.save(cfg)
             app.cfg = cfg
             return self._json(self.settings_payload())
+
+        def season_options(self, body):
+            show = metadata.tvmaze_show(int(body["show_id"]))
+            sn = int(body["season"])
+            eps = metadata.tvmaze_episodes(show["id"], sn)
+            wanted = [e["number"] for e in eps]
+            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key)
+            opts = season_mod.find_options(app.cfg, pr, show["name"], sn, wanted)
+            return self._json({"show": show, "episodes": eps, "links": metadata.links(show),
+                               "options": [o.summary(wanted) for o in opts]})
+
+        def season_grab(self, body):
+            sid, sn, key = int(body["show_id"]), int(body["season"]), body["key"]
+            packing = body.get("packing") or None
+            label = body.get("label") or f"season {sn}"
+            job = app.start_job(label, "season",
+                                lambda cfg: season_mod.grab_season(cfg, sid, sn, key, packing))
+            return self._json({"id": job.id})
+
+        def season_file(self, path):
+            q = dict(p.split("=", 1) for p in urlsplit(self.path).query.split("&") if "=" in p)
+            from urllib.parse import unquote
+            name = unquote(q.get("name", ""))
+            if not name or "/" in name or "\\" in name or name.startswith("."):
+                return self._err("bad name")
+            root = season_mod.downloads_root(app.cfg, SABnzbd(app.cfg.sab_url, app.cfg.sab_key))
+            side = os.path.realpath(os.path.join(root, name + season_mod.SIDE_SUFFIX))
+            if os.path.dirname(side) != os.path.realpath(root) or not os.path.isdir(side):
+                return self._err("no such report", 404)
+            if path == "/api/season/report":
+                with open(os.path.join(side, "report.json"), encoding="utf-8") as fh:
+                    r = json.load(fh)
+                mi = os.path.join(side, "mediainfo.txt")
+                if os.path.exists(mi):
+                    with open(mi, encoding="utf-8", errors="replace") as fh:
+                        r["mediainfo"] = fh.read()
+                return self._json(r)
+            rel = unquote(q.get("path", ""))
+            target = os.path.realpath(os.path.join(side, rel))
+            if not target.startswith(side + os.sep) or not os.path.isfile(target):
+                return self._err("no such file", 404)
+            ctype = {".png": "image/png", ".jpg": "image/jpeg", ".txt": "text/plain; charset=utf-8",
+                     ".html": "text/html; charset=utf-8"}.get(os.path.splitext(target)[1].lower(),
+                                                              "application/octet-stream")
+            with open(target, "rb") as fh:
+                return self._send(200, fh.read(), ctype)
 
         def test_connections(self):
             cfg = app.cfg

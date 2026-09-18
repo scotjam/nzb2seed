@@ -207,6 +207,34 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 
 .notice { background: var(--warn); color: var(--sheet); padding: 8px 24px; font-size: .92rem; }
 .notice a { color: inherit; font-weight: 700; }
+/* ---------- seasons */
+.sgrid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+.panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 20px; min-width: 0; }
+.panel h2 { margin-bottom: 10px; }
+.panel + .panel { margin-top: 20px; }
+.picklist { border: 1px solid var(--rule); border-radius: 8px; max-height: 40vh; overflow-y: auto; margin: 10px 0; }
+.picklist .row.on { background: var(--usenet-soft); }
+.opt .cov { font-weight: 700; }
+.opt .cov.full { color: var(--ok); }
+.opt .cov.part { color: var(--warn); }
+.eplist { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.ep { font-size: .78rem; padding: 1px 6px; border-radius: 4px; background: var(--ok-soft); }
+.ep.no { background: var(--bad); color: #fff; }
+.replist button { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--rule); background: none; padding: 10px 4px; cursor: pointer; }
+.replist button:last-child { border-bottom: 0; }
+.replist .t { font-weight: 700; word-break: break-all; }
+.replist .s { font-size: .86rem; color: var(--ink-2); }
+.report h3 { margin: 18px 0 6px; font-size: 1rem; word-break: break-all; }
+.report table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+.report td, .report th { border-bottom: 1px solid var(--rule); padding: 4px 6px; text-align: left; vertical-align: top; }
+.report .good { color: var(--ok); font-weight: 700; }
+.report .flag { color: var(--bad); font-weight: 700; }
+.report pre { background: var(--slate); padding: 12px; border-radius: 8px; overflow: auto; font: .8rem/1.4 var(--mono); max-height: 60vh; }
+.report pre.nfo { line-height: 1.05; }
+.shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.shots img { width: 100%; border-radius: 6px; display: block; }
+.links a { margin-right: 14px; font-weight: 700; color: var(--torrent); }
+@media (max-width: 860px) { .sgrid { grid-template-columns: 1fr; } }
 .toast { position: fixed; right: 20px; bottom: 90px; max-width: 460px; padding: 12px 16px; border-radius: 8px; background: var(--ink); color: var(--sheet); z-index: 9; }
 
 @media (max-width: 860px) {
@@ -226,6 +254,7 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
   <nav>
     <a href="#build">Build</a>
     <a href="#jobs">Jobs<span class="count hidden" id="runcount"></span></a>
+    <a href="#seasons">Seasons</a>
     <a href="#assemble">Assemble</a>
     <a href="#settings">Settings</a>
   </nav>
@@ -303,6 +332,49 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
         <ol class="steps" id="jsteps"></ol>
         <div class="progress" id="jprogress"></div>
         <details class="log" id="jlogwrap"><summary>Full log</summary><pre id="jlog"></pre></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Seasons -->
+  <section id="view-seasons" class="view hidden">
+    <h1>Grab a whole season</h1>
+    <p class="lede">One release group, one resolution, every episode. nzb2seed tries a season NZB first, then the missing episodes on their own, checks every episode against TVmaze and - for scene releases - against srrDB's CRC of the original video, and puts MediaInfo, screenshots and links in a separate <code>-metadata</code> folder next to the season.</p>
+    <div class="sgrid">
+      <div>
+        <div class="panel">
+          <h2>Find the season</h2>
+          <form class="search" id="sshowform" style="margin:0">
+            <input type="text" id="sshowq" placeholder="Show name, e.g. Doctor Who" aria-label="Show name">
+            <button class="btn primary" id="sshowbtn">Search</button>
+          </form>
+          <div class="picklist hidden" id="sshows" role="radiogroup" aria-label="Shows"></div>
+          <div class="hidden" id="sseasonbox" style="margin-top:12px">
+            <label class="field"><span>Season</span>
+              <select id="sseason" style="width:auto"></select></label>
+            <div class="actions" style="margin-top:10px"><button class="btn primary" id="soptbtn">Find releases</button>
+              <span class="status" id="slinks"></span></div>
+          </div>
+        </div>
+        <div class="panel hidden" id="soptpanel">
+          <h2 id="sopttitle">Releases on Usenet</h2>
+          <p class="status" id="soptsub" style="margin:0"></p>
+          <div class="picklist" id="sopts" role="radiogroup" aria-label="Release group and resolution"></div>
+          <div class="actions">
+            <label title="Keep scene RARs: releases that were RAR'd end up as their original scene RAR set. A post that is the scene RARs is kept as it is; an obfuscated, re-packed or encrypted post is unpacked, and when its video matches srrDB's CRC the original RARs are rebuilt byte for byte from srrDB's .srr. If that is not possible the release stays unpacked and the report says why. Unpack all: every release is left unpacked.">RARs
+              <select id="spacking" style="width:auto" aria-describedby="spackhelp">
+                <option value="scene">Keep scene RARs</option>
+                <option value="unpack">Unpack all</option>
+              </select></label>
+            <small class="status" id="spackhelp" style="flex-basis:100%">Keep scene RARs: releases that were RAR'd end up as their original scene RAR set. A post that is the scene RARs is kept as it is; an obfuscated, re-packed or encrypted post is unpacked, and when its video matches srrDB's CRC the original RARs are rebuilt byte for byte from srrDB's .srr. If that is not possible the release stays unpacked and the report says why. Unpack all: every release is left unpacked.</small>
+            <button class="btn primary" id="sgrab" disabled>Grab season</button>
+          </div>
+        </div>
+        <div class="panel report hidden" id="sreport"></div>
+      </div>
+      <div class="panel">
+        <h2>Grabbed seasons</h2>
+        <div class="replist" id="sreports"><div class="empty">Nothing grabbed yet.</div></div>
       </div>
     </div>
   </section>
@@ -389,6 +461,12 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
       </fieldset>
       <hr>
       <fieldset>
+        <legend>FlareSolverr</legend>
+        <label class="field"><span>URL</span><input type="text" data-k="flaresolverr.url" placeholder="http://nas.local:8191">
+          <small>Only used when a site (e.g. predb.me, xrel.to) answers with a Cloudflare challenge. Leave empty to not use it.</small></label>
+      </fieldset>
+      <hr>
+      <fieldset>
         <legend>GUI login</legend>
         <p class="status" style="margin:0" id="loginhelp">Asked for by your browser when you open this page. The default is admin / nzb2seed. Leave the password empty to switch the login off; then only this machine and your local network can open the GUI.</p>
         <div class="two">
@@ -407,6 +485,11 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
           </select></label>
         <label class="check"><input type="checkbox" data-k="behaviour.cleanup"> Delete files that are not part of the torrent (.nzb, .par2 and extras)</label>
         <label class="check"><input type="checkbox" data-k="behaviour.local_verify"> Hash every piece here before handing the torrent to qBittorrent</label>
+        <label class="field"><span>Season grabs: RARs</span>
+          <select data-k="behaviour.season_packing" title="Keep scene RARs: releases that were RAR'd end up as their original scene RAR set. A post that is the scene RARs is kept as it is; an obfuscated, re-packed or encrypted post is unpacked, and when its video matches srrDB's CRC the original RARs are rebuilt byte for byte from srrDB's .srr. If that is not possible the release stays unpacked and the report says why. Unpack all: every release is left unpacked.">
+            <option value="scene">Keep scene RARs (rebuilt from srrDB when a post is obfuscated or re-packed)</option>
+            <option value="unpack">Unpack all</option>
+          </select></label>
         <label class="check"><input type="checkbox" data-k="behaviour.retry_bad_pieces"> If pieces fail, download other posts of the same release until every piece verifies (switches hashing on)</label>
       </fieldset>
       <div class="actions">
@@ -461,7 +544,7 @@ const age = (d) => { const t = Date.parse(d); if (!t) return ""; const days = Ma
 const norm = (s) => s.trim().toLowerCase().replace(/[\s._]+/g, ".").replace(/\.?-\.?/g, "-").replace(/^\.|\.$/g, "");
 
 /* ================= routing */
-const views = ["build", "jobs", "assemble", "settings"];
+const views = ["build", "jobs", "seasons", "assemble", "settings"];
 function route() {
   const v = views.includes(location.hash.slice(1)) ? location.hash.slice(1) : "build";
   for (const name of views) $("view-" + name).classList.toggle("hidden", name !== v);
@@ -469,6 +552,7 @@ function route() {
     a.getAttribute("href") === "#" + v ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
   $("buildbar").classList.toggle("hidden", v !== "build" || !state.torrent);
   if (v === "jobs") refreshJobs();
+  if (v === "seasons") loadReports();
   if (v === "settings") loadSettings();
 }
 window.addEventListener("hashchange", route);
@@ -759,6 +843,117 @@ function drawPieces(p) {
     good + bad < n ? key("--idle", "not checked yet") : null].filter(Boolean));
 }
 window.addEventListener("resize", () => lastPieces && drawPieces(lastPieces));
+
+/* ================= seasons */
+const ss = { show: null, season: null, option: null, episodes: [] };
+$("sshowform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const q = $("sshowq").value.trim(); if (!q) return;
+  $("sshowbtn").disabled = true;
+  try {
+    const shows = await api("/api/season/shows", { query: q });
+    const box = $("sshows"); box.classList.remove("hidden");
+    box.replaceChildren(...(shows.length ? shows.map(s => {
+      const input = h("input", { type: "radio", name: "sshow", "aria-label": s.name });
+      const row = h("label", { class: "row" }, input, h("div", {},
+        h("div", { class: "title" }, s.name),
+        h("div", { class: "meta" }, h("span", {}, s.premiered ? s.premiered.slice(0, 4) : "year unknown"),
+          s.network ? h("span", {}, s.network) : null, s.imdb ? h("span", {}, "IMDb " + s.imdb) : null)));
+      input.addEventListener("change", () => pickShow(s, row));
+      return row;
+    }) : [h("div", { class: "empty" }, "No show found on TVmaze.")]));
+  } catch (err) { toast(err.message); }
+  finally { $("sshowbtn").disabled = false; }
+});
+async function pickShow(s, row) {
+  ss.show = s;
+  $("sshows").querySelectorAll(".row").forEach(r => r.classList.toggle("on", r === row));
+  const seasons = await api("/api/season/seasons", { show_id: s.id });
+  $("sseason").replaceChildren(...seasons.map(x => h("option", { value: x.number },
+    `Season ${x.number}` + (x.episodes ? ` (${x.episodes} episodes)` : "") + (x.premiere ? `, ${x.premiere.slice(0, 4)}` : ""))));
+  $("sseasonbox").classList.remove("hidden");
+}
+$("soptbtn").addEventListener("click", async () => {
+  if (!ss.show) return;
+  ss.season = Number($("sseason").value);
+  const btn = $("soptbtn"); btn.disabled = true; btn.textContent = "Searching…";
+  try {
+    const r = await api("/api/season/options", { show_id: ss.show.id, season: ss.season });
+    ss.episodes = r.episodes; ss.option = null; $("sgrab").disabled = true;
+    $("slinks").replaceChildren(...Object.entries(r.links).map(([k, u]) => h("a", { href: u, target: "_blank", rel: "noopener", style: "margin-right:10px" }, k)));
+    $("sopttitle").textContent = `${r.show.name} season ${ss.season} on Usenet`;
+    $("soptsub").textContent = `TVmaze lists ${r.episodes.length} episodes. Pick a release group and resolution.`;
+    $("sopts").replaceChildren(...(r.options.length ? r.options.map(o => {
+      const input = h("input", { type: "radio", name: "sopt", "aria-label": o.name });
+      const got = o.episodes_found.length, all = r.episodes.length;
+      const row = h("label", { class: "row opt" }, input, h("div", {},
+        h("div", { class: "title" }, o.name || `${o.group} ${o.res || ""}`),
+        h("div", { class: "meta" }, h("span", {}, o.group + (o.res ? " · " + o.res : "")),
+          h("span", { class: "cov " + (o.complete ? "full" : "part") },
+            o.season_nzbs ? `${o.season_nzbs} season NZB${o.season_nzbs > 1 ? "s" : ""}` + (got ? ` + ${got}/${all} episodes` : "")
+                          : `${got}/${all} episodes`),
+          o.size ? h("span", {}, size(o.size)) : null),
+        h("div", { class: "eplist" }, r.episodes.map(e => h("span", { class: "ep" + (o.season_nzbs || o.episodes_found.includes(e.number) ? "" : " no") }, "E" + String(e.number).padStart(2, "0"))))));
+      input.addEventListener("change", () => { ss.option = o; $("sgrab").disabled = false;
+        $("sopts").querySelectorAll(".row").forEach(x => x.classList.toggle("on", x === row)); });
+      return row;
+    }) : [h("div", { class: "empty" }, "No NZBs for this season on your indexers.")]));
+    $("spacking").value = settings?.settings?.behaviour?.season_packing || "scene";
+    $("soptpanel").classList.remove("hidden");
+  } catch (err) { toast("Search failed: " + err.message); }
+  finally { btn.disabled = false; btn.textContent = "Find releases"; }
+});
+$("sgrab").addEventListener("click", async () => {
+  if (!ss.option) return;
+  try {
+    const r = await api("/api/season/grab", { show_id: ss.show.id, season: ss.season, key: ss.option.key,
+      packing: $("spacking").value, label: ss.option.name || `${ss.show.name} S${ss.season}` });
+    openJob(r.id);
+  } catch (err) { toast("Could not start the grab: " + err.message); }
+});
+async function loadReports() {
+  try {
+    const list = await api("/api/season/reports");
+    $("sreports").replaceChildren(...(list.length ? list.map(r => h("button", { onclick: () => showReport(r.name) },
+      h("div", { class: "t" }, r.name),
+      h("div", { class: "s" }, `${r.episodes}/${r.total} episodes · ` + (r.created ? new Date(r.created * 1000).toLocaleDateString() : ""))))
+      : [h("div", { class: "empty" }, "Nothing grabbed yet.")]));
+  } catch { /* the list is a convenience */ }
+}
+async function showReport(name) {
+  const box = $("sreport");
+  const r = await api("/api/season/report?name=" + encodeURIComponent(name));
+  const file = (p) => `/api/season/file?name=${encodeURIComponent(name)}&path=${encodeURIComponent(p)}`;
+  const state = (s) => h("td", { class: s.startsWith("missing") ? "flag" : "good" }, s);
+  box.replaceChildren(
+    h("h2", {}, r.name),
+    h("p", { class: "links" }, `${r.show.name} season ${r.season} · ${r.group} ${r.res || ""} · ${r.packing || ""} · `,
+      ...Object.entries(r.links).map(([k, u]) => h("a", { href: u, target: "_blank", rel: "noopener" }, k)),
+      h("a", { href: file("report.html"), target: "_blank" }, "report.html")),
+    h("h3", {}, "Episodes (TVmaze)"),
+    h("table", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Title"), h("th", {}, "Aired"), h("th", {}, ""), h("th", {}, "File")),
+      ...r.episodes.map(e => h("tr", {}, h("td", {}, "E" + String(e.number).padStart(2, "0")), h("td", {}, e.name),
+        h("td", {}, e.airdate), h("td", { class: e.present ? "good" : "flag" }, e.present ? "present" : "MISSING"), h("td", {}, e.file || "")))),
+    (r.notes || []).length ? h("h3", {}, "Notes") : null,
+    (r.notes || []).length ? h("ul", {}, ...r.notes.map(n => h("li", { class: "flag" }, n))) : null,
+    ...r.releases.flatMap(c => [
+      h("h3", {}, c.release),
+      h("p", {}, (c.predb && c.predb.pretime ? `predb.net: pre ${new Date(c.predb.pretime * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC, ${c.predb.section}` + (c.predb.nuked ? ` · NUKED: ${c.predb.reason}` : "") : "predb.net: not found")
+        + [["predb.me", c.predb_me], ["xrel.to", c.xrel]].map(([l, x]) => ` · ${l}: ` + (!x ? "not checked" : !x.available ? x.why : x.found ? "found" + (x.nuked ? " · NUKED" + (x.reason ? `: ${x.reason}` : "") : "") : "not found")).join(""),
+        c.srrdb ? h("a", { href: c.srrdb, target: "_blank", rel: "noopener", style: "margin-left:10px" }, "srrDB") : null),
+      c.rars ? h("p", { class: /^(left|could)/.test(c.rars) ? "flag" : "good" }, "RARs: " + c.rars) : null,
+      ...c.video.map(v => h("p", { class: v.genuine === false ? "flag" : v.genuine ? "good" : "" }, `${v.name}: ${v.why}`)),
+      h("table", {}, h("tr", {}, h("th", {}, "File of the original release"), h("th", {}, "Size"), h("th", {}, "State")),
+        ...c.files.map(f => h("tr", {}, h("td", {}, f.name), h("td", {}, f.size ? size(f.size) : ""), state(f.state)))),
+      c.nfo ? h("details", {}, h("summary", {}, c.nfo.name), h("pre", { class: "nfo" }, c.nfo.text)) : null,
+    ]),
+    r.mediainfo ? h("h3", {}, `MediaInfo (${r.mediainfo_of || ""})`) : null,
+    r.mediainfo ? h("pre", {}, r.mediainfo) : null,
+    (r.screenshots || []).length ? h("h3", {}, "Screenshots") : null,
+    h("div", { class: "shots" }, ...(r.screenshots || []).map(s => h("a", { href: file(s), target: "_blank" }, h("img", { src: file(s), alt: s, loading: "lazy" })))));
+  box.classList.remove("hidden");
+  box.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 /* ================= assemble */
 $("asmform").addEventListener("submit", async (e) => {

@@ -30,6 +30,10 @@ def rel(title, size, guid=None, grabs=0, indexer="idx"):
     ("Show.2016.S03E02.720p.iP.WEBRip.AAC2.0.H264-GRPC-xpost", "grpc"),
     ("Spider-Man.No.Way.Home.2021.1080p.BluRay.x264-GRP", "grp"),
     ("no group here", None),
+    ("Show.2016.S03E03.720p.iP.WEB-DL.AAC2.0.H.264-GRPC", "grpc"),          # WEB-DL is not a group
+    ("Show S03 - Heat B", None),                                            # a description
+    ("Show.S03.First.World.Championship.WEB-DL", None),
+    ("Movie.2021.1080p.Blu-ray.Remux.AVC.DTS-HD.MA.5.1-GRP", "grp"),
 ])
 def test_group_of(name, group):
     assert group_of(name) == group

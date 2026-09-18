@@ -174,3 +174,10 @@ nzb2seed is free software: you can redistribute it and/or modify it under the
 terms of the GNU General Public License as published by the Free Software
 Foundation, version 3 or (at your option) any later version. See
 [LICENSE](LICENSE).
+
+## Third-party code
+
+nzb2seed ships [pyReScene](https://github.com/srrDB/pyrescene) (MIT licence) in
+`nzb2seed/_vendor/rescene`, used to rebuild original scene RAR volumes from srrDB's `.srr`
+files. Its licence is in `nzb2seed/_vendor/PYRESCENE-COPYING`; the exact source commit is
+in `nzb2seed/_vendor/README.md`.
