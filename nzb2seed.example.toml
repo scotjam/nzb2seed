@@ -55,5 +55,7 @@ password = "nzb2seed"
 post_processing = "auto"
 cleanup = true               # delete .nzb/.par2/.sfv/etc. that are not part of the torrent
 local_verify = false         # hash every piece locally before qBittorrent (reads all data twice)
+season_packing = "scene"     # season grabs: "scene" = keep / rebuild (from srrDB's .srr) the scene
+                             # RARs of RAR'd releases; "unpack" = leave everything unpacked
 retry_bad_pieces = true      # if pieces fail, download other posts of the release until they verify
                              # (switches local hashing on; the build screen can turn it off per build)

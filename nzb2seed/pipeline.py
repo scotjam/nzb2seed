@@ -323,15 +323,32 @@ _RES = re.compile(r"(?<![a-z0-9])(?:480|576|720|1080|2160)p(?![a-z0-9])")
 MAX_INCOMPLETE = 3   # completed posts that turned out to lack files, before asking
 
 
+# dash-joined tags that are not release groups ('WEB-DL', 'Blu-ray', 'DTS-HD MA'...)
+_NOT_GROUP = {"dl", "rip", "ray", "hd", "ma", "es", "x", "hr", "lq", "dvd", "tv", "tc", "ts"}
+
+
 def group_of(name: str) -> str | None:
-    """Release group: the first dash-token after the episode/resolution part.
-    'Show.S03E02.720p.HDTV.x264-GRP-xpost' -> 'grp', '...-grp.mkv' -> 'grp'."""
-    n = matching.norm(name)
-    anchor = max((m.end() for m in (_RES.search(n), _EP.search(n)) if m), default=0)
-    i = n.find("-", anchor)
-    if i < 0:
-        return None
-    return re.split(r"[-.\s\[\]()]", n[i + 1:])[0] or None
+    """Release group: the first real dash-token after the episode/resolution part, where a
+    scene dash has no spaces around it and tech tags like WEB-DL are skipped.
+    'Show.S03E02.720p.WEB-DL.AAC2.0.H.264-GRP-xpost' -> 'grp', '...-grp.mkv' -> 'grp',
+    'Show S03 - Heat B' -> None."""
+    s = name.strip()
+    low = s.lower()
+    m_res, m_ep = _RES.search(matching.norm(s)), _EP.search(matching.norm(s))
+    # find the anchor in the raw name (norm only swaps separators, so positions line up)
+    anchor = 0
+    for m in (m_res, m_ep):
+        if m:
+            k = low.replace(" ", ".").replace("_", ".").find(m.group(0))
+            anchor = max(anchor, k + len(m.group(0)) if k >= 0 else 0)
+    for dm in re.finditer(r"-", s[anchor:]):
+        i = anchor + dm.start()
+        if i == 0 or s[i - 1].isspace() or i + 1 >= len(s) or s[i + 1].isspace():
+            continue                                     # ' - Heat B': a description, not a group
+        tok = re.split(r"[-.\s\[\]()]", s[i + 1:].lower())[0]
+        if tok and tok not in _NOT_GROUP:
+            return tok
+    return None
 
 
 @dataclass

@@ -53,6 +53,25 @@ def parse(data: bytes) -> list[NzbFile]:
     return out
 
 
+def trim(data: bytes, wanted: str) -> bytes | None:
+    """The NZB with only the posted files whose subject mentions ``wanted`` (a file name),
+    so SABnzbd downloads just that file. None when the NZB does not list it."""
+    root = ET.fromstring(data)
+    ns = root.tag[:root.tag.index("}") + 1] if root.tag.startswith("{") else ""
+    if ns:
+        ET.register_namespace("", ns[1:-1])
+    keep = 0
+    for f in list(root):
+        if f.tag == f"{ns}file":
+            if wanted.lower() in f.get("subject", "").lower():
+                keep += 1
+            else:
+                root.remove(f)
+    if not keep:
+        return None
+    return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="utf-8")
+
+
 def score(files: list[NzbFile], torrent: Torrent, part: list | None = None) -> Score:
     """How likely this post holds ``part`` of the torrent (default: all of it)."""
     part = part if part is not None else torrent.real_files

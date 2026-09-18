@@ -42,6 +42,8 @@ class Config:
     cleanup: bool = True
     local_verify: bool = False
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
+    flaresolverr_url: str = ""        # e.g. http://nas:8191 - only used when a site answers with a Cloudflare challenge
+    season_packing: str = "scene"     # "scene" = keep scene RARs (rebuild them from srrDB) | "unpack"
     gui_username: str = DEFAULT_GUI_USER
     gui_password: str = DEFAULT_GUI_PASSWORD   # empty = no login, LAN-only
 
@@ -71,6 +73,8 @@ LAYOUT = [
     ("behaviour", "cleanup", "cleanup"),
     ("behaviour", "local_verify", "local_verify"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
+    ("behaviour", "season_packing", "season_packing"),
+    ("flaresolverr", "url", "flaresolverr_url"),
     ("gui", "username", "gui_username"),
     ("gui", "password", "gui_password"),
 ]
