@@ -18,8 +18,9 @@ import sys
 from . import matching
 from .clients import ApiError, Prowlarr, Release
 from .config import Config, load
-from .pipeline import (Abort, Options, execute_assemble, execute_run, gb, group_selection, pair,
-                       search)
+from .pipeline import (Abort, Options, execute_assemble, execute_run, gb, group_selection,
+                       local_release, pair, preview_plan, search)
+from .torrent import parse
 from .report import Cancelled, info, step
 
 
@@ -61,6 +62,16 @@ def pick_numbers(prompt: str, n: int, allow_many: bool) -> list[int]:
         print(f"    choose between 1 and {n}")
 
 
+def choose_for_file(cfg: Config, args, t, path) -> tuple[Release, list[list[Release]]]:
+    """Pair a .torrent file the user already has with NZBs found through Prowlarr."""
+    torrent = local_release(t, path)
+    query = args.query or t.name
+    step(f"Searching Prowlarr for NZBs of: {query}")
+    _, nzbs = search(cfg, query)
+    info(f"{len(nzbs)} usenet result(s)")
+    return finish_choice(cfg, args, torrent, nzbs)
+
+
 def choose(cfg: Config, args) -> tuple[Release, list[list[Release]]]:
     step(f"Searching Prowlarr for: {args.query}")
     torrents, nzbs = search(cfg, args.query)
@@ -86,6 +97,10 @@ def choose(cfg: Config, args) -> tuple[Release, list[list[Release]]]:
         if not idx:
             raise Abort("nothing chosen")
         torrent = torrents[idx[0]]
+    return finish_choice(cfg, args, torrent, nzbs)
+
+
+def finish_choice(cfg: Config, args, torrent: Release, nzbs: list[Release]):
     groups, nzbs, how = pair(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), torrent, nzbs)
     info(f"usenet: {how}")
 
@@ -107,14 +122,16 @@ def choose(cfg: Config, args) -> tuple[Release, list[list[Release]]]:
                 raise Abort("nothing chosen")
             groups = group_selection([nzbs[i] for i in idx])
     if not groups:
-        raise Abort("no usenet release found for this torrent")
+        info("nothing picked: nzb2seed will find the NZBs itself, closest match first "
+             "(whole torrent, then season, then episode)")
     return torrent, groups
 
 
 def options(args) -> Options:
     return Options(pp=getattr(args, "pp", None), output_dir=args.output_dir,
                    no_cleanup=args.no_cleanup, local_verify=args.local_verify,
-                   no_qbit=args.no_qbit, start=args.start, dry_run=args.dry_run)
+                   no_qbit=args.no_qbit, start=args.start, dry_run=args.dry_run,
+                   retry_bad=False if getattr(args, "no_retry", False) else None)
 
 
 def cmd_search(cfg: Config, args) -> int:
@@ -127,11 +144,22 @@ def cmd_search(cfg: Config, args) -> int:
 
 
 def cmd_run(cfg: Config, args) -> int:
-    tor_rel, groups = choose(cfg, args)
+    data = None
+    if getattr(args, "torrent", None):
+        with open(args.torrent, "rb") as fh:
+            data = fh.read()
+        t = parse(data)
+        tor_rel, groups = choose_for_file(cfg, args, t, args.torrent)
+    else:
+        if not args.query:
+            raise Abort("give a search query, or --torrent FILE")
+        tor_rel, groups = choose(cfg, args)
     if args.dry_run:
+        if data is not None:
+            preview_plan(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), t, t.name)
         info("dry run: stopping before anything is downloaded")
         return 0
-    execute_run(cfg, options(args), tor_rel, groups)
+    execute_run(cfg, options(args), tor_rel, groups, torrent_data=data)
     return 0
 
 
@@ -170,9 +198,14 @@ def main(argv=None) -> int:
     common.add_argument("--no-qbit", action="store_true", help="stop after laying out the files")
     common.add_argument("--start", action="store_true", help="start seeding once the recheck hits 100%%")
     common.add_argument("--dry-run", action="store_true", help="show what would happen, change nothing")
+    common.add_argument("--no-retry", action="store_true",
+                        help="if pieces fail, stop instead of downloading other posts of the release")
 
     r = sub.add_parser("run", parents=[common], help="search, download and build a torrent from Usenet")
-    r.add_argument("query", help="release name (or search text) to look for in Prowlarr")
+    r.add_argument("query", nargs="?", help="release name (or search text) to look for in Prowlarr; "
+                   "with --torrent it defaults to the torrent's name")
+    r.add_argument("--torrent", help="build this .torrent file (skips the torrent search; "
+                   "NZBs are still found through Prowlarr)")
     r.add_argument("--indexer", help="only consider torrents from indexers whose name contains this")
     r.add_argument("--pp", choices=["auto", "repair", "unpack"],
                    help="SABnzbd post-processing: auto (+Repair when the torrent holds RARs, "
@@ -195,6 +228,8 @@ def main(argv=None) -> int:
         return serve(args.config, args.host, args.port, args.password, not args.no_browser,
                      args.allowed_host, args.username)
 
+    from . import report
+    report.interactive = not getattr(args, "yes", False) and sys.stdin.isatty()
     cfg = load(args.config)
     try:
         return {"search": cmd_search, "run": cmd_run, "assemble": cmd_assemble}[args.cmd](cfg, args)

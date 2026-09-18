@@ -46,3 +46,26 @@ def test_jobs_survive_restart(tmp_path):
     assert {j["id"]: j["status"] for j in saved}[running.id] == "interrupted"
     assert app2.start_job("Release.Three", "build", lambda cfg: None).id == running.id + 1
     gate.set()
+
+
+def test_a_build_can_wait_for_the_person(tmp_path):
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    got = []
+
+    def work(cfg):
+        got.append(report.ask("pick one", [{"title": "A"}, {"title": "B"}]))
+        return {"result": "done"}
+    job = app.start_job("Pack", "build", work)
+    wait(lambda: job.status == "waiting" and job.question)
+    assert job.summary()["question"]["prompt"] == "pick one"
+    job.answer(1)
+    wait(lambda: job.status == "done")
+    assert got == [1] and job.question is None
+    # a GUI restart while waiting turns the question into "interrupted"
+    job2 = app.start_job("Pack 2", "build", lambda cfg: report.ask("again?", [{"title": "A"}]))
+    wait(lambda: job2.status == "waiting")
+    app.store.flush()
+    assert gui.App(str(cfgfile)).jobs[job2.id].status == "interrupted"
+    job2.answer(None)

@@ -41,6 +41,7 @@ class Config:
     post_processing: str = "auto"
     cleanup: bool = True
     local_verify: bool = False
+    retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
     gui_username: str = DEFAULT_GUI_USER
     gui_password: str = DEFAULT_GUI_PASSWORD   # empty = no login, LAN-only
 
@@ -69,6 +70,7 @@ LAYOUT = [
     ("behaviour", "post_processing", "post_processing"),
     ("behaviour", "cleanup", "cleanup"),
     ("behaviour", "local_verify", "local_verify"),
+    ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("gui", "username", "gui_username"),
     ("gui", "password", "gui_password"),
 ]

@@ -5,3 +5,4 @@ torrents/
 jobs.json
 *.owned.json
 *.log
+sab_jobs.json

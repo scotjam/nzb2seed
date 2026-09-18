@@ -5,21 +5,26 @@ feed a GUI job log.
 """
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import os
 import re
 import shutil
+import subprocess
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from . import assemble as asm
-from . import matching, nzbinfo
+from . import archives, matching, nzbinfo
 from .clients import (PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
                       Prowlarr, QBittorrent, Release, SABnzbd)
 from .config import Config
+from .ledger import Ledger
 from .pathmap import map_path
+from .report import ask as report_ask
 from .report import check_cancel, end_progress, info, line, pieces, progress, step, warn
-from .torrent import Torrent, parse
+from .torrent import PieceVerifier, Torrent, parse
 
 STOPPED = {"pausedUP", "pausedDL", "stoppedUP", "stoppedDL", "error", "missingFiles"}
 
@@ -37,6 +42,7 @@ class Options:
     no_qbit: bool = False
     start: bool = False
     dry_run: bool = False
+    retry_bad: bool | None = None  # None = config default (behaviour.retry_bad_pieces)
 
 
 def gb(n: int) -> str:
@@ -64,17 +70,9 @@ def pair(cfg: Config, pr: Prowlarr, torrent: Release, nzbs: list[Release]
     if exact:
         return [exact], nzbs, f"exact name match on {len(exact)} indexer(s): " + \
             ", ".join(n.indexer for n in exact)
-    eps = matching.episode_matches(torrent, nzbs)
-    q = matching.episode_query(torrent.title)
-    if not eps and q:
-        info(f"no exact usenet match; searching for episodes: {q}")
-        more = [r for r in pr.search(q, cfg.indexer_ids, cfg.categories) if r.protocol == "usenet"]
-        known = {n.guid for n in nzbs}
-        nzbs = nzbs + [m for m in more if m.guid not in known]
-        eps = matching.episode_matches(torrent, nzbs)
-    if eps:
-        return [[e] for e in eps], nzbs, f"season pack from {len(eps)} episode NZB(s)"
-    return [], nzbs, "no usenet release matches the torrent name"
+    # Nothing is ticked otherwise: the build finds NZBs itself, closest match first
+    # (multi-season, then season, then episode) - ticking episodes here would skip that.
+    return [], nzbs, "automatic"
 
 
 def group_selection(nzbs: list[Release]) -> list[list[Release]]:
@@ -115,7 +113,6 @@ def sab_preflight(sab: SABnzbd, pp: int):
 
 
 MAX_PEEK = 8        # NZBs looked inside per build (each is a "grab" on most indexers)
-MAX_ATTEMPTS = 3    # different posts downloaded before giving up
 _RAR = re.compile(r"\.(rar|r\d{2,3}|\d{3})$", re.I)
 
 
@@ -166,14 +163,111 @@ def rank_posts(pr: Prowlarr, t: Torrent, group: list[Release]):
     return ranked + [(r, None, None) for r in uniq[MAX_PEEK:]]
 
 
+def ledger_for(cfg: Config) -> Ledger:
+    return Ledger(os.path.join(os.path.dirname(os.path.abspath(cfg.path)), "sab_jobs.json"))
+
+
+_current_torrent = ""   # infohash of the torrent being built, recorded with each SABnzbd job
+
+
 def sab_submit(cfg: Config, pr: Prowlarr, sab: SABnzbd, rel: Release, data: bytes | None, pp: int) -> str:
     nzb = data if data is not None else pr.fetch(rel)
     if b"<nzb" not in nzb[:4096].lower():
         raise ApiError(f"{rel.indexer} did not return an NZB for {rel.title}")
     nzo = sab.add_nzb(nzb, rel.title, cfg.sab_category, pp, cfg.sab_priority)
+    ledger_for(cfg).record(nzo, rel.title, rel.guid, rel.indexer, rel.size, _current_torrent)
     mode = sab.ensure_pp(nzo, pp)
     info(f"{nzo}  {mode:<16} {rel.title}  ({rel.indexer}, {gb(rel.size)})")
     return nzo
+
+
+PROBE_DIR = os.path.join(os.sep, "nonexistent-nzb2seed-probe")
+
+
+def supplies(t: Torrent, d: str, target: str | None, unpack: bool = True) -> bool:
+    """Does folder ``d`` hold ``target`` (a torrent file name), or - with target None - every
+    file of the torrent? Checked by matching; if files are missing but the folder holds RAR
+    archives that contain them, those files are unpacked into the folder first."""
+    res = asm.assemble(t, [d], PROBE_DIR, dry_run=True, log=lambda *_: None)
+    wanted = [f for f in res.missing if target is None or f.name == target]
+    ok = not res.missing if target is None else any(os.path.basename(rel) == target for rel in res.placed)
+    if ok or not unpack:
+        return ok
+    if unpack_from_archives(d, wanted):
+        return supplies(t, d, target, unpack=False)
+    return False
+
+
+def unpack_from_archives(d: str, wanted: list) -> bool:
+    """Extract the torrent files in ``wanted`` from RAR sets in download folder ``d``.
+    A file is recognised by its exact size (and, for small files, its name too - posters
+    often obfuscate the names of big ones). Returns True when anything was unpacked."""
+    sets = archives.rar_sets(d)
+    if not sets or not wanted:
+        return False
+    extracted = False
+    for first in sets:
+        name = os.path.basename(first)
+        try:
+            entries = archives.list_contents(first)
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            warn(f"cannot look inside {name}: {e}")
+            continue
+        members = []
+        for f in wanted:
+            for path, size in entries:
+                same_name = os.path.basename(path.replace("\\", "/")).casefold() == f.name.casefold()
+                if size == f.length and (same_name or f.length >= 1 << 20) and path not in members:
+                    members.append(path)
+                    break
+        if not members:
+            info(f"{name}: none of the needed files are inside ({len(entries)} file(s) in the archive)")
+            continue
+        info(f"{name} holds {len(members)} needed file(s): " + ", ".join(os.path.basename(m) for m in members[:3])
+             + " - unpacking into the download folder")
+        try:
+            archives.extract(first, members, os.path.join(d, archives.UNPACK_DIR))
+            extracted = True
+        except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+            warn(f"unpacking {name} failed: {e}")
+    return extracted
+
+
+def failed_before(cfg: Config, sab: SABnzbd, rel: Release) -> bool:
+    """Did an earlier nzb2seed download of this same NZB fail in SABnzbd? Then it would
+    fail again (the articles are gone), so it is skipped."""
+    for j in ledger_for(cfg).matches(rel.title, rel.guid, rel.size):
+        try:
+            if sab.status(j["nzo"])[0] in SAB_FAILED:
+                info(f"{rel.title} ({rel.indexer}): failed in SABnzbd before ({j['nzo']}) - skipping it")
+                return True
+        except ApiError:
+            pass
+    return False
+
+
+def reuse(cfg: Config, sab: SABnzbd, rel: Release, ok) -> tuple[str, str | None] | None:
+    """An earlier nzb2seed download of the same NZB that can be used instead of downloading
+    it again: (nzo, folder) when finished and ``ok(folder)``, (nzo, None) while it is still
+    downloading. None when there is nothing to reuse."""
+    for j in ledger_for(cfg).matches(rel.title, rel.guid, rel.size):
+        try:
+            status, slot = sab.status(j["nzo"])
+        except ApiError:
+            continue
+        if status.startswith("Queued:") or status not in SAB_DONE | SAB_FAILED | {"Unknown"}:
+            info(f"{rel.title}: already downloading as {j['nzo']} - waiting for that instead")
+            return j["nzo"], None
+        if status not in SAB_DONE:
+            continue
+        try:
+            d = job_dir(cfg, slot, j["title"])
+        except Abort:
+            continue                      # its files have been moved away since
+        if ok(d):
+            info(f"{rel.title}: reusing the finished download {j['nzo']} in {d}")
+            return j["nzo"], d
+    return None
 
 
 def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
@@ -224,40 +318,521 @@ def missing_from(t: Torrent, d: str, output_dir: str) -> list:
     return asm.assemble(t, [d], output_dir, dry_run=True, log=lambda *_: None).missing
 
 
-def usenet_single(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: Torrent,
-                  group: list[Release], pp: int, rejected: list | None = None
-                  ) -> tuple[list[str], list[str]]:
-    """One release (possibly posted several times): try the best posts in turn until one
-    holds every file of the torrent. Folders of posts that fell short go into ``rejected``."""
-    step("Choosing the Usenet post")
-    ranked = rank_posts(pr, t, group)
-    if not ranked:
-        raise Abort(f"no NZB is at least as large as the torrent ({gb(t.total_size)})")
-    attempts = min(MAX_ATTEMPTS, len(ranked))
-    tried = 0
-    for rel, data, _ in ranked[:attempts]:
-        tried += 1
-        step(f"Downloading from Usenet (post {tried} of up to {attempts})")
+_EP = re.compile(r"(?<![a-z0-9])s\d{1,4}e\d{1,4}(?:-?e\d{1,4})*(?![0-9])")
+_RES = re.compile(r"(?<![a-z0-9])(?:480|576|720|1080|2160)p(?![a-z0-9])")
+MAX_INCOMPLETE = 3   # completed posts that turned out to lack files, before asking
+
+
+def group_of(name: str) -> str | None:
+    """Release group: the first dash-token after the episode/resolution part.
+    'Show.S03E02.720p.HDTV.x264-GRP-xpost' -> 'grp', '...-grp.mkv' -> 'grp'."""
+    n = matching.norm(name)
+    anchor = max((m.end() for m in (_RES.search(n), _EP.search(n)) if m), default=0)
+    i = n.find("-", anchor)
+    if i < 0:
+        return None
+    return re.split(r"[-.\s\[\]()]", n[i + 1:])[0] or None
+
+
+@dataclass
+class Need:
+    """What one Usenet download has to supply."""
+    label: str                      # e.g. "S03E02" or the torrent name
+    query: str                      # Prowlarr search text for alternatives
+    group: str | None               # release group the alternative must come from
+    res: str | None                 # resolution, if the name has one
+    ep: str | None                  # episode token, e.g. "s03e02"
+    min_size: int                   # an NZB smaller than this cannot hold the file(s)
+    target: str                     # the torrent file (or torrent) it must supply
+    results: list | None = None     # every Usenet result seen for this need
+    level: str = "episode"          # "whole" | "season" | "episode": what kind of NZB fits
+    season: int | None = None
+    show: str = ""                  # normalised title prefix every fitting NZB starts with
+    seasons: list = dataclasses.field(default_factory=list)   # for a multi-season whole
+
+
+def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
+    """``whole_torrent``: one post must supply every file (single release); otherwise the
+    post supplies the torrent file for ``title``'s episode (season pack from episodes)."""
+    n = matching.norm(title)
+    ep = _EP.search(n)
+    ep_tok = ep.group(0) if ep else None
+    target_file = None
+    if ep_tok and not whole_torrent:
+        files = [f for f in t.real_files if re.search(rf"(?<![a-z0-9]){ep_tok}(?![0-9])", matching.norm(f.name))]
+        target_file = max(files, key=lambda f: f.length) if files else None
+    if whole_torrent or target_file is None:
+        main = max(t.real_files, key=lambda f: f.length)
+        min_size, target = t.total_size, t.name
+        group = group_of(main.name) or group_of(t.name) or group_of(title)
+    else:
+        min_size, target = target_file.length, target_file.name
+        group = group_of(target_file.name) or group_of(title)
+    res = _RES.search(n)
+    if ep:
+        query = n[:ep.end()]
+    else:
+        query = n[:n.find("-", res.end() if res else 0)] if "-" in n else n
+    return Need(label=ep_tok.upper() if ep_tok else t.name, query=query.replace(".", " ").strip(),
+                group=group, res=res.group(0) if res else None, ep=ep_tok,
+                min_size=min_size, target=target)
+
+
+def _fits(need: Need, r: Release) -> str | None:
+    """Why ``r`` cannot be the alternative (None = it can)."""
+    n = matching.norm(r.title)
+    if need.show and not n.startswith(need.show):
+        return "other title"
+    if need.ep and not re.search(rf"(?<![a-z0-9]){need.ep}(?![0-9])", n):
+        return "other episode"
+    if not need.ep and _EP.search(n):
+        return "single episode"
+    if need.level == "season" and need.season is not None and \
+            not re.search(rf"(?<![a-z0-9])s0*{need.season}(?![0-9e])", n):
+        return "other season"
+    if need.level == "whole" and len(need.seasons) > 1:
+        tokens = set(re.findall(r"(?<![a-z0-9])s(\d{1,4})(?![0-9e])", n))
+        if len(tokens) == 1 and not re.search(r"s\d{1,4}\.?-\.?s?\d{1,4}", n):
+            return "single season"
+    if need.res and need.res not in _RES.findall(n):
+        return "other resolution"
+    if need.group and group_of(r.title) != need.group:
+        return "other release group"
+    if r.size < need.min_size:
+        return "smaller than the torrent's file - cannot hold it"
+    return None
+
+
+def usenet_results(cfg: Config, pr: Prowlarr, need: Need, known: list[Release]) -> list[Release]:
+    """All Usenet results for the need's search, plus the ones already known; cached."""
+    if need.results is None:
+        found = [r for r in pr.search(need.query, cfg.indexer_ids, cfg.categories) if r.protocol == "usenet"]
+        seen, out = set(), []
+        for r in list(known) + found:
+            if r.guid not in seen:
+                seen.add(r.guid)
+                out.append(r)
+        need.results = out
+    return need.results
+
+
+def find_alternatives(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
+                      known: list[Release] = ()) -> list[Release]:
+    """Other posts of the same release (same group, episode and resolution) that are at
+    least as large as the file they must supply. Posts with a size already tried are
+    skipped: the same post on another indexer fails the same way."""
+    tried_guids = {r.guid for r in tried}
+    tried_sizes = {r.size for r in tried}
+    step(f"Looking for another {need.group.upper() if need.group else 'matching'} post of {need.label}"
+         f" (at least {gb(need.min_size)})")
+    out, sizes = [], set()
+    for r in sorted(usenet_results(cfg, pr, need, known), key=lambda r: -(r.grabs or 0)):
+        if r.guid in tried_guids or r.size in tried_sizes or r.size in sizes or _fits(need, r):
+            continue
+        sizes.add(r.size)
+        out.append(r)
+    for r in out:
+        info(f"candidate: {r.title}  ({r.indexer}, {gb(r.size)}, {r.grabs} grabs)")
+    if not out:
+        warn(f"no other {need.group.upper() if need.group else ''} post of {need.label} is large enough")
+    return out
+
+
+def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
+                 known: list[Release] = ()) -> Release | None:
+    """Nothing fits automatically: show the search results from the same release group as
+    the torrent's file (other groups can never match it byte for byte) and let the person
+    pick. Nothing from that group left: stop."""
+    tried_guids = {r.guid for r in tried}
+    results = [r for r in usenet_results(cfg, pr, need, known)
+               if r.guid not in tried_guids and (not need.group or group_of(r.title) == need.group)]
+    if not results:
+        warn(f"no other {need.group.upper() + ' ' if need.group else ''}posts of {need.label} to choose from")
+        return None
+    results.sort(key=lambda r: (r.size < need.min_size, -(r.grabs or 0)))
+    choices = [{"title": r.title, "indexer": r.indexer, "size": r.size, "size_text": gb(r.size),
+                "grabs": r.grabs, "note": _fits(need, r) or ""} for r in results]
+    prompt = (f"No automatic replacement for {need.label}. Pick the {need.group.upper() + ' ' if need.group else ''}"
+              f"NZB to download instead - it has to hold {need.target} ({gb(need.min_size)}).")
+    idx = report_ask(prompt, choices)
+    if idx is None:
+        return None
+    info(f"you picked: {results[idx].title} ({results[idx].indexer})")
+    return results[idx]
+
+
+def used_before(cfg: Config, need: "Need") -> list[Release]:
+    """Posts nzb2seed downloaded earlier for this need (same episode and release group, or the
+    same release for a whole torrent), as Releases, so a repair does not fetch them again."""
+    out = []
+    for j in Ledger(ledger_for(cfg).path)._load():
+        title = j.get("title", "")
+        n = matching.norm(title)
+        if need.ep and not re.search(rf"(?<![a-z0-9]){need.ep}(?![0-9])", n):
+            continue
+        if need.group and group_of(title) != need.group:
+            continue
+        out.append(Release(title, "usenet", j.get("indexer", ""), 0, j.get("size") or 0,
+                           j.get("guid") or j.get("nzo", ""), "", "", "", 0, None, None))
+    return out
+
+
+def placed_before(cfg: Config, opts: "Options", t: Torrent) -> set[str]:
+    """Torrent files an earlier run of nzb2seed already put in place (right size, ours)."""
+    out_dir = opts.output_dir or cfg.output_dir
+    if not out_dir:
+        return set()
+    owned = owned_record(cfg, t)
+    done = set()
+    for f in t.real_files:
+        p = asm.target_path(out_dir, f)
+        if owned.owns(p) and os.path.isfile(p) and os.path.getsize(p) == f.length:
+            done.add(f.relpath)
+    return done
+
+
+class Unit:
+    """A part of the torrent that one NZB could supply: the whole torrent, one season of a
+    multi-season torrent, or one episode. Units form a tree (whole -> seasons -> episodes);
+    a unit is only split into its children when no NZB of its own kind works out."""
+
+    def __init__(self, t: Torrent, title: str, level: str, files: list, show: str,
+                 season: int | None = None, ep: str | None = None, seasons: list | None = None):
+        self.level = level                      # "whole" | "season" | "episode"
+        self.files = files
+        self.children: list[Unit] = []
+        self.queue: list[Release] = []
+        self.seeded: list[Release] = []         # NZBs the person picked for exactly this unit
+        self.tried: list[Release] = []
+        self.searched = False
+        self.done = False
+        videos = [f for f in files if f.length >= 1 << 20] or files
+        groups = {g for g in (group_of(f.name) for f in videos) if g}
+        self.mixed = len(groups) > 1            # e.g. a pack with one episode from another group
+        group = groups.pop() if len(groups) == 1 else (None if self.mixed else group_of(title))
+        n = matching.norm(title)
+        res = _RES.search(n) or next((m for m in (_RES.search(matching.norm(f.name)) for f in videos) if m), None)
+        main = max(files, key=lambda f: f.length)
+        if level == "episode":
+            label, query = ep.upper(), f"{show} {ep}"
+        elif level == "season":
+            label, query = f"S{season:02d}", f"{show} s{season:02d}"
+        else:
+            label, query = t.name, n
+        self.need = Need(label=label, query=query.replace(".", " ").strip(), group=group,
+                         res=res.group(0) if res else None, ep=ep, min_size=sum(f.length for f in files),
+                         target=main.name, level=level, season=season, show=show,
+                         seasons=seasons or [])
+
+    # the interface bad-piece repair and next_post() rely on
+    @property
+    def known(self) -> list[Release]:
+        return self.seeded
+
+    @property
+    def whole(self) -> bool:
+        return self.level == "whole"
+
+    def covers(self, f) -> bool:
+        return f.relpath in {x.relpath for x in self.files}
+
+    def walk(self):
+        yield self
+        for c in self.children:
+            yield from c.walk()
+
+    def satisfied_by(self, t: Torrent, d: str) -> bool:
+        """Does download folder ``d`` hold every file of this unit? RAR archives in it are
+        looked into (and the needed files unpacked) before answering no."""
+        want = {f.relpath for f in self.files}
+        found = set(asm.find_sources(t, [d])) & want
+        if found == want:
+            return True
+        missing = [f for f in self.files if f.relpath not in found]
+        if unpack_from_archives(d, missing):
+            return want <= set(asm.find_sources(t, [d]))
+        return False
+
+
+def _season_episode(t: Torrent, f) -> tuple[int | None, str | None]:
+    rel = "/".join(f.parts[1:]) if t.multi_file else f.name
+    m = _EP.search(matching.norm(f.name)) or _EP.search(matching.norm(rel))
+    if m:
+        return int(re.match(r"s(\d+)", m.group(0)).group(1)), m.group(0)
+    s = re.search(r"(?<![a-z0-9])(?:s|season\.?)(\d{1,4})(?![0-9e])", matching.norm(rel))
+    return (int(s.group(1)) if s else None), None
+
+
+def show_prefix(title: str) -> str:
+    """'Show.2016.S03E02.720p...' -> 'show.2016.'; for a movie, up to the resolution."""
+    n = matching.norm(title)
+    m = _EP.search(n) or re.search(r"(?<![a-z0-9])s\d{1,4}(?![0-9])", n) or _RES.search(n)
+    return n[:m.start()] if m else n.split("-")[0]
+
+
+def build_units(t: Torrent, title: str) -> Unit:
+    """The tree of units for a torrent: a movie or an episode is one unit; a season pack is a
+    season with episodes under it; a multi-season pack is the whole with seasons under it."""
+    show = show_prefix(title)
+    info_ = {f.relpath: _season_episode(t, f) for f in t.real_files}
+    seasons = sorted({s for s, _ in info_.values() if s is not None})
+    eps = sorted({e for _, e in info_.values() if e})
+
+    def episodes(files, season):
+        out = []
+        for e in sorted({info_[f.relpath][1] for f in files if info_[f.relpath][1]}):
+            out.append(Unit(t, title, "episode", [f for f in files if info_[f.relpath][1] == e], show, season, e))
+        return out
+
+    if len(seasons) > 1:
+        whole = Unit(t, title, "whole", list(t.real_files), show, seasons=seasons)
+        for s in seasons:
+            files = [f for f in t.real_files if info_[f.relpath][0] == s]
+            su = Unit(t, title, "season", files, show, s)
+            su.children = episodes(files, s)
+            whole.children.append(su)
+        return whole
+    if len(seasons) == 1 and len(eps) > 1:
+        whole = Unit(t, title, "season", list(t.real_files), show, seasons[0])
+        whole.children = episodes(list(t.real_files), seasons[0])
+        return whole
+    if len(eps) == 1:
+        return Unit(t, title, "episode", list(t.real_files), show, seasons[0], eps[0])
+    return Unit(t, title, "whole", list(t.real_files), show)
+
+
+def _rank(pr: Prowlarr, t: Torrent, unit: Unit, rels: list[Release]) -> list[Release]:
+    """Order candidates for a season/whole unit by looking inside their NZBs (enough bytes,
+    then how many of the unit's file names appear); episode candidates by popularity."""
+    rels = sorted(rels, key=lambda r: -(r.grabs or 0))
+    if unit.level == "episode" or len(rels) < 2:
+        return rels
+    scored, rest = [], []
+    for r in rels:
+        if len(scored) >= MAX_PEEK:
+            rest.append(r)
+            continue
         try:
-            nzo = sab_submit(cfg, pr, sab, rel, data, pp)
-        except ApiError as e:
-            warn(f"{rel.indexer}: {e}")
+            sc = nzbinfo.score(nzbinfo.parse(pr.fetch(r)), t, unit.files)
+        except (ApiError, ET.ParseError):
+            rest.append(r)
             continue
-        status, slot = sab_wait(sab, {nzo: rel.title})[nzo]
-        if status not in SAB_DONE:
+        info(f"{r.indexer[:16]:<16} {gb(r.size):>9}  {sc.summary}")
+        scored.append((sc.key, r.grabs or 0, r))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [r for _, _, r in scored] + rest
+
+
+def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: Torrent, title: str,
+                   picks: list[Release], pp: int, placed: set[str] = frozenset()):
+    """Get every file of the torrent from Usenet, trying the closest kind of NZB first.
+
+    Returns (download folders, SABnzbd job ids, all units, rejected folders). A unit is
+    tried with NZBs of its own kind - the person's picks for it first, then everything
+    Prowlarr finds from the same release group and resolution - and only split into its
+    children (seasons, then episodes) once all of those have been tried. Parts of a download that fell short are still used for
+    the children they cover."""
+    root = build_units(t, title)
+    units = list(root.walk())
+
+    # the person's picks go to the unit whose kind they are
+    for p in picks:
+        target = next((u for u in sorted(units, key=lambda u: {"episode": 0, "season": 1, "whole": 2}[u.level])
+                       if _fits(dataclasses.replace(u.need, min_size=0, group=None), p) is None), root)
+        target.seeded.append(p)
+
+    dirs: list[str] = []
+    nzos: list[str] = []
+    partials: list[tuple[str, str]] = []        # (folder, title) of downloads that fell short
+    pending: dict[str, tuple[Unit, Release]] = {}
+    attempted: set[str] = set()                 # posts tried at any level of this build
+
+    def resolve(u: Unit, d: str | None, nzo: str | None):
+        u.done = True
+        for x in u.walk():
+            x.done = True
+        if d and d not in dirs:
+            dirs.append(d)
+        if nzo:
+            nzos.append(nzo)
+
+    def seeded_below(u: Unit) -> bool:
+        return any(c.seeded for c in u.walk() if c is not u)
+
+    def next_candidate(u: Unit) -> Release | None:
+        if not u.searched:
+            u.searched = True
+            kind = {"whole": "whole-torrent", "season": "season", "episode": "episode"}[u.level]
+            info(f"{u.need.label}: looking for {kind} NZBs"
+                 + (f" from {u.need.group.upper()}" if u.need.group else "")
+                 + (f", {u.need.res}" if u.need.res else "") + f", at least {gb(u.need.min_size)}")
+            found = [r for r in usenet_results(cfg, pr, u.need, u.seeded)
+                     if r not in u.seeded and _fits(u.need, r) is None]
+            small = [r for r in u.seeded if r.size < u.need.min_size]
+            for r in small:
+                info(f"{u.need.label}: skipping your pick {r.title} ({gb(r.size)}) - smaller than "
+                     f"the {gb(u.need.min_size)} it has to hold")
+            u.queue = [r for r in u.seeded if r not in small] + _rank(pr, t, u, found)
+            if not u.queue:
+                info(f"{u.need.label}: none found")
+        tried_guids = {r.guid for r in u.tried} | attempted
+        tried_sizes = {r.size for r in u.tried if r.size}
+        while u.queue:
+            r = u.queue.pop(0)
+            if r.guid not in tried_guids and r.size not in tried_sizes:
+                return r
+        return None
+
+    def split(u: Unit):
+        kinds = {c.level for c in u.children}
+        info(f"{u.need.label}: going to {'season' if 'season' in kinds else 'episode'} NZBs")
+        for c in u.children:
+            d = next((d for d, _ in partials if c.satisfied_by(t, d)), None)
+            if d:
+                info(f"{c.need.label}: already in an earlier download ({os.path.basename(d)})")
+                resolve(c, d, None)
+            else:
+                start(c)
+
+    def start(u: Unit):
+        if u.done:
+            return
+        mine = {f.relpath for f in u.files}
+        if mine <= placed:
+            info(f"{u.need.label}: already in place from an earlier run - not downloading it again")
+            u.tried = used_before(cfg, u.need)
+            resolve(u, None, None)
+            return
+        if u.children and not u.seeded and (mine & placed or seeded_below(u) or u.mixed):
+            split(u)
+            return
+        advance(u)
+
+    def advance(u: Unit):
+        # every post of this kind from the right group and resolution is tried before splitting
+        while True:
+            rel = next_candidate(u)
+            if rel is None:
+                if u.children:
+                    split(u)
+                    return
+                rel = ask_for_post(cfg, pr, u.need, u.tried, u.seeded)
+                if rel is None:
+                    raise Abort(f"no Usenet post could supply {u.need.label}")
+            u.tried.append(rel)
+            attempted.add(rel.guid)
+            if failed_before(cfg, sab, rel):
+                continue
+            again = reuse(cfg, sab, rel, lambda d: u.satisfied_by(t, d))
+            if again and again[1]:
+                resolve(u, again[1], again[0])
+                return
+            try:
+                nzo = again[0] if again else sab_submit(cfg, pr, sab, rel, None, pp)
+            except ApiError as e:
+                warn(f"{rel.indexer}: {e}")
+                continue
+            pending[nzo] = (u, rel)
+            return
+
+    step("Finding the NZBs, closest match first")
+    start(root)
+    while pending:
+        batch = dict(pending)
+        pending.clear()
+        results = sab_wait(sab, {nzo: rel.title for nzo, (_, rel) in batch.items()})
+        for nzo, (status, slot_info) in results.items():
+            u, rel = batch[nzo]
+            if status in SAB_DONE:
+                d = job_dir(cfg, slot_info, rel.title)
+                if u.satisfied_by(t, d):
+                    resolve(u, d, nzo)
+                    continue
+                warn(f"{rel.title} finished but does not hold all of {u.need.label}; "
+                     "what it does hold is used if needed")
+                partials.append((d, rel.title))
+            else:
+                warn(f"SABnzbd could not complete {rel.title}")
+            advance(u)
+    rejected = [(d, title_) for d, title_ in partials if d not in dirs]
+    return dirs, nzos, units, rejected
+
+
+def preview_plan(cfg: Config, pr: Prowlarr, t: Torrent, title: str) -> Unit:
+    """Show which NZBs each level would try, without downloading or opening any NZB."""
+    root = build_units(t, title)
+    step("Plan: closest match first")
+
+    def show(u: Unit, depth: int):
+        pad = "  " * depth
+        found = [r for r in usenet_results(cfg, pr, u.need, []) if _fits(u.need, r) is None]
+        what = {"whole": "whole torrent", "season": "season", "episode": "episode"}[u.level]
+        info(f"{pad}{u.need.label} ({what}, {len(u.files)} file(s), {gb(u.need.min_size)}"
+             + (f", {u.need.group.upper()}" if u.need.group else "") + (", mixed groups" if u.mixed else "")
+             + f"): {len(found)} NZB(s)")
+        for r in sorted(found, key=lambda r: -(r.grabs or 0))[:5]:
+            info(f"{pad}    {r.title}  ({r.indexer}, {gb(r.size)}, {r.grabs} grabs)")
+        for c in u.children:
+            show(c, depth + 1)
+    show(root, 0)
+    return root
+
+
+def earlier_dirs(cfg: Config, sab: SABnzbd, t: Torrent) -> list[str]:
+    """Folders of every finished download nzb2seed made for this torrent on any attempt:
+    once the torrent is complete, their leftovers are cleaned up with the rest."""
+    out = []
+    for j in ledger_for(cfg).all():
+        if j.get("torrent") != t.infohash:
             continue
-        d = job_dir(cfg, slot, rel.title)
-        info(f"{nzo}: {d}")
-        out = opts.output_dir or cfg.output_dir or os.path.dirname(os.path.abspath(d))
-        missing = missing_from(t, d, out)
-        if not missing:
-            return [d], [nzo]
-        warn(f"this post lacks {len(missing)} of the torrent's files: "
-             + ", ".join(f.name for f in missing[:4]) + ("..." if len(missing) > 4 else ""))
-        warn(f"left as downloaded in {d}")
-        if rejected is not None:
-            rejected.append((d, rel.title))
-    raise Abort(f"none of the {tried} post(s) tried contains every file of the torrent")
+        try:
+            status, slot = sab.status(j["nzo"])
+            if status in SAB_DONE:
+                d = job_dir(cfg, slot, j.get("title", ""))
+                if os.path.isdir(d) and d not in out:
+                    out.append(d)
+        except (ApiError, Abort):
+            pass
+    return out
+
+
+def usenet_single(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: Torrent,
+                  group: list[Release], pp: int, rejected: list | None = None,
+                  slots: list | None = None) -> tuple[list[str], list[str]]:
+    """Build from one release (e.g. a movie or an episode) - see plan_and_fetch."""
+    dirs, nzos, units, rej = plan_and_fetch(cfg, opts, pr, sab, t, t.name, list(group), pp)
+    if slots is not None:
+        slots.extend(units)
+    if rejected is not None:
+        rejected.extend(rej)
+    return dirs, nzos
+
+
+def usenet_multi(cfg: Config, pr: Prowlarr, sab: SABnzbd, t: Torrent, groups: list[list[Release]],
+                 pp: int, slots: list | None = None, placed: set[str] = frozenset()
+                 ) -> tuple[list[str], list[str]]:
+    """Build from several picked releases (e.g. episodes of a pack) - see plan_and_fetch."""
+    picks = [r for g in groups for r in g]
+    dirs, nzos, units, _ = plan_and_fetch(cfg, Options(), pr, sab, t, t.name, picks, pp, placed)
+    if slots is not None:
+        slots.extend(units)
+    return dirs, nzos
+
+
+def next_post(cfg: Config, pr: Prowlarr, slot) -> Release | None:
+    """The next post to try for a unit when repairing: queued ones, then other posts of the
+    same release group (searched once), then whatever the person picks."""
+    while True:
+        while slot.queue:
+            r = slot.queue.pop(0)
+            if r.guid not in {x.guid for x in slot.tried} and r.size not in {x.size for x in slot.tried if x.size}:
+                return r
+        if not slot.searched:
+            slot.searched = True
+            slot.queue = find_alternatives(cfg, pr, slot.need, slot.tried, slot.known)
+            if slot.queue:
+                continue
+        return ask_for_post(cfg, pr, slot.need, slot.tried, slot.known)
 
 
 def remove_rejected(rejected: list[tuple[str, str]]):
@@ -273,38 +848,222 @@ def remove_rejected(rejected: list[tuple[str, str]]):
             info(f"removed {d}")
 
 
-def usenet_multi(cfg: Config, pr: Prowlarr, sab: SABnzbd, groups: list[list[Release]],
-                 pp: int) -> tuple[list[str], list[str]]:
-    """Several releases (e.g. the episodes of a season pack), all needed."""
-    step(f"Downloading {len(groups)} NZBs from Usenet")
-    jobs = {}   # nzo -> [group, index]
-    for g in groups:
-        for i, rel in enumerate(g):
+# ---------------------------------------------------------------- earlier downloads for a torrent
+
+def saved_torrent(cfg: Config, title: str) -> Torrent | None:
+    """The .torrent an earlier build saved for this release, if there is one."""
+    want = matching.norm(title)
+    try:
+        names = os.listdir(cfg.torrent_dir)
+    except OSError:
+        return None
+    for n in names:
+        if n.endswith(".torrent") and matching.norm(n[:-8]) == want:
             try:
-                jobs[sab_submit(cfg, pr, sab, rel, None, pp)] = [g, i]
-                break
-            except ApiError as e:
-                warn(f"{rel.indexer}: {e}")
-        else:
-            raise Abort(f"could not queue any NZB for {g[0].title}")
-    dirs, done = [], []
-    pending = {nzo: g[i].title for nzo, (g, i) in jobs.items()}
-    while pending:
-        results = sab_wait(sab, pending)
-        pending = {}
-        for nzo, (status, slot) in results.items():
-            g, i = jobs[nzo]
-            if status in SAB_DONE:
-                dirs.append(job_dir(cfg, slot, g[i].title))
-                done.append(nzo)
+                with open(os.path.join(cfg.torrent_dir, n), "rb") as fh:
+                    return parse(fh.read())
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def previous_downloads(cfg: Config, sab: SABnzbd, title: str) -> list[dict]:
+    """NZBs nzb2seed downloaded on earlier attempts at this torrent, and what became of them.
+
+    Matched by the torrent they were downloaded for, or by show + episode and the release
+    group of the torrent's own file for that episode (from the saved .torrent), or - with no
+    saved .torrent - by show + episode/season."""
+    t = saved_torrent(cfg, title)
+    n = matching.norm(title)
+    m = _EP.search(n) or re.search(r"(?<![a-z0-9])s\d{1,4}(?![0-9e])", n)
+    show = n[:m.start()] if m else n.split("-")[0]
+    wanted: dict[str, str | None] = {}           # episode token -> release group (None = any)
+    if t:
+        for f in t.real_files:
+            e = _EP.search(matching.norm(f.name))
+            if e:
+                wanted[e.group(0)] = group_of(f.name)
+    out = []
+    for j in ledger_for(cfg).all():
+        jt = j.get("title", "")
+        jn = matching.norm(jt)
+        mine = t is not None and j.get("torrent") == t.infohash
+        if not mine:
+            if not jn.startswith(show) or not show:
                 continue
-            if i + 1 >= len(g):
-                raise Abort(f"SABnzbd could not complete {g[i].title}")
-            info(f"trying {g[i + 1].indexer} for {g[i + 1].title}")
-            new = sab_submit(cfg, pr, sab, g[i + 1], None, pp)
-            jobs[new] = [g, i + 1]
-            pending[new] = g[i + 1].title
-    return dirs, done
+            e = _EP.search(jn)
+            if wanted:
+                if not e or e.group(0) not in wanted:
+                    continue
+                g = wanted[e.group(0)]
+                if g and group_of(jt) != g:
+                    continue
+            elif m and m.group(0) not in jn:
+                continue
+        state, note = "unknown", ""
+        try:
+            status, slot = sab.status(j["nzo"])
+        except ApiError:
+            status, slot = "Unknown", {}
+        if status in SAB_FAILED:
+            state, note = "failed", "failed in SABnzbd - skipped automatically"
+        elif status.startswith("Queued:") or status not in SAB_DONE | {"Unknown"}:
+            state, note = "downloading", f"still downloading ({slot.get('percentage', '?')}%)"
+        elif status in SAB_DONE:
+            try:
+                d = job_dir(cfg, slot, jt)
+                has = any(os.path.getsize(os.path.join(r, x)) >= 1 << 20
+                          for r, _, xs in os.walk(d) for x in xs)
+            except (Abort, OSError):
+                has = False
+            state, note = ("finished", "finished - reused automatically if it holds what the torrent needs") \
+                if has else ("used", "finished - its files were moved into a torrent or removed")
+        else:
+            state, note = "gone", "no longer in SABnzbd"
+        out.append({"title": jt, "indexer": j.get("indexer", ""), "size": j.get("size") or 0,
+                    "nzo": j["nzo"], "state": state, "note": note,
+                    "submitted": j.get("submitted")})
+    return out
+
+
+# ---------------------------------------------------------------- fixing pieces that fail
+
+@dataclass
+class Retry:
+    """What bad-piece repair needs to fetch other posts."""
+    cfg: Config
+    pr: Prowlarr
+    sab: SABnzbd
+    pp: int
+    slots: list
+
+
+def inner_pieces(t: Torrent, f) -> range:
+    """Pieces lying entirely inside file ``f``."""
+    first = -(-f.offset // t.piece_length)
+    last = (f.offset + f.length) // t.piece_length - 1
+    return range(first, last + 1) if last >= first else range(0)
+
+
+def copy_verifies(t: Torrent, f, path: str, placed: dict) -> bool:
+    """Do all pieces inside ``f`` verify when ``f`` is read from ``path``?"""
+    rng = inner_pieces(t, f)
+    with PieceVerifier(t, lambda ff: path if ff.relpath == f.relpath else placed.get(ff.relpath)) as pv:
+        for n, i in enumerate(rng):
+            if n % 32 == 0:
+                check_cancel()
+                progress(f"checking {os.path.basename(path)}: {n}/{len(rng)} pieces")
+            if not pv.check(i):
+                end_progress()
+                return False
+    end_progress()
+    return True
+
+
+def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dirs: list[str]) -> bool:
+    """Replace the files that failing pieces point to with copies from other posts of the
+    same release until every piece verifies. Only files nzb2seed placed are replaced; a
+    copy is only swapped in when it makes the failing piece(s) pass. True = all fixed."""
+    file_slot = {}
+    for sl in rt.slots:
+        sl.searched = False               # allow a fresh search for alternatives
+    # the finest unit holding a file claims it: an episode NZB is the cheapest replacement
+    order = {"episode": 0, "season": 1, "whole": 2}
+    for sl in sorted(rt.slots, key=lambda x: order.get(x.level, 3)):
+        for f in t.real_files:
+            if sl.covers(f):
+                file_slot.setdefault(f.relpath, sl)
+    pool: dict[str, list] = {}            # relpath -> [(path, release)] copies whose insides verify
+    exhausted: set[str] = set()
+    by_rel = {f.relpath: f for f in t.real_files}
+
+    def piece_ok(i: int, choice: dict) -> bool:
+        with PieceVerifier(t, lambda ff: choice.get(ff.relpath, res.placed.get(ff.relpath))) as pv:
+            return pv.check(i)
+
+    def suspects(i: int) -> list:
+        start, end = t.piece_span(i)
+        fs = [f for f in t.real_files if f.offset < end and f.offset + f.length > start]
+        # a file starting inside the piece first (re-muxed headers), then the others
+        return sorted(fs, key=lambda f: (not (start <= f.offset < end), f.offset))
+
+    def swap(rel: str, path: str, used: Release):
+        dst = res.placed[rel]
+        os.remove(dst)
+        owned.forget_file(dst)
+        asm._move(path, dst, owned)
+        owned.save()
+        info(f"replaced {by_rel[rel].name} with the copy from {used.title} ({used.indexer})")
+
+    def fetch_copy(f) -> tuple[str, Release] | None:
+        slot = file_slot[f.relpath]
+        while True:
+            rel = next_post(rt.cfg, rt.pr, slot)
+            if rel is None:
+                return None
+            slot.tried.append(rel)
+            if failed_before(rt.cfg, rt.sab, rel):
+                continue
+            step(f"Trying another copy of {f.name}: {rel.title} ({rel.indexer})")
+            again = reuse(rt.cfg, rt.sab, rel, lambda d: supplies(t, d, f.name))
+            if again and again[1]:
+                d = again[1]
+            else:
+                try:
+                    nzo = again[0] if again else sab_submit(rt.cfg, rt.pr, rt.sab, rel, None, rt.pp)
+                except ApiError as e:
+                    warn(f"{rel.indexer}: {e}")
+                    continue
+                status, slot_info = sab_wait(rt.sab, {nzo: rel.title})[nzo]
+                if status not in SAB_DONE:
+                    continue
+                d = job_dir(rt.cfg, slot_info, rel.title)
+            if d not in job_dirs:
+                job_dirs.append(d)        # ours: cleaned up with the rest
+            src = asm.find_sources(t, [d]).get(f.relpath)
+            if src is None and supplies(t, d, f.name):
+                src = asm.find_sources(t, [d]).get(f.relpath)
+            if src is None:
+                warn(f"{rel.title} does not hold {f.name}")
+                continue
+            if not copy_verifies(t, f, src, res.placed):
+                warn(f"the copy of {f.name} in {rel.title} differs inside the file too")
+                continue
+            info(f"the copy of {f.name} in {rel.title} verifies inside the file")
+            return src, rel
+
+    pending = sorted(set(bad))
+    while pending:
+        check_cancel()
+        i = pending[0]
+        fs = suspects(i)
+        changeable = [f for f in fs if f.relpath in file_slot and owned.owns(res.placed[f.relpath])]
+        options = [[None] + pool.get(f.relpath, []) if f in changeable else [None] for f in fs]
+        found = None
+        for combo in itertools.product(*options):
+            choice = {f.relpath: c for f, c in zip(fs, combo) if c}
+            if choice and piece_ok(i, {r: c[0] for r, c in choice.items()}):
+                found = choice
+                break
+        if found:
+            for rel, (path, used) in found.items():
+                swap(rel, path, used)
+                pool[rel] = [c for c in pool.get(rel, []) if c[0] != path]
+            pending = [j for j in pending if not piece_ok(j, {})]
+            info(f"piece {i} verifies now; {len(pending)} failing piece(s) left")
+            continue
+        todo = [f for f in changeable if f.relpath not in exhausted]
+        if not todo:
+            names = ", ".join(f.name for f in fs)
+            warn(f"piece {i} still fails and there are no more copies of {names} to try")
+            return False
+        target = min(todo, key=lambda f: (len(pool.get(f.relpath, [])), changeable.index(f)))
+        got = fetch_copy(target)
+        if got is None:
+            exhausted.add(target.relpath)
+        else:
+            pool.setdefault(target.relpath, []).append(got)
+    return True
 
 
 # ---------------------------------------------------------------- torrent side
@@ -356,7 +1115,8 @@ def owned_record(cfg: Config, t: Torrent) -> asm.Owned:
 
 def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dirs: list[str],
            output_dir: str, qb: QBittorrent | None, existing: dict | None,
-           sources_are_ours: bool = True) -> dict:
+           sources_are_ours: bool = True, retry: Retry | None = None,
+           earlier_dirs: list[str] = ()) -> dict:
     """``sources_are_ours``: the source folders are SABnzbd jobs this build submitted, so
     their leftovers may be deleted. False for folders the user pointed at (assemble)."""
     step(f"Laying out files for the torrent in {output_dir}")
@@ -403,7 +1163,8 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
                     "(nothing deleted; try post-processing 'unpack' if the post was packed differently)")
     info(f"all {len(t.real_files)} file(s) present with the right size")
 
-    if opts.local_verify or cfg.local_verify:
+    retry_on = retry is not None and (cfg.retry_bad_pieces if opts.retry_bad is None else opts.retry_bad)
+    if opts.local_verify or cfg.local_verify or retry_on:
         step("Hashing all pieces locally")
 
         def tick(i, n, bad_so_far):
@@ -418,12 +1179,19 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
         if bad:
             for f in asm.files_for_pieces(t, bad):
                 warn(f"bad pieces in {f.relpath}")
-            raise Abort(f"{len(bad)} of {len(t.pieces)} pieces fail locally; not adding the torrent")
+            if not retry_on:
+                raise Abort(f"{len(bad)} of {len(t.pieces)} pieces fail locally; not adding the torrent "
+                            "(turn on 'try other posts' to replace the files automatically)")
+            step(f"Replacing files behind {len(bad)} failing piece(s) with other posts")
+            if not repair_bad_pieces(retry, t, res, bad, owned, source_dirs):
+                raise Abort(f"pieces still fail after trying the other posts; not adding the torrent")
+            pieces("#" * len(t.pieces))
         info("100% of pieces verified locally")
 
     if cfg.cleanup and not opts.no_cleanup:
         step("Removing files that are not part of the torrent")
-        removed = asm.cleanup(t, res, source_dirs if sources_are_ours else [], output_dir, owned, log=line)
+        ours = (list(source_dirs) + [d for d in earlier_dirs if d not in source_dirs]) if sources_are_ours else []
+        removed = asm.cleanup(t, res, ours, output_dir, owned, log=line)
         owned.save()
         info(f"{len(removed)} file(s) removed" + ("" if sources_are_ours else
              " (your source folders are left as they are)"))
@@ -500,16 +1268,31 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
 
 # ---------------------------------------------------------------- whole runs
 
-def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[Release]]) -> dict:
-    """Everything after the releases have been chosen."""
+def local_release(t: Torrent, path: str) -> Release:
+    """A Release standing in for a .torrent file the user already has."""
+    return Release(title=t.name, protocol="torrent", indexer=os.path.basename(path), indexer_id=0,
+                   size=t.total_size, guid=f"file:{t.infohash}", download_url="", info_url="",
+                   publish_date="", grabs=None, seeders=None, files=len(t.real_files))
+
+
+def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[Release]],
+                torrent_data: bytes | None = None) -> dict:
+    """Everything after the releases have been chosen. ``torrent_data``: a .torrent the
+    user supplied, used instead of downloading one."""
     pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
     qb = None if opts.no_qbit else QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
     info(f"SABnzbd {sab.version()}")
 
-    step(f"Downloading .torrent from {tor_rel.indexer}")
-    t, path = save_torrent(cfg, pr.fetch(tor_rel))
+    if torrent_data is not None:
+        step(f"Using .torrent file {tor_rel.indexer}")
+        t, path = save_torrent(cfg, torrent_data)
+    else:
+        step(f"Downloading .torrent from {tor_rel.indexer}")
+        t, path = save_torrent(cfg, pr.fetch(tor_rel))
     show_layout(t)
+    global _current_torrent
+    _current_torrent = t.infohash
     existing = qbit_preflight(qb, t) if qb else None
 
     pp = choose_pp(opts, cfg, t)
@@ -519,15 +1302,15 @@ def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[
     info(f"SABnzbd post-processing: {'+Repair' if pp == PP_REPAIR else '+Repair/Unpack'} ({why}); never +Delete")
     sab_preflight(sab, pp)
 
-    rejected: list = []
-    if len(groups) == 1:
-        dirs, nzos = usenet_single(cfg, opts, pr, sab, t, groups[0], pp, rejected)
-    else:
-        size_warning(tor_rel, groups)
-        dirs, nzos = usenet_multi(cfg, pr, sab, groups, pp)
+    placed = placed_before(cfg, opts, t)
+    picks = [r for g in groups for r in g]
+    dirs, nzos, slots, rejected = plan_and_fetch(cfg, opts, pr, sab, t, t.name, picks, pp, placed)
+    if not dirs and not placed:
+        raise Abort("nothing was downloaded")
 
     output_dir = opts.output_dir or cfg.output_dir or os.path.dirname(os.path.abspath(dirs[0]))
-    out = finish(cfg, opts, t, path, dirs, output_dir, qb, existing)
+    out = finish(cfg, opts, t, path, dirs, output_dir, qb, existing,
+                 retry=Retry(cfg, pr, sab, pp, slots), earlier_dirs=earlier_dirs(cfg, sab, t))
     if rejected and cfg.cleanup and not opts.no_cleanup and not opts.dry_run:
         remove_rejected(rejected)
     if cfg.sab_delete_history:

@@ -4,7 +4,11 @@ The sink is per-thread, so each GUI job thread reports into its own log.
 """
 from __future__ import annotations
 
+import sys
 import threading
+
+# Set by the CLI: may the console ask questions? (False with --yes or without a terminal)
+interactive = False
 
 
 class Cancelled(Exception):
@@ -31,6 +35,26 @@ class ConsoleSink:
 
     def pieces(self, states: str):
         pass
+
+    def ask(self, prompt: str, choices: list[dict]) -> int | None:
+        self.end_progress()
+        print(f"\n    ? {prompt}")
+        for i, c in enumerate(choices, 1):
+            note = f"   <- {c['note']}" if c.get("note") else ""
+            print(f"  {i:>3}  {c['indexer'][:16]:16}  {c['size_text']:>10}  G:{c.get('grabs')}  {c['title']}{note}")
+        if not interactive:
+            print("    (not asking: running without a terminal or with --yes)")
+            return None
+        while True:
+            try:
+                s = input("    Number of the NZB to download, empty = stop: ").strip()
+            except EOFError:
+                return None
+            if not s:
+                return None
+            if s.isdigit() and 1 <= int(s) <= len(choices):
+                return int(s) - 1
+            print(f"    choose between 1 and {len(choices)}")
 
     def cancelled(self) -> bool:
         return False
@@ -77,6 +101,11 @@ def end_progress():
 def pieces(states: str):
     """Piece map: one char per piece - '.' unchecked, '#' verified, 'x' failed."""
     sink().pieces(states)
+
+
+def ask(prompt: str, choices: list[dict]) -> int | None:
+    """Ask the person to pick one of ``choices``; None = stop. Blocks until answered."""
+    return sink().ask(prompt, choices)
 
 
 def check_cancel():

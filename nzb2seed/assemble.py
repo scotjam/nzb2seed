@@ -235,6 +235,16 @@ def _match(torrent: Torrent, sources: list[Source], output_dir: str, res: Result
     return chosen, text_pairs
 
 
+def find_sources(torrent: Torrent, dirs: list[str]) -> dict[str, str]:
+    """{torrent relpath: file in ``dirs`` that would supply it} - matching only, nothing moves."""
+    res = Result()
+    probe = os.path.join(os.sep, "nonexistent-nzb2seed-probe")
+    chosen, text_pairs = _match(torrent, scan(dirs), probe, res)
+    out = {rel: s.path for rel, s in chosen.items()}
+    out.update({f.relpath: s.path for f, s in text_pairs if s})
+    return out
+
+
 # ---------------------------------------------------------------- moving
 
 PART_SUFFIX = ".nzb2seed-part"

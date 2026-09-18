@@ -23,7 +23,8 @@ from urllib.parse import urlsplit
 from . import config as config_mod
 from . import report
 from .clients import ApiError, Prowlarr, QBittorrent, Release, SABnzbd
-from .pipeline import Abort, Options, execute_assemble, execute_run, group_selection, pair, search
+from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
+                       previous_downloads, search)
 
 MAX_BODY = 64 << 20
 MAX_LINES = 20000
@@ -50,6 +51,9 @@ class Job:
         self.cancel = threading.Event()
         self.lock = threading.Lock()
         self.on_change = on_change or (lambda urgent=False: None)
+        self.question: dict | None = None     # {"prompt", "choices"} while waiting for the person
+        self._answer: int | None = None
+        self._answered = threading.Event()
 
     # report sink
     def emit(self, kind: str, text: str):
@@ -74,10 +78,37 @@ class Job:
     def cancelled(self) -> bool:
         return self.cancel.is_set()
 
+    def ask(self, prompt: str, choices: list[dict]) -> int | None:
+        """Pause the build until the person picks a choice (or stops the build)."""
+        self._answer = None
+        self._answered.clear()
+        self.question = {"prompt": prompt, "choices": choices}
+        self.status = "waiting"
+        self.emit("warn", "waiting for you: " + prompt)
+        self.on_change(True)
+        while not self._answered.wait(1.0):
+            if self.cancel.is_set():
+                break
+        self.question = None
+        self.status = "running"
+        self.on_change(True)
+        if self.cancel.is_set():
+            raise report.Cancelled("cancelled")
+        return self._answer
+
+    def answer(self, choice: int | None):
+        if self.question is None:
+            raise ValueError("this build is not waiting for an answer")
+        if choice is not None and not (0 <= choice < len(self.question["choices"])):
+            raise ValueError("no such choice")
+        self._answer = choice
+        self._answered.set()
+
     def summary(self) -> dict:
         return {"id": self.id, "title": self.title, "kind": self.kind, "status": self.status,
                 "result": self.result, "started": self.started, "ended": self.ended,
-                "progress": self.progress, "steps": [x["t"] for x in self.lines if x["k"] == "step"]}
+                "progress": self.progress, "question": self.question,
+                "steps": [x["t"] for x in self.lines if x["k"] == "step"]}
 
     def to_dict(self) -> dict:
         with self.lock:
@@ -89,7 +120,8 @@ class Job:
         job.status, job.result = d.get("status", "done"), d.get("result", "")
         job.lines, job.pieces = d.get("lines", []), d.get("pieces", "")
         job.progress, job.started, job.ended = d.get("progress", ""), d.get("started", 0), d.get("ended")
-        if job.status == "running":     # its thread died with the previous GUI process
+        job.question = None
+        if job.status in ("running", "waiting"):     # its thread died with the previous GUI process
             job.status, job.result, job.progress = "interrupted", INTERRUPTED, ""
             job.ended = job.ended or time.time()
             job.lines.append({"k": "warn", "t": INTERRUPTED})
@@ -132,7 +164,7 @@ class JobStore:
             self.dirty.clear()
             data = {"jobs": [j.to_dict() for j in sorted(self.jobs_fn(), key=lambda j: j.id)]}
             os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-            tmp = self.path + ".tmp"
+            tmp = f"{self.path}.{os.getpid()}.{threading.get_ident()}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh)
             os.replace(tmp, self.path)
@@ -164,6 +196,9 @@ class _Sink:
 
     def pieces(self, states):
         self.job.pieces_fn(states)
+
+    def ask(self, prompt, choices):
+        return self.job.ask(prompt, choices)
 
     def cancelled(self):
         return self.job.cancelled()
@@ -226,7 +261,8 @@ def _opts(d: dict) -> Options:
     return Options(pp=d.get("pp") or None, output_dir=d.get("output_dir") or None,
                    no_cleanup=bool(d.get("no_cleanup")), local_verify=bool(d.get("local_verify")),
                    no_qbit=bool(d.get("no_qbit")), start=bool(d.get("start")),
-                   dry_run=bool(d.get("dry_run")))
+                   dry_run=bool(d.get("dry_run")),
+                   retry_bad=None if d.get("retry_bad") is None else bool(d.get("retry_bad")))
 
 
 def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts: set[str]):
@@ -349,14 +385,26 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     if not q:
                         return self._err("type a release name or search text")
                     torrents, nzbs = search(app.cfg, q)
+                    if body.get("protocol") == "usenet":
+                        torrents = []
                     return self._json({"torrents": [dataclasses.asdict(r) for r in torrents],
                                        "usenet": [dataclasses.asdict(r) for r in nzbs]})
                 if path == "/api/pair":
                     return self.pair(body)
+                if path == "/api/previous":
+                    sab = SABnzbd(app.cfg.sab_url, app.cfg.sab_key)
+                    return self._json({"previous": previous_downloads(app.cfg, sab, body.get("title") or "")})
                 if path == "/api/build":
                     return self.build(body)
                 if path == "/api/assemble":
                     return self.assemble(body)
+                if path.startswith("/api/jobs/") and path.endswith("/answer"):
+                    job = app.jobs.get(int(path.split("/")[3]))
+                    if not job:
+                        return self._err("no such job", 404)
+                    choice = body.get("choice")
+                    job.answer(None if choice is None else int(choice))
+                    return self._json({"ok": True})
                 if path.startswith("/api/jobs/") and path.endswith("/cancel"):
                     job = app.jobs.get(int(path.split("/")[3]))
                     if not job:
@@ -420,9 +468,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
         def build(self, body):
             torrent = _rel(body["torrent"])
             nzbs = [_rel(n) for n in body.get("nzbs", [])]
-            if not nzbs:
-                return self._err("pick at least one NZB")
-            groups = group_selection(nzbs)
+            groups = group_selection(nzbs)     # empty: the build finds the NZBs itself
             opts = _opts(body.get("options", {}))
             job = app.start_job(torrent.title, "build",
                                 lambda cfg: execute_run(cfg, opts, torrent, groups))

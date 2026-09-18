@@ -112,6 +112,7 @@ class FakeQB:
 
 class Args:
     query = NAME
+    torrent = None
     indexer = None
     yes = True
     pp = None

@@ -53,15 +53,25 @@ def parse(data: bytes) -> list[NzbFile]:
     return out
 
 
-def score(files: list[NzbFile], torrent: Torrent) -> Score:
-    wanted = {f.name.lower() for f in torrent.real_files}
+def score(files: list[NzbFile], torrent: Torrent, part: list | None = None) -> Score:
+    """How likely this post holds ``part`` of the torrent (default: all of it)."""
+    part = part if part is not None else torrent.real_files
+    total = sum(f.length for f in part)
+    wanted = {f.name.lower() for f in part}
     posted = {f.name.lower() for f in files}
     hits = len(wanted & posted)
     payload = sum(f.posted_bytes for f in files if not _PAR2.search(f.name))
-    ratio = payload / torrent.total_size if torrent.total_size else 0
+    ratio = payload / total if total else 0
     archives = any(_RAR.search(f.name) for f in files)
-    plausible = YENC_OVERHEAD[0] <= ratio <= YENC_OVERHEAD[1]
+    loose = [f for f in files if not _PAR2.search(f.name)]
+    # without archives every torrent file needs a posted file of its own
+    too_few = not archives and len(loose) < len(part)
+    plausible = YENC_OVERHEAD[0] <= ratio <= YENC_OVERHEAD[1] and not too_few
+    why = ""
+    if too_few:
+        why = f" (only {len(loose)} loose files for {len(part)} torrent files)"
+    elif not plausible:
+        why = " (implausible)"
     summary = (f"{hits}/{len(wanted)} torrent file names, {len(files)} posted files"
-               f"{' (RAR set)' if archives else ''}, size x{ratio:.3f}"
-               f"{'' if plausible else ' (implausible)'}")
+               f"{' (RAR set)' if archives else ''}, size x{ratio:.3f}{why}")
     return Score(hits, len(wanted), ratio, plausible, archives, summary)
