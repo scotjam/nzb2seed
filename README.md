@@ -38,8 +38,22 @@ The **GUI** has four tabs: *Build* (search, pick the torrent on the left, the
 matching NZBs on the right are ticked for you), *Jobs* (live progress, a map of
 every piece as it verifies, full log, cancel), *Assemble* (a .torrent plus
 folders you already have) and *Settings* (edit and test the connections).
-Without `--password` it only lets in this machine and private LAN addresses;
-it only answers to its own names/IPs (add others with `--allowed-host`).
+It only answers to its own names/IPs (add others with `--allowed-host`).
+
+### Login
+
+The GUI asks for a login (your browser shows the prompt). The default is:
+
+| User name | Password |
+|---|---|
+| `admin` | `nzb2seed` |
+
+**Change the password** in the GUI under *Settings → GUI login* (it takes
+effect immediately and is saved to `nzb2seed.toml` under `[gui]`). While the
+default password is in use the GUI shows a reminder. `--username` /
+`--password` on the command line override the config. An empty password
+switches the login off; the GUI then only lets in this machine and private
+(LAN) addresses.
 
 `run` flags: `--indexer X` (only torrents from indexers matching X),
 `--pp auto|repair|unpack`, `--local-verify` (hash every piece before
@@ -125,6 +139,13 @@ WantedBy=multi-user.target
 
 ## Tests
 
-`python -m pytest -q` - 42 tests, including a full run against fake
+`python -m pytest -q` - 45 tests, including a full run against fake
 Prowlarr/SABnzbd/qBittorrent whose recheck really hashes the files, season
 packs with mixed LF/CRLF .nfo files, cross-disk moves, and the ownership rules.
+
+## License
+
+nzb2seed is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, version 3 or (at your option) any later version. See
+[LICENSE](LICENSE).

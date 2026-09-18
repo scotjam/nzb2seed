@@ -40,6 +40,13 @@ local_to_qbit = [
 output_dir = ""
 torrent_dir = "torrents"     # where downloaded .torrent files are kept (relative to this file)
 
+[gui]
+# Login for the web GUI (your browser asks for it). Change the default password!
+# An empty password switches the login off: then only this machine and private
+# (LAN) addresses can open the GUI.
+username = "admin"
+password = "nzb2seed"
+
 [behaviour]
 # "auto"   = +Repair when the torrent holds RAR archives, +Repair/Unpack when it holds
 #            the unpacked files (SABnzbd keeps the archives; they are removed as extras)

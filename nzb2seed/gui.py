@@ -229,7 +229,14 @@ def _opts(d: dict) -> Options:
                    dry_run=bool(d.get("dry_run")))
 
 
-def make_handler(app: App, password: str | None, allowed_hosts: set[str]):
+def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts: set[str]):
+    """``login_override`` (from --username/--password) beats the login in the config."""
+
+    def login() -> tuple[str, str]:
+        if login_override:
+            return login_override
+        return app.cfg.gui_username or "", app.cfg.gui_password or ""
+
     page = resources.files("nzb2seed").joinpath("web/index.html").read_bytes()
 
     class H(BaseHTTPRequestHandler):
@@ -262,17 +269,20 @@ def make_handler(app: App, password: str | None, allowed_hosts: set[str]):
                 self._err(f"unexpected Host header {host!r}; start the GUI with --allowed-host {host} "
                           "if that is how you reach this machine", 403)
                 return False
+            user, password = login()
             if not password and not _is_local_client(self.client_address[0]):
-                self._err("only this machine and private-network addresses may use the GUI "
-                          "without a password (start it with --password)", 403)
+                self._err("the login is switched off, so only this machine and private-network "
+                          "addresses may use the GUI", 403)
                 return False
             if password:
                 auth = self.headers.get("Authorization", "")
                 ok = False
                 if auth.startswith("Basic "):
                     try:
-                        _, _, pw = base64.b64decode(auth[6:]).decode().partition(":")
-                        ok = hmac.compare_digest(pw, password)
+                        u, _, pw = base64.b64decode(auth[6:]).decode().partition(":")
+                        # compare both, always, so timing does not reveal which one was wrong
+                        ok = hmac.compare_digest(u.encode(), user.encode()) & \
+                            hmac.compare_digest(pw.encode(), password.encode())
                     except ValueError:
                         pass
                 if not ok:
@@ -362,8 +372,11 @@ def make_handler(app: App, password: str | None, allowed_hosts: set[str]):
         # -- handlers
         def settings_payload(self):
             cfg = app.cfg
+            user, password = login()
             return {"path": str(cfg.path), "exists": os.path.isfile(cfg.path),
-                    "settings": config_mod.to_sections(cfg)}
+                    "settings": config_mod.to_sections(cfg),
+                    "default_login": (not login_override and password == config_mod.DEFAULT_GUI_PASSWORD),
+                    "login_from_command_line": bool(login_override)}
 
         def save_settings(self, body):
             sections = body.get("settings") or {}
@@ -483,16 +496,24 @@ def own_names(bind: str) -> set[str]:
 
 
 def serve(config_path: str | None, host: str, port: int, password: str | None,
-          open_browser: bool, extra_hosts=()) -> int:
+          open_browser: bool, extra_hosts=(), username: str | None = None) -> int:
     allowed = own_names(host) | {h.lower() for h in extra_hosts}
     app = App(config_path)
-    httpd = ThreadingHTTPServer((host, port), make_handler(app, password, allowed))
+    override = (username or app.cfg.gui_username or config_mod.DEFAULT_GUI_USER, password) \
+        if password is not None else None
+    httpd = ThreadingHTTPServer((host, port), make_handler(app, override, allowed))
     ips = [n for n in allowed if _is_ip(n) and n.count(".") == 3 and not n.startswith("127.")]
     lan = sorted(ips, key=lambda n: (not n.startswith("192.168."), n))[0] if ips else None
     url = f"http://{lan if host in ('0.0.0.0', '::') and lan else ('127.0.0.1' if host in ('0.0.0.0', '::') else host)}:{port}/"
     print(f"nzb2seed GUI on {url}  (config: {app.cfg.path})  - Ctrl+C to stop", flush=True)
-    if not password:
-        print("no password: open to this machine and private-network (LAN) addresses only", flush=True)
+    user, pw = override or (app.cfg.gui_username, app.cfg.gui_password)
+    if not pw:
+        print("login switched off: open to this machine and private-network (LAN) addresses only",
+              flush=True)
+    elif not override and pw == config_mod.DEFAULT_GUI_PASSWORD:
+        print(f"login: {user} / {pw} (the default - change it in Settings)", flush=True)
+    else:
+        print(f"login: {user} / (password set)", flush=True)
     if open_browser:
         threading.Timer(0.5, webbrowser.open, [url]).start()
     import signal

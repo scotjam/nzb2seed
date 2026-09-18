@@ -150,8 +150,10 @@ def main(argv=None) -> int:
     g.add_argument("--host", default="127.0.0.1",
                    help="address to listen on (default 127.0.0.1; 0.0.0.0 = the whole LAN)")
     g.add_argument("--port", type=int, default=9797)
-    g.add_argument("--password", help="require this password (HTTP basic auth, any user name); "
-                   "without it only this machine and private LAN addresses are let in")
+    g.add_argument("--username", help="login user name (overrides the config; default admin)")
+    g.add_argument("--password", help="login password (overrides the config; default nzb2seed, "
+                   "change it in Settings). An empty password switches the login off, which "
+                   "only lets in this machine and private LAN addresses")
     g.add_argument("--allowed-host", action="append", default=[],
                    help="extra host name the GUI is reached by (e.g. a DNS name or reverse proxy)")
     g.add_argument("--no-browser", action="store_true", help="do not open a browser window")
@@ -191,7 +193,7 @@ def main(argv=None) -> int:
     if args.cmd == "gui":
         from .gui import serve
         return serve(args.config, args.host, args.port, args.password, not args.no_browser,
-                     args.allowed_host)
+                     args.allowed_host, args.username)
 
     cfg = load(args.config)
     try:

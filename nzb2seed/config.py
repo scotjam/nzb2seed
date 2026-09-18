@@ -11,6 +11,10 @@ except ModuleNotFoundError:  # Python < 3.11
     import tomli as tomllib
 
 
+DEFAULT_GUI_USER = "admin"
+DEFAULT_GUI_PASSWORD = "nzb2seed"
+
+
 @dataclass
 class Config:
     path: Path
@@ -37,6 +41,8 @@ class Config:
     post_processing: str = "auto"
     cleanup: bool = True
     local_verify: bool = False
+    gui_username: str = DEFAULT_GUI_USER
+    gui_password: str = DEFAULT_GUI_PASSWORD   # empty = no login, LAN-only
 
 
 # (section, key, attribute) - the on-disk layout of nzb2seed.toml
@@ -63,6 +69,8 @@ LAYOUT = [
     ("behaviour", "post_processing", "post_processing"),
     ("behaviour", "cleanup", "cleanup"),
     ("behaviour", "local_verify", "local_verify"),
+    ("gui", "username", "gui_username"),
+    ("gui", "password", "gui_password"),
 ]
 
 

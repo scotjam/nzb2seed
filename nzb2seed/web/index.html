@@ -181,6 +181,8 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 .tests .ok { color: var(--ok); }
 .tests .bad { color: var(--bad); word-break: break-word; }
 
+.notice { background: var(--warn); color: var(--sheet); padding: 8px 24px; font-size: .92rem; }
+.notice a { color: inherit; font-weight: 700; }
 .toast { position: fixed; right: 20px; bottom: 90px; max-width: 460px; padding: 12px 16px; border-radius: 8px; background: var(--ink); color: var(--sheet); z-index: 9; }
 
 @media (max-width: 860px) {
@@ -204,6 +206,10 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
     <a href="#settings">Settings</a>
   </nav>
 </header>
+
+<div class="notice hidden" id="loginnotice" role="status">
+  You're using the default login (admin / nzb2seed). <a href="#settings">Change the password in Settings</a>.
+</div>
 
 <main>
   <!-- ================= Build -->
@@ -338,6 +344,15 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
         <div class="two">
           <label class="field"><span>Put finished torrents in</span><input type="text" data-k="paths.output_dir" placeholder="Next to where SABnzbd put the download"><small>Same drive as SABnzbd's complete folder keeps moves instant.</small></label>
           <label class="field"><span>Keep downloaded .torrent files in</span><input type="text" data-k="paths.torrent_dir"></label>
+        </div>
+      </fieldset>
+      <hr>
+      <fieldset>
+        <legend>GUI login</legend>
+        <p class="status" style="margin:0" id="loginhelp">Asked for by your browser when you open this page. The default is admin / nzb2seed. Leave the password empty to switch the login off; then only this machine and your local network can open the GUI.</p>
+        <div class="two">
+          <label class="field"><span>User name</span><input type="text" data-k="gui.username" autocomplete="off"></label>
+          <label class="field"><span>Password</span><input type="password" data-k="gui.password" autocomplete="new-password"></label>
         </div>
       </fieldset>
       <hr>
@@ -661,6 +676,8 @@ async function loadSettings() {
     else if (Array.isArray(v)) el.value = v.join(", ");
     else el.value = v ?? "";
   });
+  $("loginnotice").classList.toggle("hidden", !settings.default_login);
+  if (settings.login_from_command_line) $("loginhelp").textContent = "The login is currently set on the command line (--username/--password), which overrides these fields.";
   $("map-sab").replaceChildren(...(s.paths.sab_to_local || []).map(p => mapRow(...p)));
   $("map-qb").replaceChildren(...(s.paths.local_to_qbit || []).map(p => mapRow(...p)));
   renderOptions();
@@ -699,6 +716,7 @@ $("testbtn").addEventListener("click", async () => {
 /* ================= start */
 (async () => {
   try { settings = await api("/api/settings"); } catch { settings = null; }
+  $("loginnotice").classList.toggle("hidden", !settings?.default_login);
   renderOptions();
   if (settings && !settings.exists && !location.hash) location.hash = "#settings";
   route();
