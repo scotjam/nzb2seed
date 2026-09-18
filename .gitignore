@@ -1,0 +1,7 @@
+__pycache__/
+.pytest_cache/
+nzb2seed.toml
+torrents/
+jobs.json
+*.owned.json
+*.log

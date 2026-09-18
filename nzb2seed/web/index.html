@@ -1,0 +1,709 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nzb2seed</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --slate: #E6EBF0;       /* page */
+  --sheet: #F7F9FB;       /* panels */
+  --ink: #1B2733;         /* text */
+  --ink-2: #52606E;       /* secondary text */
+  --rule: #CBD4DD;
+  --usenet: #0E7A74;      /* everything that comes from Usenet */
+  --usenet-soft: #D5ECEA;
+  --torrent: #4A4FC0;     /* everything that belongs to the torrent */
+  --torrent-soft: #DFE0F6;
+  --ok: #23884F;
+  --ok-soft: #9FD3B4;
+  --bad: #C23B32;
+  --idle: #C3CCD6;
+  --warn: #9A6200;
+  --focus: #4A4FC0;
+  --font: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --mono: "JetBrains Mono", Consolas, ui-monospace, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --slate: #131B24; --sheet: #1B2530; --ink: #E3E9EF; --ink-2: #93A1AF; --rule: #2E3B48;
+    --usenet: #3FC1B8; --usenet-soft: #173C3A; --torrent: #979BFF; --torrent-soft: #26284D;
+    --ok: #4CC47E; --ok-soft: #235A3B; --bad: #F0685E; --idle: #34414F; --warn: #E0A640;
+    --focus: #979BFF; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --slate: #131B24; --sheet: #1B2530; --ink: #E3E9EF; --ink-2: #93A1AF; --rule: #2E3B48;
+  --usenet: #3FC1B8; --usenet-soft: #173C3A; --torrent: #979BFF; --torrent-soft: #26284D;
+  --ok: #4CC47E; --ok-soft: #235A3B; --bad: #F0685E; --idle: #34414F; --warn: #E0A640;
+  --focus: #979BFF; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--slate); color: var(--ink); font: 16px/1.5 var(--font); }
+button, input, select, textarea { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.hidden { display: none !important; }
+
+/* ---------- header */
+header { display: flex; align-items: center; gap: 28px; padding: 14px 24px; border-bottom: 1px solid var(--rule); background: var(--sheet); position: sticky; top: 0; z-index: 5; }
+.brand { font-weight: 700; font-size: 1.15rem; letter-spacing: -0.01em; white-space: nowrap; }
+.brand .u { color: var(--usenet); }
+.brand .t { color: var(--torrent); }
+nav { display: flex; gap: 4px; overflow-x: auto; }
+nav a { padding: 6px 12px; border-radius: 6px; color: var(--ink-2); text-decoration: none; white-space: nowrap; }
+nav a[aria-current="page"] { color: var(--ink); background: var(--slate); font-weight: 700; }
+nav .count { display: inline-block; min-width: 1.4em; margin-left: 6px; padding: 0 5px; border-radius: 9px; background: var(--torrent); color: var(--sheet); font-size: .78rem; text-align: center; }
+
+main { max-width: 1320px; margin: 0 auto; padding: 24px 24px 120px; }
+h1 { font-size: 1.6rem; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.015em; }
+h2 { font-size: 1.1rem; margin: 0; }
+p.lede { color: var(--ink-2); margin: 0 0 20px; max-width: 70ch; }
+
+/* ---------- controls */
+.btn { border: 1px solid var(--rule); background: var(--sheet); padding: 8px 16px; border-radius: 8px; cursor: pointer; }
+.btn:hover { border-color: var(--ink-2); }
+.btn.primary { background: var(--torrent); border-color: var(--torrent); color: #fff; font-weight: 700; }
+:root[data-theme="dark"] .btn.primary { color: #10131f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.primary { color: #10131f; } }
+.btn.primary:disabled { opacity: .45; cursor: not-allowed; }
+.btn.danger { color: var(--bad); }
+input[type=text], input[type=password], input[type=number], select, textarea {
+  width: 100%; padding: 9px 11px; border: 1px solid var(--rule); border-radius: 8px; background: var(--sheet);
+}
+textarea { font-family: var(--mono); font-size: .88rem; }
+label.check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+label.check input { margin-top: 5px; accent-color: var(--torrent); }
+.field { display: grid; gap: 4px; }
+.field > span { font-weight: 700; font-size: .92rem; }
+.field small { color: var(--ink-2); }
+
+/* ---------- search */
+.search { display: flex; gap: 10px; margin-bottom: 24px; }
+.search input { font-size: 1.05rem; padding: 11px 14px; }
+
+/* ---------- the pairing view */
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+.side { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+.side > .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--rule); }
+.side.torrent > .head { border-top: 4px solid var(--torrent); }
+.side.usenet > .head { border-top: 4px solid var(--usenet); }
+.side .head small { color: var(--ink-2); }
+.side .hint { padding: 10px 16px; font-size: .92rem; border-bottom: 1px solid var(--rule); background: var(--usenet-soft); }
+.side .filter { padding: 10px 16px; border-bottom: 1px solid var(--rule); }
+.rows { max-height: 58vh; overflow-y: auto; }
+.row { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--rule); cursor: pointer; }
+.row:last-child { border-bottom: 0; }
+.row:hover { background: var(--slate); }
+.row input { margin-top: 4px; }
+.side.torrent .row input { accent-color: var(--torrent); }
+.side.usenet .row input { accent-color: var(--usenet); }
+.side.torrent .row.on { background: var(--torrent-soft); }
+.side.usenet .row.on { background: var(--usenet-soft); }
+.row .title { word-break: break-all; font-weight: 700; line-height: 1.35; }
+.row .meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: .88rem; margin-top: 2px; }
+.row .same { color: var(--usenet); font-weight: 700; }
+.empty { padding: 28px 16px; color: var(--ink-2); }
+
+.intro { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 22px 26px; max-width: 760px; }
+.intro ol { margin: 10px 0 0; padding-left: 22px; }
+.intro li { margin: 5px 0; }
+.intro li::marker { color: var(--ink-2); font-weight: 700; }
+
+/* ---------- build bar */
+.buildbar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--sheet); border-top: 1px solid var(--rule); padding: 12px 24px; z-index: 4; }
+.buildbar .inner { max-width: 1320px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; }
+.buildbar .what { flex: 1 1 320px; min-width: 0; }
+.buildbar .what b { word-break: break-all; }
+.buildbar .what small { display: block; color: var(--ink-2); }
+.buildbar .opts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .92rem; align-items: center; }
+.buildbar select { width: auto; padding: 5px 8px; }
+
+/* ---------- jobs */
+.jobs { display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }
+.joblist { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
+.joblist button { display: block; width: 100%; text-align: left; border: 0; border-bottom: 1px solid var(--rule); background: none; padding: 11px 14px; cursor: pointer; }
+.joblist button:last-child { border-bottom: 0; }
+.joblist button[aria-current="true"] { background: var(--slate); }
+.joblist .t { font-weight: 700; word-break: break-all; line-height: 1.3; }
+.joblist .s { font-size: .86rem; color: var(--ink-2); }
+.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--idle); }
+.dot.running { background: var(--torrent); animation: pulse 1.4s ease-in-out infinite; }
+.dot.done { background: var(--ok); }
+.dot.failed { background: var(--bad); }
+.dot.cancelled, .dot.interrupted { background: var(--warn); }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .dot.running { animation: none; } }
+
+.job { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 20px 22px; min-width: 0; }
+.job .top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.job h2 { word-break: break-all; font-size: 1.2rem; }
+.job .result { margin: 4px 0 0; color: var(--ink-2); }
+.job .result.done { color: var(--ok); font-weight: 700; }
+.job .result.failed { color: var(--bad); }
+
+.map { margin: 20px 0 6px; }
+.map canvas { display: block; width: 100%; height: 34px; border-radius: 4px; background: var(--idle); }
+.map .legend { display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: .86rem; color: var(--ink-2); margin-top: 6px; }
+.map .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+
+.steps { list-style: none; margin: 18px 0; padding: 0; display: grid; gap: 2px; }
+.steps li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; color: var(--ink-2); }
+.steps li::before { content: ""; width: 10px; height: 10px; margin: 7px 0 0 5px; border-radius: 50%; background: var(--ok); }
+.steps li.now { color: var(--ink); font-weight: 700; }
+.steps li.now::before { background: var(--torrent); }
+.steps li.now.failed::before { background: var(--bad); }
+.progress { font-family: var(--mono); font-size: .88rem; color: var(--torrent); min-height: 1.4em; margin: 0 0 8px 30px; }
+
+details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
+.log pre { margin: 10px 0 0; max-height: 50vh; overflow: auto; padding: 12px 14px; border-radius: 8px; background: var(--slate); font: .82rem/1.55 var(--mono); white-space: pre-wrap; word-break: break-all; }
+.log .step { color: var(--torrent); font-weight: 600; }
+.log .warn { color: var(--warn); }
+
+/* ---------- forms (assemble / settings) */
+.form { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 22px 24px; max-width: 880px; display: grid; gap: 18px; }
+.form fieldset { border: 0; padding: 0; margin: 0; display: grid; gap: 14px; }
+.form legend { font-weight: 700; font-size: 1.1rem; padding: 0; margin-bottom: 4px; }
+.form .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+.form hr { border: 0; border-top: 1px solid var(--rule); margin: 4px 0; width: 100%; }
+.maps { display: grid; gap: 8px; }
+.maprow { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 8px; align-items: center; }
+.maprow .arrow { color: var(--ink-2); }
+.actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.status { color: var(--ink-2); }
+.tests { display: grid; gap: 6px; }
+.tests div { display: grid; grid-template-columns: 120px 1fr; gap: 10px; }
+.tests .ok { color: var(--ok); }
+.tests .bad { color: var(--bad); word-break: break-word; }
+
+.toast { position: fixed; right: 20px; bottom: 90px; max-width: 460px; padding: 12px 16px; border-radius: 8px; background: var(--ink); color: var(--sheet); z-index: 9; }
+
+@media (max-width: 860px) {
+  header { gap: 12px; padding: 12px 16px; flex-wrap: wrap; }
+  main { padding: 16px 16px 200px; }
+  .pair, .jobs, .form .two { grid-template-columns: 1fr; }
+  .rows { max-height: none; }
+  .buildbar { padding: 10px 16px; }
+  .maprow { grid-template-columns: 1fr auto; }
+  .maprow .arrow { display: none; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="u">nzb</span>2<span class="t">seed</span></div>
+  <nav>
+    <a href="#build">Build</a>
+    <a href="#jobs">Jobs<span class="count hidden" id="runcount"></span></a>
+    <a href="#assemble">Assemble</a>
+    <a href="#settings">Settings</a>
+  </nav>
+</header>
+
+<main>
+  <!-- ================= Build -->
+  <section id="view-build" class="view">
+    <form class="search" id="searchform">
+      <input type="text" id="query" placeholder="Release name, e.g. Show.S01.1080p.BluRay.x264-GRP" autocomplete="off" aria-label="Search Prowlarr">
+      <button class="btn primary" id="searchbtn">Search</button>
+    </form>
+
+    <div id="intro" class="intro">
+      <h2>Build a torrent from Usenet</h2>
+      <ol>
+        <li>Search for a release or a season.</li>
+        <li>Pick the torrent on the left; the matching NZBs on the right are ticked for you.</li>
+        <li>SABnzbd downloads the best-matching post: +Repair when the torrent holds RARs, +Repair/Unpack when it holds unpacked files, never +Delete.</li>
+        <li>The files are arranged exactly like the torrent: Sample, Proof and Subs folders, text files only fixed when that makes their pieces verify, everything else removed.</li>
+        <li>qBittorrent gets the torrent stopped, pointed at the files, and rechecked.</li>
+        <li>You end with 100.0% and nothing downloaded over BitTorrent.</li>
+      </ol>
+    </div>
+
+    <div id="results" class="pair hidden">
+      <div class="side torrent">
+        <div class="head"><h2>Torrent</h2><small id="tcount"></small></div>
+        <div class="filter"><input type="text" id="tfilter" placeholder="Filter torrents" aria-label="Filter torrents"></div>
+        <div class="rows" id="trows" role="radiogroup" aria-label="Torrent to build"></div>
+      </div>
+      <div class="side usenet">
+        <div class="head"><h2>Usenet</h2><small id="ucount"></small></div>
+        <div class="hint hidden" id="pairhint"></div>
+        <div class="filter"><input type="text" id="ufilter" placeholder="Filter NZBs" aria-label="Filter NZBs"></div>
+        <div class="rows" id="urows" aria-label="NZBs to download"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Jobs -->
+  <section id="view-jobs" class="view hidden">
+    <div class="jobs">
+      <div class="joblist" id="joblist"><div class="empty">No builds yet. Start one from Build.</div></div>
+      <div class="job hidden" id="job">
+        <div class="top">
+          <div><h2 id="jtitle"></h2><p class="result" id="jresult"></p></div>
+          <button class="btn danger hidden" id="jcancel">Cancel build</button>
+        </div>
+        <div class="map" id="jmap">
+          <canvas id="jcanvas" height="34" aria-label="Torrent pieces"></canvas>
+          <div class="legend" id="jlegend"></div>
+        </div>
+        <ol class="steps" id="jsteps"></ol>
+        <div class="progress" id="jprogress"></div>
+        <details class="log" id="jlogwrap"><summary>Full log</summary><pre id="jlog"></pre></details>
+      </div>
+    </div>
+  </section>
+
+  <!-- ================= Assemble -->
+  <section id="view-assemble" class="view hidden">
+    <h1>Assemble from files you already have</h1>
+    <p class="lede">For a .torrent you already have and NZB downloads that are already finished. Everything from arranging the files onward runs exactly as in a normal build.</p>
+    <form class="form" id="asmform">
+      <label class="field"><span>.torrent file</span>
+        <input type="file" id="atfile" accept=".torrent,application/x-bittorrent">
+        <small>Or type the path of a .torrent on the machine running nzb2seed:</small>
+        <input type="text" id="atpath" placeholder="D:\torrents\Release.Name.torrent">
+      </label>
+      <label class="field"><span>Folders holding the NZB download(s)</span>
+        <textarea id="asources" rows="4" placeholder="One folder per line, as seen by the machine running nzb2seed"></textarea>
+      </label>
+      <label class="field"><span>Put the torrent's files in</span>
+        <input type="text" id="aoutput" placeholder="Leave empty to use the parent of the first folder">
+      </label>
+      <div class="opts" id="aopts"></div>
+      <div class="actions"><button class="btn primary">Assemble</button></div>
+    </form>
+  </section>
+
+  <!-- ================= Settings -->
+  <section id="view-settings" class="view hidden">
+    <h1>Settings</h1>
+    <p class="lede" id="cfgpath"></p>
+    <form class="form" id="setform">
+      <fieldset>
+        <legend>Prowlarr</legend>
+        <div class="two">
+          <label class="field"><span>URL</span><input type="text" data-k="prowlarr.url" placeholder="http://nas.local:9696"></label>
+          <label class="field"><span>API key</span><input type="password" data-k="prowlarr.api_key" autocomplete="off"></label>
+        </div>
+        <div class="two">
+          <label class="field"><span>Only these indexer ids</span><input type="text" data-k="prowlarr.indexer_ids" data-type="ints" placeholder="All indexers"></label>
+          <label class="field"><span>Only these categories</span><input type="text" data-k="prowlarr.categories" data-type="ints" placeholder="All categories, e.g. 5000, 2000"></label>
+        </div>
+      </fieldset>
+      <hr>
+      <fieldset>
+        <legend>SABnzbd</legend>
+        <div class="two">
+          <label class="field"><span>URL</span><input type="text" data-k="sabnzbd.url" placeholder="http://nas.local:8080"></label>
+          <label class="field"><span>API key</span><input type="password" data-k="sabnzbd.api_key" autocomplete="off"><small>The full API key, not the NZB key.</small></label>
+        </div>
+        <div class="two">
+          <label class="field"><span>Category</span><input type="text" data-k="sabnzbd.category"><small>Use one Sonarr and Radarr do not watch.</small></label>
+          <label class="field"><span>Priority</span>
+            <select data-k="sabnzbd.priority" data-type="int">
+              <option value="-1">Low</option><option value="0">Normal</option><option value="1">High</option><option value="2">Force</option>
+            </select></label>
+        </div>
+        <label class="check"><input type="checkbox" data-k="sabnzbd.delete_history"> Remove finished jobs from SABnzbd history (files are kept)</label>
+      </fieldset>
+      <hr>
+      <fieldset>
+        <legend>qBittorrent</legend>
+        <div class="two">
+          <label class="field"><span>URL</span><input type="text" data-k="qbittorrent.url" placeholder="http://nas.local:8081"></label>
+          <label class="field"><span>Category</span><input type="text" data-k="qbittorrent.category" placeholder="None"></label>
+        </div>
+        <div class="two">
+          <label class="field"><span>User name</span><input type="text" data-k="qbittorrent.username" autocomplete="off"></label>
+          <label class="field"><span>Password</span><input type="password" data-k="qbittorrent.password" autocomplete="off"></label>
+        </div>
+        <label class="field"><span>Tags</span><input type="text" data-k="qbittorrent.tags" data-type="strs" placeholder="nzb2seed"></label>
+        <label class="check"><input type="checkbox" data-k="qbittorrent.start_when_complete"> Start seeding automatically after a 100% recheck</label>
+      </fieldset>
+      <hr>
+      <fieldset>
+        <legend>Folders</legend>
+        <p class="status" style="margin:0">SABnzbd, this machine and qBittorrent can see the same folder under different names (Docker, network shares). Translate the start of each path; the longest match wins.</p>
+        <div class="field"><span>SABnzbd path → path on this machine</span><div class="maps" id="map-sab"></div>
+          <div><button type="button" class="btn" data-addmap="map-sab">Add translation</button></div></div>
+        <div class="field"><span>Path on this machine → qBittorrent path</span><div class="maps" id="map-qb"></div>
+          <div><button type="button" class="btn" data-addmap="map-qb">Add translation</button></div></div>
+        <div class="two">
+          <label class="field"><span>Put finished torrents in</span><input type="text" data-k="paths.output_dir" placeholder="Next to where SABnzbd put the download"><small>Same drive as SABnzbd's complete folder keeps moves instant.</small></label>
+          <label class="field"><span>Keep downloaded .torrent files in</span><input type="text" data-k="paths.torrent_dir"></label>
+        </div>
+      </fieldset>
+      <hr>
+      <fieldset>
+        <legend>Defaults for new builds</legend>
+        <label class="field"><span>SABnzbd post-processing</span>
+          <select data-k="behaviour.post_processing">
+            <option value="auto">Match the torrent: +Repair when it holds RARs, +Repair/Unpack when it holds unpacked files</option>
+            <option value="repair">+Repair: keep archives packed, for torrents that contain the RARs</option>
+            <option value="unpack">+Repair/Unpack: for torrents that contain the unpacked files</option>
+          </select></label>
+        <label class="check"><input type="checkbox" data-k="behaviour.cleanup"> Delete files that are not part of the torrent (.nzb, .par2 and extras)</label>
+        <label class="check"><input type="checkbox" data-k="behaviour.local_verify"> Hash every piece here before handing the torrent to qBittorrent</label>
+      </fieldset>
+      <div class="actions">
+        <button class="btn primary">Save settings</button>
+        <button type="button" class="btn" id="testbtn">Test connections</button>
+        <span class="status" id="setstatus"></span>
+      </div>
+      <div class="tests hidden" id="tests"></div>
+    </form>
+  </section>
+</main>
+
+<div class="buildbar hidden" id="buildbar">
+  <div class="inner">
+    <div class="what" id="bwhat"></div>
+    <div class="opts" id="bopts"></div>
+    <button class="btn primary" id="buildbtn" disabled>Build torrent</button>
+  </div>
+</div>
+
+<div class="toast hidden" id="toast" role="status"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === false || v == null) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat()) if (kid != null && kid !== false) el.append(kid);
+  return el;
+}
+async function api(path, body) {
+  const opt = body === undefined ? {} :
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+let toastTimer;
+function toast(msg) {
+  const t = $("toast"); t.textContent = msg; t.classList.remove("hidden");
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), 6000);
+}
+const size = (n) => n >= 1024 ** 3 ? (n / 1024 ** 3).toFixed(2) + " GB" : (n / 1024 ** 2).toFixed(1) + " MB";
+const age = (d) => { const t = Date.parse(d); if (!t) return ""; const days = Math.floor((Date.now() - t) / 864e5); return days < 1 ? "today" : days + " days old"; };
+const norm = (s) => s.trim().toLowerCase().replace(/[\s._]+/g, ".").replace(/\.?-\.?/g, "-").replace(/^\.|\.$/g, "");
+
+/* ================= routing */
+const views = ["build", "jobs", "assemble", "settings"];
+function route() {
+  const v = views.includes(location.hash.slice(1)) ? location.hash.slice(1) : "build";
+  for (const name of views) $("view-" + name).classList.toggle("hidden", name !== v);
+  document.querySelectorAll("nav a").forEach(a =>
+    a.getAttribute("href") === "#" + v ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+  $("buildbar").classList.toggle("hidden", v !== "build" || !state.torrent);
+  if (v === "jobs") refreshJobs();
+  if (v === "settings") loadSettings();
+}
+window.addEventListener("hashchange", route);
+
+/* ================= options (shared by build bar and assemble) */
+let settings = null;
+function optionControls(prefix) {
+  const b = settings?.settings?.behaviour || {};
+  const q = settings?.settings?.qbittorrent || {};
+  return [
+    h("label", {}, "SABnzbd ",
+      h("select", { id: prefix + "pp", "aria-label": "SABnzbd post-processing" },
+        h("option", { value: "auto", selected: !b.post_processing || b.post_processing === "auto" }, "Match the torrent"),
+        h("option", { value: "repair", selected: b.post_processing === "repair" }, "+Repair"),
+        h("option", { value: "unpack", selected: b.post_processing === "unpack" }, "+Repair/Unpack"))),
+    h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "verify", checked: !!b.local_verify }), "Hash pieces here first"),
+    h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "start", checked: !!q.start_when_complete }), "Start seeding at 100%"),
+    h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "keep", checked: b.cleanup === false }), "Keep extra files"),
+  ];
+}
+function readOptions(prefix) {
+  return {
+    pp: $(prefix + "pp").value, local_verify: $(prefix + "verify").checked,
+    start: $(prefix + "start").checked, no_cleanup: $(prefix + "keep").checked,
+  };
+}
+function renderOptions() {
+  $("bopts").replaceChildren(...optionControls("b-"));
+  $("aopts").replaceChildren(...optionControls("a-"));
+  $("aopts").className = "opts actions";
+}
+
+/* ================= build */
+const state = { torrents: [], usenet: [], torrent: null, picked: new Set(), how: "", pairing: false };
+
+$("searchform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const query = $("query").value.trim();
+  if (!query) return $("query").focus();
+  $("searchbtn").disabled = true; $("searchbtn").textContent = "Searching…";
+  try {
+    const r = await api("/api/search", { query });
+    Object.assign(state, { torrents: r.torrents, usenet: r.usenet, torrent: null, picked: new Set(), how: "" });
+    const key = norm(query);
+    state.torrents.sort((a, b) => (norm(b.title) === key) - (norm(a.title) === key) || a.title.localeCompare(b.title));
+    $("intro").classList.add("hidden"); $("results").classList.remove("hidden");
+    $("tfilter").value = ""; $("ufilter").value = "";
+    renderResults();
+    const exact = state.torrents.filter(t => norm(t.title) === key);
+    if (exact.length === 1) selectTorrent(exact[0]);
+  } catch (err) { toast("Search failed: " + err.message); }
+  finally { $("searchbtn").disabled = false; $("searchbtn").textContent = "Search"; }
+});
+$("tfilter").addEventListener("input", renderResults);
+$("ufilter").addEventListener("input", renderResults);
+
+function releaseRow(r, kind, on, onpick) {
+  const meta = [r.indexer, size(r.size), r.files ? r.files + " files" : null,
+    kind === "torrent" ? (r.seeders != null ? r.seeders + " seeders" : null) : (r.grabs != null ? r.grabs + " grabs" : null),
+    age(r.publish_date)].filter(Boolean);
+  const input = h("input", { type: kind === "torrent" ? "radio" : "checkbox", name: kind, checked: on, "aria-label": r.title });
+  const row = h("label", { class: "row" + (on ? " on" : "") }, input,
+    h("div", {}, h("div", { class: "title" }, r.title),
+      h("div", { class: "meta" }, meta.map(m => h("span", {}, m)),
+        kind === "usenet" && state.torrent && norm(r.title) === norm(state.torrent.title) ? h("span", { class: "same" }, "same name as the torrent") : null)));
+  input.addEventListener("change", () => onpick(input.checked));
+  return row;
+}
+function renderResults() {
+  const tf = $("tfilter").value.toLowerCase(), uf = $("ufilter").value.toLowerCase();
+  const ts = state.torrents.filter(t => (t.title + " " + t.indexer).toLowerCase().includes(tf));
+  $("tcount").textContent = `${state.torrents.length} found`;
+  $("trows").replaceChildren(...(ts.length ? ts.map(t => releaseRow(t, "torrent", state.torrent?.guid === t.guid, () => selectTorrent(t)))
+    : [h("div", { class: "empty" }, state.torrents.length ? "Nothing matches the filter." : "No torrents found. Try a shorter search.")]));
+
+  // picked NZBs first, then the rest
+  const us = state.usenet.filter(u => (u.title + " " + u.indexer).toLowerCase().includes(uf) || state.picked.has(u.guid))
+    .sort((a, b) => state.picked.has(b.guid) - state.picked.has(a.guid) || (b.grabs || 0) - (a.grabs || 0));
+  $("ucount").textContent = `${state.usenet.length} found`;
+  $("urows").replaceChildren(...(us.length ? us.map(u => releaseRow(u, "usenet", state.picked.has(u.guid), (on) => {
+      on ? state.picked.add(u.guid) : state.picked.delete(u.guid); state.how = ""; renderResults(); renderBar();
+    }))
+    : [h("div", { class: "empty" }, state.usenet.length ? "Nothing matches the filter." : "No Usenet results. Try a different search.")]));
+  const hint = $("pairhint");
+  hint.textContent = state.pairing ? "Looking for the matching NZBs…" : state.how;
+  hint.classList.toggle("hidden", !(state.pairing || state.how));
+  renderBar();
+}
+async function selectTorrent(t) {
+  state.torrent = t; state.picked = new Set(); state.how = ""; state.pairing = true;
+  renderResults(); route();
+  try {
+    const r = await api("/api/pair", { torrent: t, usenet: state.usenet });
+    if (state.torrent !== t) return;
+    state.usenet = r.usenet;
+    r.groups.flat().forEach(g => state.picked.add(g));
+    const fallbacks = r.groups.length === 1 && r.groups[0].length > 1;
+    state.how = r.groups.length
+      ? (r.how.startsWith("exact") ? `Same name as the torrent on ${r.groups[0].length} indexer${r.groups[0].length > 1 ? "s" : ""}.` : `Season pack: ${r.groups.length} episode NZBs.`)
+        + (fallbacks ? " nzb2seed looks inside them, skips any smaller than the torrent and downloads the most complete post first; the rest are backups." : "")
+      : "No NZB has the torrent's name. Tick the ones that contain its files.";
+  } catch (err) { state.how = "Could not match NZBs: " + err.message; }
+  state.pairing = false; renderResults();
+}
+function renderBar() {
+  const bar = $("bwhat"); const t = state.torrent;
+  if (!t) return;
+  const picked = state.usenet.filter(u => state.picked.has(u.guid));
+  const groups = new Map(); picked.forEach(u => { const k = norm(u.title); if (!groups.has(k)) groups.set(k, u); });
+  const total = [...groups.values()].reduce((s, u) => s + u.size, 0);
+  bar.replaceChildren(h("b", {}, t.title),
+    h("small", {}, picked.length
+      ? `from ${groups.size} Usenet release${groups.size > 1 ? "s" : ""}: ${size(total)} of Usenet for ${size(t.size)} of torrent` + (total < t.size * 0.97 ? ". This looks too small; some files may be missing." : "")
+      : "Tick at least one NZB on the right."));
+  $("buildbtn").disabled = !picked.length || state.pairing;
+}
+$("buildbtn").addEventListener("click", async () => {
+  const nzbs = state.usenet.filter(u => state.picked.has(u.guid));
+  $("buildbtn").disabled = true;
+  try {
+    const r = await api("/api/build", { torrent: state.torrent, nzbs, options: readOptions("b-") });
+    openJob(r.id);
+  } catch (err) { toast("Could not start the build: " + err.message); renderBar(); }
+});
+
+/* ================= jobs */
+let jobs = [], current = null, cursor = 0, logSteps = [], pollTimer = null;
+async function refreshJobs() {
+  try { jobs = await api("/api/jobs"); } catch { return; }
+  const running = jobs.filter(j => j.status === "running").length;
+  $("runcount").textContent = running; $("runcount").classList.toggle("hidden", !running);
+  if (location.hash !== "#jobs") return;
+  $("joblist").replaceChildren(...(jobs.length ? jobs.map(j => h("button", { "aria-current": String(j.id === current), onclick: () => openJob(j.id) },
+      h("div", { class: "t" }, h("span", { class: "dot " + j.status }), j.title),
+      h("div", { class: "s" }, j.status === "running" ? (j.steps.at(-1) || "Starting") : (j.result || j.status))))
+    : [h("div", { class: "empty" }, "No builds yet. Start one from Build.")]));
+  if (!current && jobs.length) openJob(jobs[0].id, false);
+}
+function openJob(id, navigate = true) {
+  if (current !== id) { current = id; cursor = 0; logSteps = []; $("jlog").replaceChildren(); $("jsteps").replaceChildren(); lastPieces = ""; }
+  if (navigate && location.hash !== "#jobs") location.hash = "#jobs";
+  $("job").classList.remove("hidden");
+  pollJob(); refreshJobs();
+}
+async function pollJob() {
+  clearTimeout(pollTimer);
+  if (current == null) return;
+  let j;
+  try { j = await api(`/api/jobs/${current}?since=${cursor}`); } catch { pollTimer = setTimeout(pollJob, 3000); return; }
+  $("jtitle").textContent = j.title;
+  const res = $("jresult");
+  res.textContent = j.status === "running" ? "Building…" : j.status === "cancelled" ? "Cancelled" : j.result;
+  res.className = "result " + j.status;
+  $("jcancel").classList.toggle("hidden", j.status !== "running");
+
+  const pre = $("jlog"); const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 20;
+  for (const l of j.lines) {
+    if (l.k === "step") logSteps.push(l.t);
+    pre.append(h("span", { class: l.k === "step" ? "step" : l.k === "warn" ? "warn" : "" },
+      (l.k === "step" ? "\n==> " : l.k === "warn" ? "  ! " : l.k === "info" ? "    " : "") + l.t + "\n"));
+  }
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+  cursor = j.next;
+  const steps = $("jsteps");
+  steps.replaceChildren(...logSteps.map((s, i) => h("li", { class: i === logSteps.length - 1 && j.status !== "done" ? "now" + (["failed", "cancelled", "interrupted"].includes(j.status) ? " failed" : "") : "" }, s)));
+  $("jprogress").textContent = j.progress || "";
+  drawPieces(j.pieces);
+  if (j.status === "running") pollTimer = setTimeout(pollJob, 1000);
+  else refreshJobs();
+}
+$("jcancel").addEventListener("click", async () => {
+  try { await api(`/api/jobs/${current}/cancel`, {}); toast("Cancelling after the current step…"); } catch (err) { toast(err.message); }
+});
+
+/* the piece map: every piece of the torrent, grey until verified */
+let lastPieces = "";
+function drawPieces(p) {
+  const wrap = $("jmap");
+  wrap.classList.toggle("hidden", !p);
+  if (!p) return;
+  lastPieces = p;
+  const c = $("jcanvas"), dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, hgt = c.clientHeight;
+  c.width = Math.round(w * dpr); c.height = Math.round(hgt * dpr);
+  const ctx = c.getContext("2d"); ctx.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const col = { ok: css.getPropertyValue("--ok"), soft: css.getPropertyValue("--ok-soft"), bad: css.getPropertyValue("--bad"), idle: css.getPropertyValue("--idle") };
+  const n = p.length;
+  let good = 0, bad = 0;
+  for (const ch of p) { if (ch === "#") good++; else if (ch === "x") bad++; }
+  if (n <= w / 2) {                       // one visible cell per piece
+    const cw = w / n;
+    for (let i = 0; i < n; i++) {
+      ctx.fillStyle = p[i] === "#" ? col.ok : p[i] === "x" ? col.bad : col.idle;
+      ctx.fillRect(i * cw, 0, Math.max(cw - (cw > 4 ? 1 : 0), 1), hgt);
+    }
+  } else {                                // one column per pixel, summarising its pieces
+    for (let x = 0; x < w; x++) {
+      const a = Math.floor(x * n / w), b = Math.max(a + 1, Math.floor((x + 1) * n / w));
+      let g = 0, x_ = 0;
+      for (let i = a; i < b; i++) { if (p[i] === "#") g++; else if (p[i] === "x") x_++; }
+      ctx.fillStyle = x_ ? col.bad : g === b - a ? col.ok : g ? col.soft : col.idle;
+      ctx.fillRect(x, 0, 1, hgt);
+    }
+  }
+  const key = (v, label) => h("span", {}, h("i", { style: `background:var(${v})` }), label);
+  $("jlegend").replaceChildren(...[
+    h("span", {}, `${good.toLocaleString()} of ${n.toLocaleString()} pieces verified (${(good / n * 100).toFixed(1)}%)`),
+    key("--ok", "verified"), bad ? key("--bad", `${bad.toLocaleString()} failed`) : null,
+    good + bad < n ? key("--idle", "not checked yet") : null].filter(Boolean));
+}
+window.addEventListener("resize", () => lastPieces && drawPieces(lastPieces));
+
+/* ================= assemble */
+$("asmform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = { sources: $("asources").value.split("\n"), options: { ...readOptions("a-"), output_dir: $("aoutput").value.trim() } };
+  const f = $("atfile").files[0];
+  if (f) {
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    body.torrent_b64 = btoa(bin); body.torrent_name = f.name;
+  } else body.torrent_path = $("atpath").value;
+  try { const r = await api("/api/assemble", body); openJob(r.id); }
+  catch (err) { toast(err.message); }
+});
+
+/* ================= settings */
+function get(obj, path) { return path.split(".").reduce((o, k) => (o || {})[k], obj); }
+function set(obj, path, v) { const ks = path.split("."); const last = ks.pop(); ks.reduce((o, k) => (o[k] ??= {}), obj)[last] = v; }
+function mapRow(from = "", to = "") {
+  const row = h("div", { class: "maprow" },
+    h("input", { type: "text", value: from, placeholder: "/downloads", "aria-label": "From" }),
+    h("span", { class: "arrow" }, "→"),
+    h("input", { type: "text", value: to, placeholder: "\\\\NAS\\downloads", "aria-label": "To" }),
+    h("button", { type: "button", class: "btn", onclick: () => row.remove() }, "Remove"));
+  return row;
+}
+document.querySelectorAll("[data-addmap]").forEach(b => b.addEventListener("click", () => $(b.dataset.addmap).append(mapRow())));
+async function loadSettings() {
+  try { settings = await api("/api/settings"); } catch (err) { toast(err.message); return; }
+  const s = settings.settings;
+  $("cfgpath").textContent = settings.exists ? `Saved in ${settings.path}` : `Nothing saved yet. Saving creates ${settings.path}.`;
+  document.querySelectorAll("#setform [data-k]").forEach(el => {
+    const v = get(s, el.dataset.k);
+    if (el.type === "checkbox") el.checked = !!v;
+    else if (Array.isArray(v)) el.value = v.join(", ");
+    else el.value = v ?? "";
+  });
+  $("map-sab").replaceChildren(...(s.paths.sab_to_local || []).map(p => mapRow(...p)));
+  $("map-qb").replaceChildren(...(s.paths.local_to_qbit || []).map(p => mapRow(...p)));
+  renderOptions();
+}
+function readSettings() {
+  const out = JSON.parse(JSON.stringify(settings.settings));
+  document.querySelectorAll("#setform [data-k]").forEach(el => {
+    let v = el.type === "checkbox" ? el.checked : el.value.trim();
+    const t = el.dataset.type;
+    if (t === "ints") v = v ? v.split(/[,\s]+/).filter(Boolean).map(Number) : [];
+    if (t === "strs") v = v ? v.split(/[,\s]+/).filter(Boolean) : [];
+    if (t === "int") v = Number(v);
+    set(out, el.dataset.k, v);
+  });
+  const maps = (id) => [...$(id).querySelectorAll(".maprow")].map(r => [...r.querySelectorAll("input")].map(i => i.value.trim())).filter(([a, b]) => a && b);
+  out.paths.sab_to_local = maps("map-sab"); out.paths.local_to_qbit = maps("map-qb");
+  return out;
+}
+$("setform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if ([...document.querySelectorAll("[data-type=ints]")].some(el => el.value.split(/[,\s]+/).filter(Boolean).some(x => isNaN(Number(x)))))
+    return toast("Indexer ids and categories are numbers, separated by commas.");
+  try { settings = await api("/api/settings", { settings: readSettings() }); $("setstatus").textContent = "Saved."; renderOptions(); loadSettings(); }
+  catch (err) { $("setstatus").textContent = "Not saved: " + err.message; }
+});
+$("testbtn").addEventListener("click", async () => {
+  const box = $("tests"); box.classList.remove("hidden");
+  box.replaceChildren(h("div", {}, h("span", {}, "Testing…")));
+  try {
+    const r = await api("/api/test", {});
+    const names = { prowlarr: "Prowlarr", sabnzbd: "SABnzbd", qbittorrent: "qBittorrent" };
+    box.replaceChildren(...Object.entries(r).map(([k, v]) => h("div", {}, h("b", {}, names[k]), h("span", { class: v.ok ? "ok" : "bad" }, v.text))));
+  } catch (err) { box.replaceChildren(h("div", {}, h("span", { class: "bad" }, err.message))); }
+});
+
+/* ================= start */
+(async () => {
+  try { settings = await api("/api/settings"); } catch { settings = null; }
+  renderOptions();
+  if (settings && !settings.exists && !location.hash) location.hash = "#settings";
+  route();
+  setInterval(refreshJobs, 3000); refreshJobs();
+})();
+</script>
+</body>
+</html>

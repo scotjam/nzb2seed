@@ -1,0 +1,50 @@
+# Copy to nzb2seed.toml (next to this file, in the current directory, or point
+# NZB2SEED_CONFIG / --config at it) and fill in your values.
+
+[prowlarr]
+url = "http://nas.local:9696"
+api_key = ""                 # Prowlarr > Settings > General > API Key
+indexer_ids = []             # optional: restrict searches to these indexer ids
+categories = []              # optional: newznab/torznab category ids, e.g. [5000] for TV
+
+[sabnzbd]
+url = "http://nas.local:8080"
+api_key = ""                 # SABnzbd > Config > General > API Key (full key, not the NZB key)
+# Use a category that Sonarr/Radarr do NOT watch, or they may import/rename/delete
+# the files before nzb2seed gets to them.
+category = "nzb2seed"
+priority = 0                 # -1 low, 0 normal, 1 high, 2 force
+delete_history = false       # remove the job from SABnzbd history afterwards (files are kept)
+
+[qbittorrent]
+url = "http://nas.local:8081"
+username = "admin"
+password = ""
+category = ""                # optional qBittorrent category
+tags = ["nzb2seed"]
+start_when_complete = false  # start seeding automatically after a 100% recheck
+
+[paths]
+# SABnzbd reports paths as *it* sees them (e.g. inside its Docker container).
+# Map them to how *this* machine sees them. Longest matching prefix wins.
+sab_to_local = [
+  # ["/downloads", "\\\\nas\\downloads"],
+]
+# And map this machine's paths to how *qBittorrent* sees them.
+local_to_qbit = [
+  # ["\\\\nas\\downloads", "/data/downloads"],
+]
+# Local folder the torrent's data should end up in. Empty = the SABnzbd job's
+# parent folder (so a multi-file torrent lands next to where SABnzbd put it).
+# Keep it on the same filesystem as SABnzbd's complete folder so moves are instant.
+output_dir = ""
+torrent_dir = "torrents"     # where downloaded .torrent files are kept (relative to this file)
+
+[behaviour]
+# "auto"   = +Repair when the torrent holds RAR archives, +Repair/Unpack when it holds
+#            the unpacked files (SABnzbd keeps the archives; they are removed as extras)
+# "repair" = always +Repair       "unpack" = always +Repair/Unpack
+# +Delete is never used.
+post_processing = "auto"
+cleanup = true               # delete .nzb/.par2/.sfv/etc. that are not part of the torrent
+local_verify = false         # hash every piece locally before qBittorrent (reads all data twice)
