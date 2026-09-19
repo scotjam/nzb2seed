@@ -61,8 +61,8 @@ retry_bad_pieces = true      # if pieces fail, download other posts of the relea
                              # (switches local hashing on; the build screen can turn it off per build)
 
 [network]
-# Everything nzb2seed fetches from the internet goes through this proxy, e.g. the VPN
-# container's HTTP proxy bound to 127.0.0.1: .nzb files from Usenet indexers (Prowlarr
-# always redirects those to the indexer) and the srrDB / predb / xrel.to / TVmaze lookups.
-# Left empty, none of that is fetched - nothing goes out from this machine's own address.
+# nzb2seed never contacts an indexer or tracker: Prowlarr searches and fetches .torrent
+# files, SABnzbd fetches .nzb files. Its only own internet use - srrDB / predb / xrel.to /
+# TVmaze lookups - goes through this proxy, e.g. the VPN container's HTTP proxy bound to
+# 127.0.0.1; left empty, those lookups are skipped.
 proxy = ""

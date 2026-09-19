@@ -513,7 +513,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             sn = int(body["season"])
             eps = metadata.tvmaze_episodes(show["id"], sn)
             wanted = [e["number"] for e in eps]
-            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key, app.cfg.outbound_proxy)
+            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key)
             opts = season_mod.find_options(app.cfg, pr, show["name"], sn, wanted)
             return self._json({"show": show, "episodes": eps, "links": metadata.links(show),
                                "options": [o.summary(wanted) for o in opts]})
@@ -558,7 +558,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             cfg = app.cfg
             out = {}
             checks = {
-                "prowlarr": lambda: Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy).status(),
+                "prowlarr": lambda: Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key).status(),
                 "sabnzbd": lambda: f"SABnzbd {SABnzbd(cfg.sab_url, cfg.sab_key).version()}",
                 "qbittorrent": lambda: self._qb_check(cfg),
             }
@@ -578,7 +578,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
         def pair(self, body):
             torrent = _rel(body["torrent"])
             nzbs = [_rel(n) for n in body.get("usenet", [])]
-            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key, app.cfg.outbound_proxy)
+            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key)
             groups, nzbs, how = pair(app.cfg, pr, torrent, nzbs)
             return self._json({"groups": [[n.guid for n in g] for g in groups],
                                "usenet": [dataclasses.asdict(n) for n in nzbs], "how": how})

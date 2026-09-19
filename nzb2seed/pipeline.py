@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from . import metadata
 from . import assemble as asm
-from . import archives, matching, nzbinfo
+from . import archives, grab, matching, nzbinfo
 from .clients import (PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
                       Prowlarr, QBittorrent, Release, SABnzbd)
 from .config import Config
@@ -53,7 +53,7 @@ def gb(n: int) -> str:
 # ---------------------------------------------------------------- pairing
 
 def search(cfg: Config, query: str) -> tuple[list[Release], list[Release]]:
-    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy)
+    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
     results = pr.search(query, cfg.indexer_ids, cfg.categories)
     return ([r for r in results if r.protocol == "torrent"],
             [r for r in results if r.protocol == "usenet"])
@@ -173,7 +173,9 @@ def ledger_for(cfg: Config) -> Ledger:
 _current_torrent = ""   # infohash of the torrent being built, recorded with each SABnzbd job
 
 
-def sab_submit(cfg: Config, pr: Prowlarr, sab: SABnzbd, rel: Release, data: bytes | None, pp: int) -> str:
+def sab_submit(cfg: Config, pr, sab: SABnzbd, rel: Release, data: bytes | None, pp: int) -> str:
+    """Start downloading a post. With a grab.Source, the paused SABnzbd job that fetched
+    its NZB is resumed (nzb2seed never downloads an NZB from an indexer itself)."""
     nzb = data if data is not None else pr.fetch(rel)
     if b"<nzb" not in nzb[:4096].lower():
         raise ApiError(f"{rel.indexer} did not return an NZB for {rel.title}")
@@ -181,7 +183,10 @@ def sab_submit(cfg: Config, pr: Prowlarr, sab: SABnzbd, rel: Release, data: byte
         ids = nzbinfo.post_ids(nzb)
     except ET.ParseError:
         ids = []
-    nzo = sab.add_nzb(nzb, rel.title, cfg.sab_category, pp, cfg.sab_priority)
+    if hasattr(pr, "start"):
+        nzo = pr.start(rel, pp)
+    else:
+        nzo = sab.add_nzb(nzb, rel.title, cfg.sab_category, pp, cfg.sab_priority)
     ledger_for(cfg).record(nzo, rel.title, rel.guid, rel.indexer, rel.size, _current_torrent, ids)
     mode = sab.ensure_pp(nzo, pp)
     info(f"{nzo}  {mode:<16} {rel.title}  ({rel.indexer}, {gb(rel.size)})")
@@ -216,6 +221,12 @@ def _contents(first: str) -> tuple[list, bool]:
         return _listings[key], False
     _listings[key] = archives.list_contents(first)
     return _listings[key], True
+
+
+def _drop(pr, rel: Release):
+    """A post that will not be downloaded: its paused NZB-check job goes."""
+    if hasattr(pr, "drop"):
+        pr.drop(rel)
 
 
 def unpack_from_archives(d: str, wanted: list) -> bool:
@@ -849,6 +860,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     return
                 info(f"{why}, and that one " + ("failed in SABnzbd" if state == "failed"
                                                 else f"did not hold all of {u.need.label}") + " - skipping it")
+                _drop(pr, rel)
                 continue
             try:
                 nzo = sab_submit(cfg, pr, sab, rel, data, pp)
@@ -1140,6 +1152,7 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                         prev = earlier_post(rt.cfg, rt.sab, rel, data)
                         if prev and prev[0] != "downloading":
                             info(f"{prev[3]} - skipping it")
+                            _drop(rt.pr, rel)
                             continue
                         nzo = prev[1] if prev else sab_submit(rt.cfg, rt.pr, rt.sab, rel, data, rt.pp)
                 except ApiError as e:
@@ -1410,14 +1423,17 @@ def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[
                 torrent_data: bytes | None = None) -> dict:
     """Everything after the releases have been chosen. ``torrent_data``: a .torrent the
     user supplied, used instead of downloading one."""
-    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy)
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
+    pr = grab.Source(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), sab)
     qb = None if opts.no_qbit else QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
     info(f"SABnzbd {sab.version()}")
+    if n := grab.remove_stray_checks(sab):
+        info(f"removed {n} paused NZB-check job(s) an interrupted build left in SABnzbd")
     metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)   # srrDB, for scene releases
     try:
         return _execute_run(cfg, opts, pr, sab, qb, tor_rel, groups, torrent_data)
     finally:
+        pr.close()                      # paused NZB-check jobs of posts not used
         metadata.close_session()
 
 

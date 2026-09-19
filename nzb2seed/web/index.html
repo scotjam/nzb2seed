@@ -474,7 +474,7 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
       <fieldset>
         <legend>Outbound proxy</legend>
         <label class="field"><span>Proxy URL</span><input type="text" data-k="network.proxy" placeholder="http://127.0.0.1:8888">
-          <small>Everything nzb2seed fetches from the internet goes through this proxy (e.g. the VPN container's HTTP proxy, bound to 127.0.0.1): .nzb files from Usenet indexers (Prowlarr redirects those to the indexer) and the srrDB / predb / xrel.to / TVmaze lookups. Empty: none of that is fetched - nothing goes out from this machine's own address.</small></label>
+          <small>nzb2seed never contacts an indexer or tracker: Prowlarr searches and fetches .torrent files, SABnzbd fetches .nzb files. Its only own internet use - the srrDB / predb / xrel.to / TVmaze lookups - goes through this proxy (e.g. the VPN container's HTTP proxy, bound to 127.0.0.1). Empty: those lookups are skipped rather than made from this machine's own address.</small></label>
       </fieldset>
       <hr>
       <fieldset>
