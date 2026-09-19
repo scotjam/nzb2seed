@@ -41,17 +41,25 @@ def fake_urlopen(site_body, site_status, calls):
     return urlopen
 
 
+def stub(monkeypatch, fn):
+    """The internet (only through the proxy) and FlareSolverr (on the LAN) both answer via fn."""
+    class Local:
+        open = staticmethod(fn)
+    monkeypatch.setattr(metadata, "_urlopen", fn)
+    monkeypatch.setattr(metadata, "_LOCAL", Local())
+
+
 def test_plain_json_is_used_directly(monkeypatch):
     calls = []
-    monkeypatch.setattr(metadata.urllib.request, "urlopen", fake_urlopen(b'{"a": 1}', 200, calls))
-    metadata.configure("http://fs:8191")
+    stub(monkeypatch, fake_urlopen(b'{"a": 1}', 200, calls))
+    metadata.configure("http://fs:8191", "http://proxy:8888")
     assert metadata.get_json("https://example/x") == ({"a": 1}, None) and calls == []
 
 
 def test_challenge_goes_through_flaresolverr_with_one_session(monkeypatch):
     calls = []
-    monkeypatch.setattr(metadata.urllib.request, "urlopen", fake_urlopen(CHALLENGE, 403, calls))
-    metadata.configure("http://fs:8191")
+    stub(monkeypatch, fake_urlopen(CHALLENGE, 403, calls))
+    metadata.configure("http://fs:8191", "http://proxy:8888")
     try:
         r1 = metadata.predb_me("Rel-GRP")
         r2 = metadata.predb_me("Rel-GRP")
@@ -65,7 +73,7 @@ def test_challenge_goes_through_flaresolverr_with_one_session(monkeypatch):
 
 
 def test_challenge_without_flaresolverr_is_reported(monkeypatch):
-    monkeypatch.setattr(metadata.urllib.request, "urlopen", fake_urlopen(CHALLENGE, 403, []))
-    metadata.configure("")
+    stub(monkeypatch, fake_urlopen(CHALLENGE, 403, []))
+    metadata.configure("", "http://proxy:8888")
     r = metadata.predb_me("Rel-GRP")
     assert not r["available"] and "no FlareSolverr" in r["why"]

@@ -15,6 +15,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
+from . import metadata
 from . import assemble as asm
 from . import archives, matching, nzbinfo
 from .clients import (PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
@@ -52,7 +53,7 @@ def gb(n: int) -> str:
 # ---------------------------------------------------------------- pairing
 
 def search(cfg: Config, query: str) -> tuple[list[Release], list[Release]]:
-    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
+    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy)
     results = pr.search(query, cfg.indexer_ids, cfg.categories)
     return ([r for r in results if r.protocol == "torrent"],
             [r for r in results if r.protocol == "usenet"])
@@ -137,26 +138,28 @@ def choose_pp(opts: Options, cfg: Config, t: Torrent) -> int:
 def rank_posts(pr: Prowlarr, t: Torrent, group: list[Release]):
     """Candidate posts for one release, best first: [(release, nzb bytes | None, score | None)].
 
-    NZBs smaller than the torrent are dropped (they cannot hold all of it), same-size
-    NZBs are treated as one post, and the rest are ranked by looking inside them."""
+    NZBs smaller than the torrent are dropped (they cannot hold all of it), the rest are
+    ranked by looking inside them, and NZBs of the very same post (same Usenet articles,
+    listed by several indexers) count once."""
     big = [r for r in group if r.size >= t.total_size]
     if len(big) < len(group):
         info(f"skipping {len(group) - len(big)} NZB(s) smaller than the torrent ({gb(t.total_size)}); "
              "they cannot contain all of it")
-    seen, uniq = set(), []
-    for r in sorted(big, key=lambda r: -(r.grabs or 0)):
-        if r.size not in seen:
-            seen.add(r.size)
-            uniq.append(r)
-    ranked = []
+    uniq = sorted(big, key=lambda r: -(r.grabs or 0))
+    ranked, seen = [], []
     for r in uniq[:MAX_PEEK]:
         check_cancel()
         try:
             data = pr.fetch(r)
             sc = nzbinfo.score(nzbinfo.parse(data), t)
+            ids = set(nzbinfo.post_ids(data))
         except (ApiError, ET.ParseError) as e:
             warn(f"{r.indexer}: could not read the NZB ({e})")
             continue
+        if ids and ids in seen:
+            info(f"{r.indexer[:16]:<16} {gb(r.size):>9}  the same post as one listed above")
+            continue
+        seen.append(ids)
         info(f"{r.indexer[:16]:<16} {gb(r.size):>9}  {sc.summary}")
         ranked.append((r, data, sc))
     ranked.sort(key=lambda x: (x[2].key, x[0].grabs or 0), reverse=True)
@@ -174,8 +177,12 @@ def sab_submit(cfg: Config, pr: Prowlarr, sab: SABnzbd, rel: Release, data: byte
     nzb = data if data is not None else pr.fetch(rel)
     if b"<nzb" not in nzb[:4096].lower():
         raise ApiError(f"{rel.indexer} did not return an NZB for {rel.title}")
+    try:
+        ids = nzbinfo.post_ids(nzb)
+    except ET.ParseError:
+        ids = []
     nzo = sab.add_nzb(nzb, rel.title, cfg.sab_category, pp, cfg.sab_priority)
-    ledger_for(cfg).record(nzo, rel.title, rel.guid, rel.indexer, rel.size, _current_torrent)
+    ledger_for(cfg).record(nzo, rel.title, rel.guid, rel.indexer, rel.size, _current_torrent, ids)
     mode = sab.ensure_pp(nzo, pp)
     info(f"{nzo}  {mode:<16} {rel.title}  ({rel.indexer}, {gb(rel.size)})")
     return nzo
@@ -198,6 +205,19 @@ def supplies(t: Torrent, d: str, target: str | None, unpack: bool = True) -> boo
     return False
 
 
+_listings: dict[tuple, list] = {}
+
+
+def _contents(first: str) -> tuple[list, bool]:
+    """(entries, first time) - an archive is listed once per build, and reported once."""
+    st = os.stat(first)
+    key = (os.path.abspath(first), st.st_mtime, st.st_size)
+    if key in _listings:
+        return _listings[key], False
+    _listings[key] = archives.list_contents(first)
+    return _listings[key], True
+
+
 def unpack_from_archives(d: str, wanted: list) -> bool:
     """Extract the torrent files in ``wanted`` from RAR sets in download folder ``d``.
     A file is recognised by its exact size (and, for small files, its name too - posters
@@ -209,7 +229,7 @@ def unpack_from_archives(d: str, wanted: list) -> bool:
     for first in sets:
         name = os.path.basename(first)
         try:
-            entries = archives.list_contents(first)
+            entries, fresh = _contents(first)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             warn(f"cannot look inside {name}: {e}")
             continue
@@ -221,7 +241,8 @@ def unpack_from_archives(d: str, wanted: list) -> bool:
                     members.append(path)
                     break
         if not members:
-            info(f"{name}: none of the needed files are inside ({len(entries)} file(s) in the archive)")
+            if fresh:
+                info(f"{name}: none of the needed files are inside ({len(entries)} file(s) in the archive)")
             continue
         info(f"{name} holds {len(members)} needed file(s): " + ", ".join(os.path.basename(m) for m in members[:3])
              + " - unpacking into the download folder")
@@ -244,6 +265,34 @@ def failed_before(cfg: Config, sab: SABnzbd, rel: Release) -> bool:
         except ApiError:
             pass
     return False
+
+
+def earlier_post(cfg: Config, sab: SABnzbd, rel: Release, nzb: bytes):
+    """An earlier download that held every file of this post (same Usenet articles - the
+    same post on another indexer, or one listing fewer of its files):
+    (state, nzo, folder, why) with state "downloading", "done" or "failed"; None when
+    this post has something no earlier download had."""
+    try:
+        ids = nzbinfo.post_ids(nzb)
+    except ET.ParseError:
+        return None
+    for j in ledger_for(cfg).covering(ids):
+        try:
+            status, slot = sab.status(j["nzo"])
+        except ApiError:
+            continue
+        why = (f"{rel.title} ({rel.indexer}) has no file that {j.get('title')} "
+               f"({j.get('indexer') or 'an earlier download'}, {j['nzo']}) did not have")
+        if status in SAB_FAILED:
+            return "failed", j["nzo"], None, why
+        if status.startswith("Queued:") or status not in SAB_DONE | {"Unknown"}:
+            return "downloading", j["nzo"], None, why
+        if status in SAB_DONE:
+            try:
+                return "done", j["nzo"], job_dir(cfg, slot, j.get("title", "")), why
+            except Abort:
+                continue                  # its files are gone: this post is worth downloading
+    return None
 
 
 def reuse(cfg: Config, sab: SABnzbd, rel: Release, ok) -> tuple[str, str | None] | None:
@@ -273,6 +322,7 @@ def reuse(cfg: Config, sab: SABnzbd, rel: Release, ok) -> tuple[str, str | None]
 def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
     """Wait until every job has finished; return {nzo: (status, slot)}."""
     out: dict[str, tuple[str, dict]] = {}
+    no_path_since: dict[str, float] = {}
     while len(out) < len(nzos):
         check_cancel()
         parts = []
@@ -280,6 +330,11 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
             if nzo in out:
                 continue
             status, slot = sab.status(nzo)
+            if status in SAB_DONE and not slot.get("storage") \
+                    and time.monotonic() - no_path_since.setdefault(nzo, time.monotonic()) < 120:
+                # SABnzbd can mark a job Completed a moment before it records where the files went
+                parts.append("finishing")
+                continue
             if status in SAB_DONE or status in SAB_FAILED:
                 out[nzo] = (status, slot)
                 msg = f"{status.lower()}: {title}"
@@ -436,17 +491,15 @@ def usenet_results(cfg: Config, pr: Prowlarr, need: Need, known: list[Release]) 
 def find_alternatives(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
                       known: list[Release] = ()) -> list[Release]:
     """Other posts of the same release (same group, episode and resolution) that are at
-    least as large as the file they must supply. Posts with a size already tried are
-    skipped: the same post on another indexer fails the same way."""
+    least as large as the file they must supply. Whether one is the same post as one tried
+    already is decided from its NZB when it comes up (earlier_post), not from its size."""
     tried_guids = {r.guid for r in tried}
-    tried_sizes = {r.size for r in tried}
     step(f"Looking for another {need.group.upper() if need.group else 'matching'} post of {need.label}"
          f" (at least {gb(need.min_size)})")
-    out, sizes = [], set()
+    out = []
     for r in sorted(usenet_results(cfg, pr, need, known), key=lambda r: -(r.grabs or 0)):
-        if r.guid in tried_guids or r.size in tried_sizes or r.size in sizes or _fits(need, r):
+        if r.guid in tried_guids or _fits(need, r):
             continue
-        sizes.add(r.size)
         out.append(r)
     for r in out:
         info(f"candidate: {r.title}  ({r.indexer}, {gb(r.size)}, {r.grabs} grabs)")
@@ -558,15 +611,21 @@ class Unit:
         for c in self.children:
             yield from c.walk()
 
-    def satisfied_by(self, t: Torrent, d: str) -> bool:
+    def satisfied_by(self, t: Torrent, d: str, fill=None) -> bool:
         """Does download folder ``d`` hold every file of this unit? RAR archives in it are
-        looked into (and the needed files unpacked) before answering no."""
+        looked into (and the needed files unpacked), and ``fill(d, missing)`` - srrDB's
+        rebuild of a scene release - gets a go, before answering no."""
         want = {f.relpath for f in self.files}
         found = set(asm.find_sources(t, [d])) & want
         if found == want:
             return True
         missing = [f for f in self.files if f.relpath not in found]
         if unpack_from_archives(d, missing):
+            found = set(asm.find_sources(t, [d])) & want
+            if found == want:
+                return True
+            missing = [f for f in self.files if f.relpath not in found]
+        if fill and fill(d, missing):
             return want <= set(asm.find_sources(t, [d]))
         return False
 
@@ -651,6 +710,32 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     the children they cover."""
     root = build_units(t, title)
     units = list(root.walk())
+    _listings.clear()
+
+    from . import scenefill, season as season_mod   # season imports this module
+    scenefill.reset()
+    fetcher = season_mod.FileFetcher(cfg, pr, sab, set())
+    looked: list[str] = []                      # download folders checked for this build
+
+    def fill(d: str, missing: list) -> bool:
+        return packed_release(t) and scenefill.fill(t, d, missing, fetcher)
+
+    def satisfied(u: "Unit", d: str) -> bool:
+        """Does ``d`` - together with the folders already looked at - hold the unit? Files
+        rebuilt or fetched into one folder are not made again for the next."""
+        if d not in looked:
+            looked.append(d)
+        if u.satisfied_by(t, d, fill):
+            return True
+        others = [x for x in looked if x != d and os.path.isdir(x)]
+        want = {f.relpath for f in u.files}
+        if others and want <= set(asm.find_sources(t, [d] + others)):
+            info(f"{u.need.label}: complete across {len(others) + 1} downloads")
+            for x in others:
+                if x not in dirs:
+                    dirs.append(x)
+            return True
+        return False
 
     # the person's picks go to the unit whose kind they are
     for p in picks:
@@ -693,10 +778,9 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             if not u.queue:
                 info(f"{u.need.label}: none found")
         tried_guids = {r.guid for r in u.tried} | attempted
-        tried_sizes = {r.size for r in u.tried if r.size}
         while u.queue:
             r = u.queue.pop(0)
-            if r.guid not in tried_guids and r.size not in tried_sizes:
+            if r.guid not in tried_guids:
                 return r
         return None
 
@@ -704,7 +788,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         kinds = {c.level for c in u.children}
         info(f"{u.need.label}: going to {'season' if 'season' in kinds else 'episode'} NZBs")
         for c in u.children:
-            d = next((d for d, _ in partials if c.satisfied_by(t, d)), None)
+            d = next((d for d, _ in partials if satisfied(c, d)), None)
             if d:
                 info(f"{c.need.label}: already in an earlier download ({os.path.basename(d)})")
                 resolve(c, d, None)
@@ -740,12 +824,34 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             attempted.add(rel.guid)
             if failed_before(cfg, sab, rel):
                 continue
-            again = reuse(cfg, sab, rel, lambda d: u.satisfied_by(t, d))
+            again = reuse(cfg, sab, rel, lambda d: satisfied(u, d))
             if again and again[1]:
                 resolve(u, again[1], again[0])
                 return
+            if again:
+                pending[again[0]] = (u, rel)
+                return
             try:
-                nzo = again[0] if again else sab_submit(cfg, pr, sab, rel, None, pp)
+                data = pr.fetch(rel)
+            except ApiError as e:
+                warn(f"{rel.indexer}: {e}")
+                continue
+            prev = earlier_post(cfg, sab, rel, data)
+            if prev:
+                state, pnzo, pd, why = prev
+                if state == "downloading":
+                    info(f"{why}; that one is still downloading - waiting for it instead")
+                    pending[pnzo] = (u, rel)
+                    return
+                if state == "done" and satisfied(u, pd):
+                    info(f"{why} - using that download")
+                    resolve(u, pd, pnzo)
+                    return
+                info(f"{why}, and that one " + ("failed in SABnzbd" if state == "failed"
+                                                else f"did not hold all of {u.need.label}") + " - skipping it")
+                continue
+            try:
+                nzo = sab_submit(cfg, pr, sab, rel, data, pp)
             except ApiError as e:
                 warn(f"{rel.indexer}: {e}")
                 continue
@@ -762,7 +868,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             u, rel = batch[nzo]
             if status in SAB_DONE:
                 d = job_dir(cfg, slot_info, rel.title)
-                if u.satisfied_by(t, d):
+                if satisfied(u, d):
                     resolve(u, d, nzo)
                     continue
                 warn(f"{rel.title} finished but does not hold all of {u.need.label}; "
@@ -842,7 +948,7 @@ def next_post(cfg: Config, pr: Prowlarr, slot) -> Release | None:
     while True:
         while slot.queue:
             r = slot.queue.pop(0)
-            if r.guid not in {x.guid for x in slot.tried} and r.size not in {x.size for x in slot.tried if x.size}:
+            if r.guid not in {x.guid for x in slot.tried}:
                 return r
         if not slot.searched:
             slot.searched = True
@@ -1027,7 +1133,15 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                 d = again[1]
             else:
                 try:
-                    nzo = again[0] if again else sab_submit(rt.cfg, rt.pr, rt.sab, rel, None, rt.pp)
+                    if again:
+                        nzo = again[0]
+                    else:
+                        data = rt.pr.fetch(rel)
+                        prev = earlier_post(rt.cfg, rt.sab, rel, data)
+                        if prev and prev[0] != "downloading":
+                            info(f"{prev[3]} - skipping it")
+                            continue
+                        nzo = prev[1] if prev else sab_submit(rt.cfg, rt.pr, rt.sab, rel, data, rt.pp)
                 except ApiError as e:
                     warn(f"{rel.indexer}: {e}")
                     continue
@@ -1296,11 +1410,19 @@ def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[
                 torrent_data: bytes | None = None) -> dict:
     """Everything after the releases have been chosen. ``torrent_data``: a .torrent the
     user supplied, used instead of downloading one."""
-    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
+    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy)
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
     qb = None if opts.no_qbit else QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
     info(f"SABnzbd {sab.version()}")
+    metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)   # srrDB, for scene releases
+    try:
+        return _execute_run(cfg, opts, pr, sab, qb, tor_rel, groups, torrent_data)
+    finally:
+        metadata.close_session()
 
+
+def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor_rel: Release,
+                 groups: list[list[Release]], torrent_data: bytes | None) -> dict:
     if torrent_data is not None:
         step(f"Using .torrent file {tor_rel.indexer}")
         t, path = save_torrent(cfg, torrent_data)

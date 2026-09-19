@@ -42,6 +42,7 @@ class Config:
     cleanup: bool = True
     local_verify: bool = False
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
+    outbound_proxy: str = ""          # e.g. http://127.0.0.1:8888, the VPN container's HTTP proxy: all internet access
     flaresolverr_url: str = ""        # e.g. http://nas:8191 - only used when a site answers with a Cloudflare challenge
     season_packing: str = "scene"     # "scene" = keep scene RARs (rebuild them from srrDB) | "unpack"
     gui_username: str = DEFAULT_GUI_USER
@@ -75,6 +76,7 @@ LAYOUT = [
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("behaviour", "season_packing", "season_packing"),
     ("flaresolverr", "url", "flaresolverr_url"),
+    ("network", "proxy", "outbound_proxy"),
     ("gui", "username", "gui_username"),
     ("gui", "password", "gui_password"),
 ]

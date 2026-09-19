@@ -56,7 +56,9 @@ def test_find_alternatives_filters(tmp_path):
     failed = rel("Show.2016.S03E02.720p.HDTV.x264-GRPA-xRePo", big, "failed")
     results = [
         failed,
-        rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", big, "same-size-elsewhere"),   # same post
+        # the same size is not proof of the same post (one may carry a file the other lacks):
+        # that is decided from the NZB's message-IDs when the post comes up
+        rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", big, "same-size-elsewhere"),
         rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", big + 5, "good", grabs=9),
         rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", need.min_size - 1, "too-small"),
         rel("Show.2016.S03E02.720p.iP.WEBRip.AAC2.0.H264-GRPC", big + 9, "other-group"),
@@ -65,7 +67,7 @@ def test_find_alternatives_filters(tmp_path):
     ]
     from test_usenet import FakeProwlarr
     alts = pipeline.find_alternatives(Config(path=str(tmp_path / "c.toml")), FakeProwlarr({}, results), need, [failed])
-    assert [r.guid for r in alts] == ["good"]
+    assert [r.guid for r in alts] == ["good", "same-size-elsewhere"]
 
 
 class PackSAB:

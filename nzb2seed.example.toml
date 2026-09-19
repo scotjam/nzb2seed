@@ -59,3 +59,10 @@ season_packing = "scene"     # season grabs: "scene" = keep / rebuild (from srrD
                              # RARs of RAR'd releases; "unpack" = leave everything unpacked
 retry_bad_pieces = true      # if pieces fail, download other posts of the release until they verify
                              # (switches local hashing on; the build screen can turn it off per build)
+
+[network]
+# Everything nzb2seed fetches from the internet goes through this proxy, e.g. the VPN
+# container's HTTP proxy bound to 127.0.0.1: .nzb files from Usenet indexers (Prowlarr
+# always redirects those to the indexer) and the srrDB / predb / xrel.to / TVmaze lookups.
+# Left empty, none of that is fetched - nothing goes out from this machine's own address.
+proxy = ""

@@ -53,6 +53,26 @@ def parse(data: bytes) -> list[NzbFile]:
     return out
 
 
+def post_ids(data: bytes) -> list[str]:
+    """What a post is, independent of the indexer listing it: the Usenet message-ID of the
+    first article of every posted file (par2 files left out). The same post on two
+    indexers gives the same IDs - even when one indexer's NZB leaves a file out - while a
+    re-upload of the same files gives new ones."""
+    root = ET.fromstring(data)
+    out = []
+    for f in root.iter():
+        if not f.tag.endswith("file"):
+            continue
+        m = _QUOTED.search(f.get("subject", ""))
+        if _PAR2.search((m.group(1) if m else f.get("subject", "")).strip()):
+            continue
+        segs = [s for s in f.iter() if s.tag.endswith("segment")]
+        first = min(segs, key=lambda s: int(s.get("number", 0) or 0), default=None)
+        if first is not None and (first.text or "").strip():
+            out.append(first.text.strip().strip("<>"))
+    return sorted(set(out))
+
+
 def trim(data: bytes, wanted: str) -> bytes | None:
     """The NZB with only the posted files whose subject mentions ``wanted`` (a file name),
     so SABnzbd downloads just that file. None when the NZB does not list it."""

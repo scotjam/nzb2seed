@@ -26,10 +26,29 @@ XREL = "https://api.xrel.to/v2"
 FLARESOLVERR: str | None = None
 _FS_SESSION: str | None = None
 
+# Every lookup on the internet goes through this proxy (the VPN container's HTTP proxy) -
+# never out from this machine's own address. No proxy: no lookups (they fail, visibly).
+PROXY: str | None = None
+_LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # FlareSolverr on the LAN
 
-def configure(flaresolverr_url: str | None):
-    global FLARESOLVERR
+
+class NoProxy(urllib.error.URLError):
+    def __init__(self):
+        super().__init__("no outbound proxy set (Settings) - lookups only go out through the VPN")
+
+
+def configure(flaresolverr_url: str | None, proxy: str | None = None):
+    global FLARESOLVERR, PROXY
     FLARESOLVERR = (flaresolverr_url or "").rstrip("/") or None
+    PROXY = (proxy or "").strip() or None
+
+
+def _urlopen(req, timeout: float):
+    """urlopen for internet sites: only ever through PROXY."""
+    if not PROXY:
+        raise NoProxy()
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({"http": PROXY, "https": PROXY}))
+    return opener.open(req, timeout=timeout)
 
 
 def _is_challenge(status: int, body: bytes) -> bool:
@@ -40,7 +59,7 @@ def _is_challenge(status: int, body: bytes) -> bool:
 def _flaresolverr(cmd: dict, timeout: float = 130):
     req = urllib.request.Request(FLARESOLVERR + "/v1", data=json.dumps(cmd).encode(),
                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with _LOCAL.open(req, timeout=timeout) as r:
         return json.loads(r.read())
 
 
@@ -81,7 +100,7 @@ def get_text(url: str, accept: str = "text/html") -> tuple[str | None, bool, str
     FlareSolverr when one is configured."""
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _urlopen(req, timeout=30) as r:
             status, body = r.status, r.read()
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read() or b""
@@ -109,7 +128,7 @@ def get_json(url: str) -> tuple[object | None, str | None]:
     through FlareSolverr when one is configured."""
     req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with _urlopen(req, timeout=30) as r:
             status, body = r.status, r.read()
     except urllib.error.HTTPError as e:
         status, body = e.code, e.read() or b""
@@ -142,7 +161,7 @@ _ARCHIVE_VOLUME = re.compile(r"\.(rar|r\d{2,3}|\d{3})$", re.I)
 def _get(url: str, timeout: float = 30) -> bytes | None:
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _urlopen(req, timeout=timeout) as r:
             return r.read()
     except urllib.error.HTTPError as e:
         if e.code == 404:

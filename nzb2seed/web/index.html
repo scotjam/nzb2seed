@@ -85,6 +85,9 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 
 /* ---------- search */
 .search { display: flex; gap: 10px; margin-bottom: 24px; }
+.search .upload { display: inline-flex; align-items: center; white-space: nowrap; }
+.search .upload:focus-within { outline: 2px solid var(--torrent); outline-offset: 2px; }
+.search .upload input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .search input { font-size: 1.05rem; padding: 11px 14px; }
 
 /* ---------- the pairing view */
@@ -270,12 +273,14 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
     <form class="search" id="searchform">
       <input type="text" id="query" placeholder="Release name, e.g. Show.S01.1080p.BluRay.x264-GRP" autocomplete="off" aria-label="Search Prowlarr">
       <button class="btn primary" id="searchbtn">Search</button>
+      <label class="btn upload" id="tuploadbtn" title="Build a .torrent file you already have">
+        <input type="file" id="tupload" accept=".torrent,application/x-bittorrent" aria-label="Upload a .torrent file">Upload .torrent</label>
     </form>
 
     <div id="intro" class="intro">
       <h2>Build a torrent from Usenet</h2>
       <ol>
-        <li>Search for a release or a season.</li>
+        <li>Search for a release or a season, or upload a .torrent file you already have.</li>
         <li>Pick the torrent on the left; the matching NZBs on the right are ticked for you.</li>
         <li>SABnzbd downloads the best-matching post: +Repair when the torrent holds RARs, +Repair/Unpack when it holds unpacked files, never +Delete.</li>
         <li>The files are arranged exactly like the torrent: Sample, Proof and Subs folders, text files only fixed when that makes their pieces verify, everything else removed.</li>
@@ -467,6 +472,12 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
       </fieldset>
       <hr>
       <fieldset>
+        <legend>Outbound proxy</legend>
+        <label class="field"><span>Proxy URL</span><input type="text" data-k="network.proxy" placeholder="http://127.0.0.1:8888">
+          <small>Everything nzb2seed fetches from the internet goes through this proxy (e.g. the VPN container's HTTP proxy, bound to 127.0.0.1): .nzb files from Usenet indexers (Prowlarr redirects those to the indexer) and the srrDB / predb / xrel.to / TVmaze lookups. Empty: none of that is fetched - nothing goes out from this machine's own address.</small></label>
+      </fieldset>
+      <hr>
+      <fieldset>
         <legend>GUI login</legend>
         <p class="status" style="margin:0" id="loginhelp">Asked for by your browser when you open this page. The default is admin / nzb2seed. Leave the password empty to switch the login off; then only this machine and your local network can open the GUI.</p>
         <div class="two">
@@ -609,6 +620,29 @@ $("searchform").addEventListener("submit", async (e) => {
   } catch (err) { toast("Search failed: " + err.message); }
   finally { $("searchbtn").disabled = false; $("searchbtn").textContent = "Search"; }
 });
+$("tupload").addEventListener("change", async () => {
+  const f = $("tupload").files[0];
+  $("tupload").value = "";                 // choosing the same file again still fires
+  if (!f) return;
+  const label = $("tuploadbtn"), text = label.lastChild;
+  text.textContent = "Reading…"; label.setAttribute("aria-busy", "true");
+  try {
+    const buf = new Uint8Array(await f.arrayBuffer());
+    let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+    const { torrent } = await api("/api/upload_torrent", { torrent_b64: btoa(bin), torrent_name: f.name });
+    text.textContent = "Searching Usenet…";
+    let usenet = [];
+    try { usenet = (await api("/api/search", { query: torrent.title, protocol: "usenet" })).usenet; }
+    catch (err) { toast("Usenet search failed: " + err.message + ". The build can still find NZBs itself."); }
+    Object.assign(state, { torrents: [torrent], usenet, torrent: null, picked: new Set(), how: "", found: new Set() });
+    $("query").value = torrent.title;
+    $("intro").classList.add("hidden"); $("results").classList.remove("hidden");
+    $("tfilter").value = ""; $("ufilter").value = "";
+    renderResults();
+    selectTorrent(torrent);
+  } catch (err) { toast("Could not use that file: " + err.message); }
+  finally { text.textContent = "Upload .torrent"; label.removeAttribute("aria-busy"); }
+});
 $("tfilter").addEventListener("input", renderResults);
 $("ufilter").addEventListener("input", renderResults);
 $("ufind").addEventListener("submit", async (e) => {
@@ -709,21 +743,29 @@ function renderBar() {
     h("small", {}, picked.length
       ? `from ${groups.size} Usenet release${groups.size > 1 ? "s" : ""}: ${size(total)} of Usenet for ${size(t.size)} of torrent` + (total < t.size * 0.97 ? ". This looks too small; some files may be missing." : "")
       : "nzb2seed finds the NZBs itself, closest match first."));
-  $("buildbtn").disabled = state.pairing;
+  // greyed while this torrent's build runs or after it succeeded; a failed, cancelled or
+  // interrupted build can be tried again
+  const job = jobs.filter(j => j.kind === "build" && j.title === t.title).sort((a, b) => b.id - a.id)[0];
+  const blocked = job && ["running", "waiting", "done"].includes(job.status);
+  $("buildbtn").disabled = state.pairing || state.starting || !!blocked;
+  $("buildbtn").title = !blocked ? "" : job.status === "done" ? "This torrent was already built (see Jobs)"
+    : "This torrent is being built (see Jobs); you can build it again if that build fails";
 }
 $("buildbtn").addEventListener("click", async () => {
   const nzbs = state.usenet.filter(u => state.picked.has(u.guid));
-  $("buildbtn").disabled = true;
+  state.starting = true; $("buildbtn").disabled = true;
   try {
     const r = await api("/api/build", { torrent: state.torrent, nzbs, options: readOptions("b-") });
-    openJob(r.id);
-  } catch (err) { toast("Could not start the build: " + err.message); renderBar(); }
+    await refreshJobs(); openJob(r.id);
+  } catch (err) { toast("Could not start the build: " + err.message); }
+  finally { state.starting = false; renderBar(); }
 });
 
 /* ================= jobs */
 let jobs = [], current = null, cursor = 0, logSteps = [], pollTimer = null;
 async function refreshJobs() {
   try { jobs = await api("/api/jobs"); } catch { return; }
+  renderBar();
   const running = jobs.filter(j => j.status === "running" || j.status === "waiting").length;
   $("runcount").textContent = running; $("runcount").classList.toggle("hidden", !running);
   if (location.hash !== "#jobs") return;
