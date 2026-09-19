@@ -32,12 +32,22 @@ class Ledger:
         os.replace(tmp, self.path)
 
     def record(self, nzo: str, title: str, guid: str = "", indexer: str = "", size: int | None = None,
-               torrent: str = ""):
+               torrent: str = "", ids: list[str] | None = None):
         with _lock:
             jobs = [j for j in self._load() if j.get("nzo") != nzo]
-            jobs.append({"nzo": nzo, "title": title, "guid": guid, "indexer": indexer,
-                         "size": size, "torrent": torrent, "submitted": time.time()})
+            job = {"nzo": nzo, "title": title, "guid": guid, "indexer": indexer,
+                   "size": size, "torrent": torrent, "submitted": time.time()}
+            if ids:
+                job["ids"] = ids            # nzbinfo.post_ids: which post this was
+            jobs.append(job)
             self._save(jobs)
+
+    def covering(self, ids: list[str]) -> list[dict]:
+        """Earlier downloads that held every file of the post with these ``ids``, newest first."""
+        want = set(ids)
+        if not want:
+            return []
+        return [j for j in self.all() if j.get("ids") and want <= set(j["ids"])]
 
     def all(self) -> list[dict]:
         return sorted(self._load(), key=lambda j: -(j.get("submitted") or 0))

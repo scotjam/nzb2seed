@@ -276,10 +276,10 @@ def grab_season(cfg: Config, show_id: int, season: int, key: str, packing: str |
     packing = packing or cfg.season_packing or "scene"
     if packing not in PACKING:
         raise Abort(f"unknown packing {packing!r} (use one of: {', '.join(PACKING)})")
-    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
+    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy)
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
     srr = Srr()
-    metadata.configure(cfg.flaresolverr_url)
+    metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
     try:
         return _grab_season(cfg, pr, sab, srr, show_id, season, key, packing, screens)
     finally:

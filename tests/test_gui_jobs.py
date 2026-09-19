@@ -69,3 +69,20 @@ def test_a_build_can_wait_for_the_person(tmp_path):
     app.store.flush()
     assert gui.App(str(cfgfile)).jobs[job2.id].status == "interrupted"
     job2.answer(None)
+
+
+def test_only_a_running_build_blocks_building_again(tmp_path):
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("[sabnzbd]\ncategory = \"x\"\n")
+    app = gui.App(str(cfgfile))
+    gate = threading.Event()
+
+    def hang(cfg):
+        gate.wait(10)
+        raise gui.Abort("no post held the files")
+    job = app.start_job("Release.Three", "build", hang)
+    assert app.active_build("Release.Three") is job
+    assert app.active_build("Release.Other") is None
+    gate.set()
+    wait(lambda: job.status == "failed")
+    assert app.active_build("Release.Three") is None     # failed: it may be built again

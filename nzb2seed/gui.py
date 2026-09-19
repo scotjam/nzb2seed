@@ -11,6 +11,7 @@ import hmac
 import ipaddress
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -25,6 +26,7 @@ from . import report
 from .clients import ApiError, Prowlarr, QBittorrent, Release, SABnzbd
 from . import metadata
 from . import season as season_mod
+from .torrent import TorrentError, parse as parse_torrent
 from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
                        previous_downloads, search)
 
@@ -210,6 +212,7 @@ class App:
     def __init__(self, config_path: str | None):
         self.config_path = config_path
         self.cfg = config_mod.load_or_default(config_path)
+        metadata.configure(self.cfg.flaresolverr_url, self.cfg.outbound_proxy)
         self.jobs: dict[int, Job] = {}
         self.lock = threading.Lock()
         self.store = JobStore(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "jobs.json"),
@@ -220,6 +223,12 @@ class App:
         if self.jobs:
             self.store.flush()           # persist any "interrupted" marks right away
         self._next = max(self.jobs, default=0) + 1
+
+    def active_build(self, title: str) -> Job | None:
+        """A build of this torrent that has not ended yet (a second one would fight it)."""
+        with self.lock:
+            return next((j for j in self.jobs.values() if j.kind == "build" and j.title == title
+                         and j.status in ("running", "waiting")), None)
 
     def start_job(self, title: str, kind: str, fn) -> Job:
         with self.lock:
@@ -257,6 +266,40 @@ class App:
 def _rel(d: dict) -> Release:
     fields = {f.name for f in dataclasses.fields(Release)}
     return Release(**{k: v for k, v in d.items() if k in fields})
+
+
+UPLOAD_PREFIX = "upload:"
+
+
+def _upload_path(cfg, infohash: str) -> str:
+    return os.path.join(cfg.torrent_dir, "uploads", f"{infohash}.torrent")
+
+
+def upload_torrent(cfg, name: str, data: bytes) -> Release:
+    """Keep an uploaded .torrent and describe it like a search result, so the Build tab
+    can pair and build it the same way. Its guid points back at the saved file."""
+    t = parse_torrent(data)                     # raises TorrentError for anything else
+    path = _upload_path(cfg, t.infohash)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return Release(title=t.name, protocol="torrent", indexer=os.path.basename(name or "uploaded.torrent"),
+                   indexer_id=0, size=t.total_size, guid=UPLOAD_PREFIX + t.infohash, download_url="",
+                   info_url="", publish_date="", grabs=None, seeders=None, files=len(t.real_files))
+
+
+def uploaded_data(cfg, rel: Release) -> bytes | None:
+    """The saved .torrent behind an uploaded result (None: it came from a search)."""
+    if not rel.guid.startswith(UPLOAD_PREFIX):
+        return None
+    infohash = rel.guid[len(UPLOAD_PREFIX):]
+    if not re.fullmatch(r"[0-9a-f]{40}", infohash):
+        raise ValueError("not an uploaded torrent")
+    try:
+        with open(_upload_path(cfg, infohash), "rb") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        raise ValueError("the uploaded .torrent is gone; upload it again") from None
 
 
 def _opts(d: dict) -> Options:
@@ -410,6 +453,20 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     return self._json({"previous": previous_downloads(app.cfg, sab, body.get("title") or "")})
                 if path == "/api/build":
                     return self.build(body)
+                if path == "/api/upload_torrent":
+                    try:
+                        data = base64.b64decode(body.get("torrent_b64") or "", validate=True)
+                    except ValueError:
+                        return self._err("that upload was not readable")
+                    if not data:
+                        return self._err("choose a .torrent file")
+                    try:
+                        rel = upload_torrent(app.cfg, body.get("torrent_name") or "", data)
+                    except TorrentError as e:
+                        return self._err(f"not a usable .torrent file: {e}")
+                    except Exception as e:          # bencode errors on random files
+                        return self._err(f"not a .torrent file ({type(e).__name__})")
+                    return self._json({"torrent": dataclasses.asdict(rel)})
                 if path == "/api/assemble":
                     return self.assemble(body)
                 if path.startswith("/api/jobs/") and path.endswith("/answer"):
@@ -448,6 +505,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._err(str(e))
             config_mod.save(cfg)
             app.cfg = cfg
+            metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
             return self._json(self.settings_payload())
 
         def season_options(self, body):
@@ -455,7 +513,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             sn = int(body["season"])
             eps = metadata.tvmaze_episodes(show["id"], sn)
             wanted = [e["number"] for e in eps]
-            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key)
+            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key, app.cfg.outbound_proxy)
             opts = season_mod.find_options(app.cfg, pr, show["name"], sn, wanted)
             return self._json({"show": show, "episodes": eps, "links": metadata.links(show),
                                "options": [o.summary(wanted) for o in opts]})
@@ -500,7 +558,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             cfg = app.cfg
             out = {}
             checks = {
-                "prowlarr": lambda: Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key).status(),
+                "prowlarr": lambda: Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy).status(),
                 "sabnzbd": lambda: f"SABnzbd {SABnzbd(cfg.sab_url, cfg.sab_key).version()}",
                 "qbittorrent": lambda: self._qb_check(cfg),
             }
@@ -520,7 +578,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
         def pair(self, body):
             torrent = _rel(body["torrent"])
             nzbs = [_rel(n) for n in body.get("usenet", [])]
-            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key)
+            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key, app.cfg.outbound_proxy)
             groups, nzbs, how = pair(app.cfg, pr, torrent, nzbs)
             return self._json({"groups": [[n.guid for n in g] for g in groups],
                                "usenet": [dataclasses.asdict(n) for n in nzbs], "how": how})
@@ -530,8 +588,12 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             nzbs = [_rel(n) for n in body.get("nzbs", [])]
             groups = group_selection(nzbs)     # empty: the build finds the NZBs itself
             opts = _opts(body.get("options", {}))
+            busy = app.active_build(torrent.title)
+            if busy:
+                return self._err(f"{torrent.title} is already being built (job {busy.id})", 409)
+            data = uploaded_data(app.cfg, torrent)   # None: download it through Prowlarr
             job = app.start_job(torrent.title, "build",
-                                lambda cfg: execute_run(cfg, opts, torrent, groups))
+                                lambda cfg: execute_run(cfg, opts, torrent, groups, torrent_data=data))
             return self._json({"id": job.id})
 
         def assemble(self, body):

@@ -1,8 +1,11 @@
 """Thin clients for the Prowlarr, SABnzbd and qBittorrent Web APIs."""
 from __future__ import annotations
 
+import html
+import re
 import time
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 import requests
 
@@ -11,6 +14,17 @@ TIMEOUT = 30
 
 class ApiError(RuntimeError):
     pass
+
+
+def short_reason(r) -> str:
+    """One readable line from an error answer (sites often send a whole HTML page)."""
+    text = r.text or ""
+    if "<" in text:
+        m = re.search(r"<title[^>]*>(.*?)</title>", text, re.S | re.I)
+        body = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
+        text = (m.group(1) + ": " if m else "") + re.sub(r"<[^>]+>", " ", body)
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
+    return f"HTTP {r.status_code}" + (f" - {text[:160]}" if text else "")
 
 
 # ================================================================ Prowlarr
@@ -49,10 +63,12 @@ class Release:
 
 
 class Prowlarr:
-    def __init__(self, url: str, api_key: str):
+    def __init__(self, url: str, api_key: str, proxy: str = ""):
         self.url = url.rstrip("/")
         self.s = requests.Session()
+        self.s.trust_env = False            # no environment proxies: Prowlarr is on the LAN
         self.s.headers["X-Api-Key"] = api_key
+        self.proxy = (proxy or "").strip()
 
     def status(self) -> str:
         r = self.s.get(f"{self.url}/api/v1/system/status", timeout=TIMEOUT)
@@ -71,18 +87,36 @@ class Prowlarr:
         return [Release.from_api(x) for x in r.json()]
 
     def fetch(self, release: Release) -> bytes:
-        """Download the .nzb / .torrent through Prowlarr's proxy link."""
+        """Download the .nzb / .torrent through Prowlarr's link.
+
+        Prowlarr fetches torrent files itself, inside whatever network it sits in (a VPN
+        container). For Usenet indexers Prowlarr always answers with the indexer's own
+        link (a redirect it cannot switch off) - that link is only ever followed through
+        the outbound proxy (the VPN container's HTTP proxy), never from this machine's own
+        address, which would show the indexer a second IP."""
         url = release.download_url
+        home = urlsplit(self.url).netloc.lower()
         for _ in range(5):
-            r = self.s.get(url, timeout=120, allow_redirects=False)
+            off_host = urlsplit(url).netloc.lower() != home
+            if off_host and not self.proxy:
+                raise ApiError(
+                    f"{release.indexer} sends its downloads straight from the indexer (Prowlarr's "
+                    f"\"Redirect\"), and no outbound proxy is set - nzb2seed will not reach an indexer "
+                    f"from this machine's own address. Set the VPN container's HTTP proxy in Settings")
+            if off_host:
+                # the indexer itself: without Prowlarr's key, and only through the proxy
+                r = requests.get(url, timeout=120, allow_redirects=False,
+                                 proxies={"http": self.proxy, "https": self.proxy})
+            else:
+                r = self.s.get(url, timeout=120, allow_redirects=False)
             if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
-                url = r.headers.get("Location", "")
+                url = requests.compat.urljoin(url, r.headers.get("Location", ""))
                 if url.startswith("magnet:"):
                     raise ApiError(f"{release.indexer} only offers a magnet link for this release; "
                                    "a .torrent file is required")
                 continue
             if r.status_code != 200:
-                raise ApiError(f"download from {release.indexer} failed: HTTP {r.status_code} {r.text[:200]}")
+                raise ApiError(f"download from {release.indexer} failed: {short_reason(r)}")
             return r.content
         raise ApiError("too many redirects while downloading release")
 

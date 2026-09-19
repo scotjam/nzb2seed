@@ -101,7 +101,8 @@ def test_job_dir_uses_folder_when_sab_reports_a_file(tmp_path):
 def nzb_xml(names_sizes) -> bytes:
     files = "".join(
         f'<file subject="[1/9] - &quot;{n}&quot; yEnc (1/1)"><segments>'
-        f'<segment bytes="{b}" number="1">x@y</segment></segments></file>' for n, b in names_sizes)
+        f'<segment bytes="{b}" number="1">{abs(hash((n, b)))}@post.example</segment></segments></file>'
+        for n, b in names_sizes)
     return f'<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">{files}</nzb>'.encode()
 
 
@@ -132,7 +133,7 @@ def rel(guid, size, grabs=0):
     return Release(NAME, "usenet", guid, 1, size, guid, "", "", "", grabs, None, None)
 
 
-def test_rank_posts_drops_smaller_and_same_size_posts():
+def test_rank_posts_drops_smaller_posts_and_counts_one_post_once():
     t = parse(make_torrent(NAME, scene_layout()))
     T = t.total_size
     good = nzb_xml([(f.name, int(f.length * 1.02)) for f in t.real_files])
@@ -141,8 +142,9 @@ def test_rank_posts_drops_smaller_and_same_size_posts():
     group = [rel("small", T - 1, grabs=9999), rel("bare", T + 10, grabs=500),
              rel("bare2", T + 10, grabs=1), rel("good", T + 20, grabs=3)]
     ranked = pipeline.rank_posts(pr, t, group)
+    # bare2 lists the very same articles as bare: one post, listed once
     assert [r.guid for r, _, _ in ranked] == ["good", "bare"]
-    assert "small" not in pr.fetched and "bare2" not in pr.fetched
+    assert "small" not in pr.fetched
 
 
 class RetrySAB:
@@ -173,7 +175,8 @@ def test_usenet_single_moves_on_to_the_next_post(tmp_path):
     t = parse(make_torrent(NAME, scene_layout()))
     T = t.total_size
     names = [(f.name, int(f.length * 1.02)) for f in t.real_files]
-    pr = FakeProwlarr({"a": nzb_xml(names), "b": nzb_xml(names[:-1])})
+    # "b" is another upload of the release: same names, but its own articles
+    pr = FakeProwlarr({"a": nzb_xml(names), "b": nzb_xml([(n, s + 1) for n, s in names])})
     sab = RetrySAB(str(tmp_path))
     cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
     dirs, nzos = pipeline.usenet_single(cfg, Options(), pr, sab, t,
@@ -210,3 +213,43 @@ def test_loose_post_with_fewer_files_than_the_torrent_is_not_plausible():
     bare = nzbinfo.score(nzbinfo.parse(nzb_xml(
         [(biggest.name, t.total_size), ("junk1.txt", 30), ("junk2.txt", 13)])), t)
     assert not bare.plausible and "loose files" in bare.summary
+
+
+def test_sab_wait_waits_for_the_storage_path(monkeypatch):
+    """A job SABnzbd marks Completed before it has recorded its folder is polled again."""
+    answers = iter([("Completed", {"storage": ""}), ("Completed", {"storage": "/downloads/Rel"})])
+
+    class Sab:
+        def status(self, nzo):
+            return next(answers)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    out = pipeline.sab_wait(Sab(), {"nzo1": "Rel"})
+    assert out["nzo1"] == ("Completed", {"storage": "/downloads/Rel"})
+
+
+def test_post_ids_tell_the_same_post_from_a_reupload():
+    """Two indexers listing one post (one leaving the .nfo out) are the same post; a
+    re-upload with identical names and sizes is not."""
+    t = parse(make_torrent(NAME, scene_layout()))
+    names = [(f.name, int(f.length * 1.02)) for f in t.real_files]
+    full = set(nzbinfo.post_ids(nzb_xml(names + [("x.vol00+01.par2", 99)])))
+    fewer = set(nzbinfo.post_ids(nzb_xml(names[1:])))
+    reupload = set(nzbinfo.post_ids(nzb_xml([(n, s + 1) for n, s in names])))
+    assert len(full) == len(names)               # par2 files do not count
+    assert fewer < full and not (reupload & full)
+
+
+def test_a_subset_of_a_post_already_downloaded_is_not_downloaded_again(tmp_path):
+    t = parse(make_torrent(NAME, scene_layout()))
+    names = [(f.name, int(f.length * 1.02)) for f in t.real_files]
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
+    first = nzb_xml(names)
+    pipeline.ledger_for(cfg).record("nzo1", NAME, "a", "IndexerA", 1, "", nzbinfo.post_ids(first))
+
+    class Sab:
+        def status(self, nzo):
+            return "Failed", {}
+    prev = pipeline.earlier_post(cfg, Sab(), rel("b", 1), nzb_xml(names[1:]))
+    assert prev and prev[0] == "failed" and prev[1] == "nzo1"
+    extra = nzb_xml(names + [("proof.jpg", 1234)])     # one file the first post did not have
+    assert pipeline.earlier_post(cfg, Sab(), rel("c", 1), extra) is None
