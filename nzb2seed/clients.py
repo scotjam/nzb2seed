@@ -63,12 +63,11 @@ class Release:
 
 
 class Prowlarr:
-    def __init__(self, url: str, api_key: str, proxy: str = ""):
+    def __init__(self, url: str, api_key: str):
         self.url = url.rstrip("/")
         self.s = requests.Session()
         self.s.trust_env = False            # no environment proxies: Prowlarr is on the LAN
         self.s.headers["X-Api-Key"] = api_key
-        self.proxy = (proxy or "").strip()
 
     def status(self) -> str:
         r = self.s.get(f"{self.url}/api/v1/system/status", timeout=TIMEOUT)
@@ -87,28 +86,21 @@ class Prowlarr:
         return [Release.from_api(x) for x in r.json()]
 
     def fetch(self, release: Release) -> bytes:
-        """Download the .nzb / .torrent through Prowlarr's link.
+        """A .torrent, fetched by Prowlarr itself (its proxy link).
 
-        Prowlarr fetches torrent files itself, inside whatever network it sits in (a VPN
-        container). For Usenet indexers Prowlarr always answers with the indexer's own
-        link (a redirect it cannot switch off) - that link is only ever followed through
-        the outbound proxy (the VPN container's HTTP proxy), never from this machine's own
-        address, which would show the indexer a second IP."""
+        nzb2seed never talks to an indexer or tracker: when Prowlarr answers with a
+        redirect to the indexer instead ("Redirect" switched on for that indexer - always
+        the case for Usenet indexers, whose .nzb files SABnzbd fetches, see grab.Source),
+        the download is refused rather than followed."""
         url = release.download_url
         home = urlsplit(self.url).netloc.lower()
         for _ in range(5):
-            off_host = urlsplit(url).netloc.lower() != home
-            if off_host and not self.proxy:
+            if urlsplit(url).netloc.lower() != home:
                 raise ApiError(
-                    f"{release.indexer} sends its downloads straight from the indexer (Prowlarr's "
-                    f"\"Redirect\"), and no outbound proxy is set - nzb2seed will not reach an indexer "
-                    f"from this machine's own address. Set the VPN container's HTTP proxy in Settings")
-            if off_host:
-                # the indexer itself: without Prowlarr's key, and only through the proxy
-                r = requests.get(url, timeout=120, allow_redirects=False,
-                                 proxies={"http": self.proxy, "https": self.proxy})
-            else:
-                r = self.s.get(url, timeout=120, allow_redirects=False)
+                    f"{release.indexer} has \"Redirect\" switched on in Prowlarr, so the file would have to "
+                    f"come from the indexer itself - nzb2seed never contacts indexers. Switch Redirect off "
+                    f"for {release.indexer} (Prowlarr: Indexers, edit, advanced settings)")
+            r = self.s.get(url, timeout=120, allow_redirects=False)
             if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
                 url = requests.compat.urljoin(url, r.headers.get("Location", ""))
                 if url.startswith("magnet:"):
@@ -167,6 +159,31 @@ class SABnzbd:
         if not ids:
             raise ApiError(f"SABnzbd did not accept the NZB: {data}")
         return ids[0]
+
+    def add_url(self, url: str, name: str, category: str, pp: int, priority: int = -2) -> str:
+        """Have SABnzbd fetch an NZB itself (e.g. Prowlarr's link to an indexer). Priority -2
+        queues it paused: nothing is downloaded until the job is resumed."""
+        if pp not in (PP_REPAIR, PP_UNPACK):
+            raise ValueError("refusing to add an NZB with a post-processing level that deletes archives")
+        data = self._call("addurl", name=url, nzbname=name, cat=category or "*", pp=str(pp),
+                          script="None", priority=str(priority))
+        ids = data.get("nzo_ids") or []
+        if not ids:
+            raise ApiError(f"SABnzbd did not accept the link: {data}")
+        return ids[0]
+
+    def queue_do(self, action: str, nzo_id: str, value2: str | None = None):
+        """Queue actions: resume, pause, delete (with its files), rename, priority."""
+        extra = {"value2": value2} if value2 is not None else {}
+        if action == "delete":
+            extra["del_files"] = "1"
+        self._call("queue", name=action, value=nzo_id, **extra)
+
+    def incomplete_dir(self) -> str:
+        """Where SABnzbd keeps queued jobs (its own path)."""
+        if not hasattr(self, "_incomplete"):
+            self._incomplete = (self.config().get("misc") or {}).get("download_dir") or ""
+        return self._incomplete
 
     def queue_slot(self, nzo_id: str) -> dict | None:
         q = self._call("queue", nzo_ids=nzo_id).get("queue", {})

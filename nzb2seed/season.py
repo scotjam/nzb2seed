@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import assemble as asm
-from . import archives, matching, metadata, scenerar
+from . import archives, grab, matching, metadata, scenerar
 from .clients import PP_REPAIR, PP_UNPACK, SAB_DONE, ApiError, Prowlarr, Release, SABnzbd
 from .config import Config
 from .pathmap import map_path
@@ -276,13 +276,15 @@ def grab_season(cfg: Config, show_id: int, season: int, key: str, packing: str |
     packing = packing or cfg.season_packing or "scene"
     if packing not in PACKING:
         raise Abort(f"unknown packing {packing!r} (use one of: {', '.join(PACKING)})")
-    pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy)
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
+    pr = grab.Source(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), sab)
     srr = Srr()
     metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
+    grab.remove_stray_checks(sab)
     try:
         return _grab_season(cfg, pr, sab, srr, show_id, season, key, packing, screens)
     finally:
+        pr.close()
         metadata.close_session()
 
 
@@ -742,6 +744,8 @@ class FileFetcher:
                 trimmed = nzbinfo.trim(self.pr.fetch(r), name)
             except Exception:
                 continue
+            if hasattr(self.pr, "drop"):
+                self.pr.drop(r)              # only the trimmed NZB is downloaded
             if trimmed is None:
                 continue
             info(f"{release}: {name} is in {r.title} ({r.indexer}) - downloading just that file")

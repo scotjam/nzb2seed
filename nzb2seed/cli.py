@@ -101,7 +101,7 @@ def choose(cfg: Config, args) -> tuple[Release, list[list[Release]]]:
 
 
 def finish_choice(cfg: Config, args, torrent: Release, nzbs: list[Release]):
-    groups, nzbs, how = pair(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy), torrent, nzbs)
+    groups, nzbs, how = pair(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), torrent, nzbs)
     info(f"usenet: {how}")
 
     if not args.yes:
@@ -156,7 +156,7 @@ def cmd_run(cfg: Config, args) -> int:
         tor_rel, groups = choose(cfg, args)
     if args.dry_run:
         if data is not None:
-            preview_plan(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy), t, t.name)
+            preview_plan(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), t, t.name)
         info("dry run: stopping before anything is downloaded")
         return 0
     execute_run(cfg, options(args), tor_rel, groups, torrent_data=data)
@@ -178,7 +178,7 @@ def cmd_season(cfg: Config, args) -> int:
     step(f"{show['name']} ({show['premiered'][:4]}) season {args.season}: {len(wanted)} episodes on TVmaze")
     for k, u in metadata.links(show).items():
         info(f"{k}: {u}")
-    opts = season_mod.find_options(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key, cfg.outbound_proxy), show["name"], args.season, wanted)
+    opts = season_mod.find_options(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), show["name"], args.season, wanted)
     for i, o in enumerate(opts, 1):
         s = o.summary(wanted)
         cov = (f"{s['season_nzbs']} season NZB(s), " if s["season_nzbs"] else "") +             f"{len(s['episodes_found'])}/{len(wanted)} episodes"

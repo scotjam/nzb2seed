@@ -104,7 +104,7 @@ instead of trying other posts when pieces fail), `--start` (start seeding at
    whatever RARs the post has, its CRC checked against srrDB, and the original
    scene volumes rebuilt byte for byte from srrDB's `.srr` (pyReScene); the
    .nfo and .sfv come from srrDB, and a Sample from any other post whose NZB
-   lists it, downloaded on its own and kept only if size and CRC match. The
+   lists it (a trimmed NZB with just that file) and kept only if size and CRC match. The
    piece check below still decides.
 7. **Laying out**: each torrent file is matched by name+size, unique size, or a
    piece hash inside the file (obfuscated names), regardless of folder names
@@ -153,15 +153,24 @@ names (Docker volumes, network shares). For example:
 Configured in `nzb2seed.toml` (`[paths] sab_to_local`, `local_to_qbit`,
 `output_dir`) or the GUI's Settings tab.
 
-## Network: nothing leaves from this machine's own address
+## Network: nzb2seed never contacts an indexer or tracker
 
-nzb2seed never talks to an indexer or tracker itself for anything Prowlarr,
-SABnzbd or qBittorrent can do. Two things do need the internet: Usenet
-indexers' .nzb downloads (Prowlarr always hands those out as a redirect to the
-indexer) and the srrDB / predb / xrel.to / TVmaze lookups. Both go **only**
-through the proxy in `[network] proxy` - e.g. the HTTP proxy of the VPN
-container the other services run in, bound to `127.0.0.1` - and are refused
-when no proxy is set, rather than made from the host's own address.
+Only Prowlarr, SABnzbd and qBittorrent do - in whatever network they run in
+(e.g. a VPN container):
+
+* **searches and .torrent files**: Prowlarr (with "Redirect" off for torrent
+  indexers, Prowlarr fetches the file itself; a redirect is refused, never
+  followed);
+* **.nzb files**: Prowlarr always answers those with a redirect to the indexer,
+  so SABnzbd fetches them - nzb2seed hands it Prowlarr's link as a **paused**
+  job (named `nzb2seed-check-...`) and reads the NZB SABnzbd saved. A post
+  that is then wanted is resumed (no second grab); the rest are deleted from
+  the queue before anything downloads, at the latest when the build ends
+  (paused check jobs left by a killed build are removed by the next one).
+
+nzb2seed's only own internet use is the srrDB / predb / xrel.to / TVmaze
+lookups, and those go **only** through the proxy in `[network] proxy` (e.g. the
+VPN container's HTTP proxy bound to `127.0.0.1`) - without one they are skipped.
 
 ## Running the GUI as a service
 

@@ -1,5 +1,5 @@
-"""nzb2seed never reaches the internet from its own address: Prowlarr redirects are
-refused, and lookups only go out through the configured proxy."""
+"""nzb2seed never contacts an indexer (Prowlarr redirects are refused), and its own
+lookups only go out through the configured proxy."""
 import urllib.error
 import urllib.request
 
@@ -20,7 +20,7 @@ def rel(url):
     return Release("X", "usenet", "IndexerA", 1, 1, "g", url, "", "", 0, None, None)
 
 
-def test_redirect_to_the_indexer_is_refused(monkeypatch):
+def test_a_redirect_to_the_indexer_is_never_followed(monkeypatch):
     pr = Prowlarr("http://prowlarr.local:9696", "k")
     calls = []
 
@@ -29,29 +29,15 @@ def test_redirect_to_the_indexer_is_refused(monkeypatch):
         return Resp(301, headers={"Location": "https://indexer.example/get/1"})
     monkeypatch.setattr(pr.s, "get", get)
     monkeypatch.setattr(requests, "get", lambda *a, **kw: pytest.fail("fetched directly"))
-    with pytest.raises(ApiError, match="no outbound proxy"):
+    with pytest.raises(ApiError, match="never contacts indexers"):
         pr.fetch(rel("http://prowlarr.local:9696/1/download?link=x"))
     assert calls == ["http://prowlarr.local:9696/1/download?link=x"]
 
 
-def test_redirect_to_the_indexer_goes_through_the_proxy(monkeypatch):
-    pr = Prowlarr("http://prowlarr.local:9696", "k", proxy="http://127.0.0.1:8888")
-    monkeypatch.setattr(pr.s, "get", lambda url, **kw: Resp(301, headers={"Location": "https://indexer.example/get/1"}))
-    seen = {}
-
-    def direct(url, **kw):
-        seen.update(kw, url=url)
-        return Resp(200, content=b"nzb")
-    monkeypatch.setattr(requests, "get", direct)
-    assert pr.fetch(rel("http://prowlarr.local:9696/1/download?link=x")) == b"nzb"
-    assert seen["url"] == "https://indexer.example/get/1"
-    assert seen["proxies"] == {"http": "http://127.0.0.1:8888", "https": "http://127.0.0.1:8888"}
-
-
 def test_prowlarr_proxied_download(monkeypatch):
     pr = Prowlarr("http://prowlarr.local:9696", "k")
-    monkeypatch.setattr(pr.s, "get", lambda url, **kw: Resp(200, content=b"nzb"))
-    assert pr.fetch(rel("http://prowlarr.local:9696/1/download?link=x")) == b"nzb"
+    monkeypatch.setattr(pr.s, "get", lambda url, **kw: Resp(200, content=b"torrent"))
+    assert pr.fetch(rel("http://prowlarr.local:9696/1/download?link=x")) == b"torrent"
 
 
 def test_lookups_need_the_proxy(monkeypatch):
