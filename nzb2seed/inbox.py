@@ -5,7 +5,11 @@ and, through a "watch folder" action nzb2seed sets up on the filters you choose,
 the inbox. nzb2seed never contacts the tracker. Each torrent becomes one automatic job:
 
 * the Usenet post often appears minutes to hours after the announce, so the build is tried
-  again every ``auto_retry_minutes`` until ``auto_wait_hours`` have passed;
+  again every ``auto_retry_minutes`` until ``auto_wait_hours`` have passed. Both are
+  short by default - a try at once, then every 2 minutes for 14 minutes - because a
+  release that reaches Usenet at all is there within minutes of the torrent (often
+  before it), while one that is missing after that is usually a tracker's own encode
+  that will never be posted, and every further look only costs indexer searches;
 * it never asks anything (no pick lists) and never downloads over BitTorrent: the torrent is
   added stopped, rechecked, and started only at exactly 100.0% (``auto_start``);
 * at most ``auto_parallel`` builds run at once, and automatic builds make at most
@@ -25,6 +29,7 @@ import threading
 import time
 
 from . import clients
+from . import space
 from .clients import ApiError
 from .pipeline import Abort, Options, execute_run, local_release
 from .report import Cancelled, check_cancel, info, step, warn
@@ -99,6 +104,18 @@ class State:
         self.save()
 
 
+def retry_gap(cfg, attempts: int) -> float:
+    """How long to wait before looking for this release again, in seconds.
+
+    Measured against real releases: one that reaches Usenet at all is there within
+    minutes of the torrent - often before it - so the looks are close together, where
+    they can actually find something. The gap doubles up to ``auto_retry_minutes``;
+    with the two set the same (the default 2 minutes) it is simply a fixed gap."""
+    first = max(0.01, float(cfg.auto_retry_first_minutes))   # never a busy loop
+    cap = max(first, float(cfg.auto_retry_minutes))
+    return min(first * 2 ** max(0, attempts - 1), cap) * 60
+
+
 def detect_autobrr_folder() -> tuple[str, str] | None:
     """(inbox as this machine sees it, the same as autobrr sees it) - from the autobrr
     container's config mount, when autobrr runs in Docker on this machine."""
@@ -130,6 +147,7 @@ class Inbox:
         self.slots = threading.Semaphore(1)
         self.slot_count = 1
         self.running: dict[str, int] = {}       # infohash -> job id
+        self._said_full = False                 # so the disk warning is said once
         self.stop = threading.Event()
         threading.Thread(target=self._loop, name="inbox", daemon=True).start()
 
@@ -145,6 +163,9 @@ class Inbox:
         cfg = self.app.cfg
         if not cfg.auto_enabled or not cfg.auto_folder:
             return
+        if self.no_room(cfg):
+            return                      # the disk is too full: new builds wait their turn
+        self._said_full = False
         folder = cfg.auto_folder
         os.makedirs(os.path.join(folder, QUEUE), exist_ok=True)
         if cfg.auto_parallel != self.slot_count:
@@ -159,6 +180,21 @@ class Inbox:
         for h, it in list(self.state.items.items()):
             if it.get("status") in ("queued", "waiting") and h not in self.running:
                 self.start(h)
+
+    def no_room(self, cfg) -> bool:
+        """Is the free-space guard holding downloads back? Then nothing new is started -
+        a build downloads tens of gigabytes, which is exactly what there is no room for."""
+        if not space.limits_set(cfg):
+            return False
+        try:
+            if not self.app.guard().holding():
+                return False
+        except (OSError, ValueError):
+            return False
+        if not self._said_full:
+            self._said_full = True
+            print("inbox: waiting for disk space before starting anything new", flush=True)
+        return True
 
     def take(self, path: str):
         """Claim a new .torrent from the inbox (move it into .queue) and start its job."""
@@ -221,7 +257,8 @@ class Inbox:
             while not self.slots.acquire(timeout=5):
                 check_cancel()
             try:
-                self.state.update(h, status="building", attempts=it.get("attempts", 0) + 1)
+                attempts = it.get("attempts", 0) + 1
+                self.state.update(h, status="building", attempts=attempts)
                 opts = Options(unattended=True, start=cfg.auto_start)
                 out = execute_run(cfg, opts, local_release(t, it["file"]), [], torrent_data=data)
             except Cancelled:
@@ -230,8 +267,11 @@ class Inbox:
                 raise
             except (Abort, ApiError, OSError, ValueError) as e:
                 why = str(e)
-                if _NOT_YET.search(why) and time.time() + cfg.auto_retry_minutes * 60 < deadline:
-                    nxt = time.time() + cfg.auto_retry_minutes * 60
+                gap = retry_gap(cfg, attempts)
+                # try again while still inside the window, so the last try lands on the
+                # deadline rather than a gap short of it
+                if _NOT_YET.search(why) and time.time() < deadline:
+                    nxt = time.time() + gap
                     warn(f"not complete from Usenet yet ({why}) - trying again at "
                          f"{time.strftime('%H:%M', time.localtime(nxt))}")
                     self.state.update(h, status="waiting", next_try=nxt, why=why)

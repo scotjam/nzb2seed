@@ -39,7 +39,7 @@ def test_a_torrent_in_the_inbox_waits_for_its_post_then_builds(tmp_path, monkeyp
     box = tmp_path / "inbox"
     box.mkdir()
     import dataclasses
-    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_minutes=0.001,
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_minutes=0.001, auto_retry_first_minutes=0.001,
                                   auto_wait_hours=1)
     calls = []
 
@@ -56,7 +56,9 @@ def test_a_torrent_in_the_inbox_waits_for_its_post_then_builds(tmp_path, monkeyp
     old = time.time() - 60
     os.utime(t, (old, old))
     app.inbox.poll()
-    wait(lambda: any(i["status"] == "done" for i in app.inbox.items()))
+    # the item is marked done a moment before its file is moved, so wait for the move
+    wait(lambda: any(i["status"] == "done" for i in app.inbox.items())
+         and os.path.isdir(box / ".done") and os.listdir(box / ".done"))
     item = app.inbox.items()[0]
     assert item["attempts"] == 2 and len(calls) == 2 and all(o.unattended for o in calls)
     assert not t.exists() and len(os.listdir(box / ".done")) == 1
@@ -223,3 +225,41 @@ def test_a_zero_day_preview_means_everything_not_the_saved_age(server, monkeypat
 
     status, r = call(url + "/api/retention/sweep", *AUTH, body={"dry_run": True})
     assert seen["days"] is None and r["days"] == 30      # no age given: the saved one
+
+
+def test_it_tries_at_once_then_every_two_minutes_for_a_quarter_of_an_hour(tmp_path):
+    """Measured against real releases: one that reaches Usenet is there within minutes of
+    the torrent. So: a try straight away, then every 2 minutes, giving up after 14."""
+    from nzb2seed.config import Config, finalize
+    from nzb2seed.inbox import retry_gap
+    cfg = finalize(Config(path=tmp_path / "nzb2seed.toml"))
+    assert cfg.auto_retry_minutes == 2.0 and cfg.auto_retry_first_minutes == 2.0
+    assert round(cfg.auto_wait_hours * 60) == 14
+    assert [retry_gap(cfg, n) / 60 for n in (1, 2, 5, 9)] == [2, 2, 2, 2]
+
+    # one try at once, then every 2 minutes while still inside the 14 minutes
+    deadline, at, tries = cfg.auto_wait_hours * 3600, 0.0, [0.0]
+    while at < deadline:
+        at += retry_gap(cfg, len(tries))
+        tries.append(at / 60)
+    assert tries == [0, 2, 4, 6, 8, 10, 12, 14]
+
+
+def test_the_gap_between_tries_starts_short_and_backs_off(tmp_path):
+    """Measured on real releases: one that reaches Usenet is there within minutes, so the
+    early looks are close together; after that the gap doubles to the cap."""
+    from nzb2seed.config import Config, finalize
+    from nzb2seed.inbox import retry_gap
+    import dataclasses
+    cfg = dataclasses.replace(finalize(Config(path=tmp_path / "nzb2seed.toml")),
+                              auto_retry_first_minutes=15, auto_retry_minutes=120)
+    assert [retry_gap(cfg, n) / 60 for n in (1, 2, 3, 4, 5, 9)] == [15, 30, 60, 120, 120, 120]
+
+
+def test_the_cap_is_never_below_the_first_gap(tmp_path):
+    import dataclasses
+    from nzb2seed.config import Config, finalize
+    from nzb2seed.inbox import retry_gap
+    cfg = finalize(Config(path=tmp_path / "nzb2seed.toml"))
+    odd = dataclasses.replace(cfg, auto_retry_first_minutes=60, auto_retry_minutes=10)
+    assert retry_gap(odd, 1) / 60 == 60 and retry_gap(odd, 5) / 60 == 60

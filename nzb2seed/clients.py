@@ -240,6 +240,17 @@ class SABnzbd:
             raise ApiError(f"SABnzbd did not accept the link: {data}")
         return ids[0]
 
+    def pause_all(self):
+        """Pause the whole queue (nothing is lost; it carries on when resumed)."""
+        self._call("pause")
+
+    def resume_all(self):
+        self._call("resume")
+
+    def queue_paused(self) -> bool:
+        q = self._call("queue", limit="0").get("queue", {})
+        return bool(q.get("paused")) or str(q.get("status", "")).lower() == "paused"
+
     def queue_do(self, action: str, nzo_id: str, value2: str | None = None):
         """Queue actions: resume, pause, delete (with its files), rename, priority."""
         extra = {"value2": value2} if value2 is not None else {}

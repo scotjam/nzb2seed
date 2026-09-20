@@ -597,8 +597,9 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
           <small class="status">Uses autobrr's own config folder, which it can already write to - no change to autobrr's container needed.</small></div>
         <hr>
         <div class="two">
-          <label class="field"><span>Wait for the Usenet post up to (hours)</span><input type="number" id="await" min="0" step="1"></label>
-          <label class="field"><span>Search again every (minutes)</span><input type="number" id="aretry" min="1" step="1"></label>
+          <label class="field"><span>Keep trying for (hours)</span><input type="number" id="await" min="0" step="0.05" title="How long to keep looking for the Usenet post before giving up. 0.23 (14 minutes) by default: a release that is posted at all appears within minutes of the torrent, and one still missing after that is usually a tracker-internal encode that never will be."></label>
+          <label class="field"><span>First retry after (minutes)</span><input type="number" id="aretryfirst" min="1" step="1" title="A release that reaches Usenet at all is usually there within minutes of the torrent, so the first looks are close together."></label>
+          <label class="field"><span>…backing off to at most (minutes)</span><input type="number" id="aretry" min="1" step="1" title="The gap doubles after each try up to this. A release still missing after an hour is usually a tracker's own encode that will never be posted, and every look costs indexer searches."></label>
           <label class="field"><span>Builds at once</span><input type="number" id="aparallel" min="1" max="8" step="1"></label>
           <label class="field"><span>Prowlarr searches an hour (automatic only)</span><input type="number" id="asearches" min="1" step="1"></label>
         </div>
@@ -724,6 +725,18 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
       </fieldset>
 
       <fieldset>
+        <h2>Free space</h2>
+        <p class="status">Off unless you set a limit. When the disk builds are written to falls below it, SABnzbd's queue is paused, no new automatic build is started, and a build already running stops before its next big write instead of filling the disk - until there is room again - freed by the sweep below, or by you. Only what nzb2seed paused is started again, and seeding is never touched.</p>
+        <div class="grid">
+          <label class="field"><span>Pause below (% free)</span><input type="number" min="0" max="99" step="0.5" data-k="space.min_percent" data-type="float" id="spcpct" placeholder="0 = off"></label>
+          <label class="field"><span>…or below (GB free)</span><input type="number" min="0" step="1" data-k="space.min_gb" data-type="float" id="spcgb" placeholder="0 = off"></label>
+        </div>
+        <label class="check"><input type="checkbox" data-k="space.pause_torrents" id="spctor"> Also stop torrents that are still downloading <small class="status">— pausing a torrent mid-download can cost you a private tracker's hit-and-run grace, so this is off by default. Finished torrents keep seeding either way.</small></label>
+        <div class="actions"><button type="button" class="btn" id="spccheck">Check free space now</button>
+          <small class="status" id="spcstatus"></small></div>
+      </fieldset>
+
+      <fieldset>
         <h2>Removing builds again</h2>
         <p class="status">Off unless you switch it on. When it is on, a torrent nzb2seed built is removed from qBittorrent once it is older than the age below, and the files nzb2seed placed for it are deleted. <b>Only files nzb2seed put there go</b> - it deletes from the record each build writes, so anything you added yourself, a metadata folder, or another torrent's data in the same place is left alone. Seeding stops when the torrent is removed, so set an age your trackers are happy with.</p>
         <label class="check"><input type="checkbox" data-k="retention.enabled" id="retenabled"> Remove builds after a while</label>
@@ -815,6 +828,7 @@ function autoPaint(r) {
     $("abrurl").value = s.autobrr_url || ""; $("abrkey").placeholder = r.has_key ? "saved - leave empty to keep it" : "autobrr: Settings → API keys";
     $("afolder").value = s.folder || ""; $("aabrfolder").value = s.autobrr_folder || "";
     $("await").value = s.wait_hours; $("aretry").value = s.retry_minutes; $("aparallel").value = s.parallel;
+    $("aretryfirst").value = s.retry_first_minutes;
     $("asearches").value = s.searches_per_hour; $("astart").checked = !!s.start;
     autoPaint.done = true;
   }
@@ -844,7 +858,8 @@ async function autoAct(what, infohash) {
 }
 function autoSettings() {
   return { folder: $("afolder").value.trim(), autobrr_folder: $("aabrfolder").value.trim(),
-    wait_hours: Number($("await").value) || 24, retry_minutes: Number($("aretry").value) || 15,
+    wait_hours: Number($("await").value) || 24, retry_minutes: Number($("aretry").value) || 120,
+    retry_first_minutes: Number($("aretryfirst").value) || 15,
     parallel: Number($("aparallel").value) || 1, searches_per_hour: Number($("asearches").value) || 40,
     start: $("astart").checked, autobrr_url: $("abrurl").value.trim(), autobrr_key: $("abrkey").value.trim() };
 }
@@ -1579,6 +1594,17 @@ async function retRemove(r) {
     $("retstatus").textContent = `Removed ${done.removed.length} build(s), freeing ${retGb(done.bytes)}.`;
   } catch (err) { toast("Could not remove: " + err.message); }
 }
+$("spccheck").addEventListener("click", async () => {
+  $("spcstatus").textContent = "Checking…";
+  try {
+    const r = await api("/api/space");
+    if (!r.disks.length) { $("spcstatus").textContent = r.warning || "No folder to check yet - set the output folder first."; return; }
+    const one = (d) => `${d.path}: ${(d.free / 1073741824).toFixed(1)} GB free (${d.percent}%)`;
+    $("spcstatus").textContent = r.disks.map(one).join("  ·  ")
+      + (!r.limits_set ? "  ·  no limit set" : r.low ? `  ·  BELOW THE LIMIT: ${r.why}` : "  ·  above the limit")
+      + (r.holding ? "  ·  downloads are paused waiting for room" : "");
+  } catch (err) { $("spcstatus").textContent = ""; toast("Could not check: " + err.message); }
+});
 $("retcheck").addEventListener("click", async () => {
   $("retstatus").textContent = "Checking…";
   $("retlist").classList.add("hidden");
@@ -1684,7 +1710,7 @@ function readSettings() {
     const t = el.dataset.type;
     if (t === "ints") v = v ? v.split(/[,\s]+/).filter(Boolean).map(Number) : [];
     if (t === "strs") v = v ? v.split(/[,\s]+/).filter(Boolean) : [];
-    if (t === "int") v = Number(v);
+    if (t === "int" || t === "float") v = Number(v);
     set(out, el.dataset.k, v);
   });
   const maps = (id) => [...$(id).querySelectorAll(".maprow")].map(r => [...r.querySelectorAll("input")].map(i => i.value.trim())).filter(([a, b]) => a && b);
