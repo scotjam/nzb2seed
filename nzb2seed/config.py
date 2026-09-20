@@ -43,6 +43,9 @@ class Config:
     cleanup: bool = True
     local_verify: bool = False
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
+    space_min_percent: float = 0      # pause downloading below this much free space (0 = off)
+    space_min_gb: float = 0           # ... or below this many GB free (0 = off)
+    space_pause_torrents: bool = False  # also stop downloading torrents (can cost H&R grace)
     retention_enabled: bool = False   # remove builds again after retention_days (off by default)
     retention_days: int = 30          # how long a build stays in qBittorrent before it goes
     peek_archives: bool = True        # fetch a RAR post's first volume and read its headers
@@ -53,8 +56,11 @@ class Config:
     auto_enabled: bool = False
     auto_folder: str = ""              # the inbox as this machine sees it
     auto_autobrr_folder: str = ""      # the same folder as autobrr sees it (its watch-folder action)
-    auto_wait_hours: float = 24.0      # how long to wait for the Usenet post to appear
-    auto_retry_minutes: float = 15.0   # how often to search again meanwhile
+    auto_wait_hours: float = 14 / 60   # how long to keep trying for the Usenet post
+                                      # (measured: a release that is posted at all is there
+                                      #  within minutes of the torrent, often before it)
+    auto_retry_first_minutes: float = 2.0   # the first gap; it doubles up to the cap below
+    auto_retry_minutes: float = 2.0    # the longest gap between tries of one torrent
     auto_start: bool = True            # start seeding - only ever at a 100.0% recheck
     auto_parallel: int = 1             # builds at once
     auto_searches_per_hour: int = 40   # Prowlarr searches automatic builds may make per hour
@@ -93,6 +99,9 @@ LAYOUT = [
     ("behaviour", "local_verify", "local_verify"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("behaviour", "peek_archives", "peek_archives"),
+    ("space", "min_percent", "space_min_percent"),
+    ("space", "min_gb", "space_min_gb"),
+    ("space", "pause_torrents", "space_pause_torrents"),
     ("retention", "enabled", "retention_enabled"),
     ("retention", "days", "retention_days"),
     ("behaviour", "season_packing", "season_packing"),
@@ -105,6 +114,7 @@ LAYOUT = [
     ("automatic", "autobrr_folder", "auto_autobrr_folder"),
     ("automatic", "wait_hours", "auto_wait_hours"),
     ("automatic", "retry_minutes", "auto_retry_minutes"),
+    ("automatic", "retry_first_minutes", "auto_retry_first_minutes"),
     ("automatic", "start", "auto_start"),
     ("automatic", "parallel", "auto_parallel"),
     ("automatic", "searches_per_hour", "auto_searches_per_hour"),

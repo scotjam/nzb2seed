@@ -30,6 +30,7 @@ from . import season as season_mod
 from . import series as series_mod
 from . import episodes as episodes_mod
 from . import retention as retention_mod
+from . import space as space_mod
 from .torrent import TorrentError, parse as parse_torrent
 from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
                        previous_downloads, search)
@@ -256,6 +257,39 @@ class App:
         """The automatic-build watcher (idle while switched off on the Automatic tab)."""
         self.inbox = inbox_mod.Inbox(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
                                                         "inbox.json"))
+
+    def guard(self) -> "space_mod.Guard":
+        return space_mod.Guard(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
+                                            "space.json"))
+
+    def _sab(self) -> SABnzbd | None:
+        return SABnzbd(self.cfg.sab_url, self.cfg.sab_key) if self.cfg.sab_url else None
+
+    def start_space_guard(self):
+        """Watches free space every few minutes (idle while no limit is set).
+
+        The gate a running build waits on is set here too: while the guard is holding
+        downloads back, a build stops before its next big write instead of filling the
+        disk it is already short of."""
+        def gate() -> str:
+            cfg = self.cfg
+            if not space_mod.limits_set(cfg) or not self.guard().holding():
+                return ""
+            return space_mod.check(cfg, self._sab(), resuming=True)["why"] or "the disk is full"
+
+        space_mod.GATE = gate
+
+        def loop():
+            while True:
+                time.sleep(300)
+                if not space_mod.limits_set(self.cfg):
+                    continue
+                try:
+                    self.guard().run(self.cfg, self._sab(), self._qbit(),
+                                     log=lambda t: print(f"[space] {t}", flush=True))
+                except Exception as e:                       # never let it kill its thread
+                    print(f"space check failed: {e}", flush=True)
+        threading.Thread(target=loop, name="space", daemon=True).start()
 
     def start_retention(self):
         """Hourly sweep that removes builds past their retention age (idle while off)."""
@@ -497,6 +531,13 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._send(200, page, "text/html; charset=utf-8")
             if path == "/api/settings":
                 return self._json(self.settings_payload())
+            if path == "/api/space":
+                try:
+                    out = space_mod.check(app.cfg, app._sab())
+                except (ApiError, OSError) as e:
+                    return self._json({"limits_set": space_mod.limits_set(app.cfg),
+                                       "disks": [], "low": False, "why": "", "warning": str(e)})
+                return self._json({**out, "holding": app.guard().holding()})
             if path == "/api/retention":
                 try:
                     return self._json(retention_mod.state(app.cfg, app._qbit()))
@@ -720,6 +761,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
         AUTO_FIELDS = {"enabled": ("auto_enabled", bool), "folder": ("auto_folder", str),
                        "autobrr_folder": ("auto_autobrr_folder", str), "wait_hours": ("auto_wait_hours", float),
                        "retry_minutes": ("auto_retry_minutes", float), "start": ("auto_start", bool),
+                       "retry_first_minutes": ("auto_retry_first_minutes", float),
                        "parallel": ("auto_parallel", int), "searches_per_hour": ("auto_searches_per_hour", int),
                        "autobrr_url": ("autobrr_url", str), "autobrr_key": ("autobrr_key", str)}
 
@@ -1004,6 +1046,7 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     app = App(config_path)
     app.start_inbox()
     app.start_retention()
+    app.start_space_guard()
     override = (username or app.cfg.gui_username or config_mod.DEFAULT_GUI_USER, password) \
         if password is not None else None
     httpd = ThreadingHTTPServer((host, port), make_handler(app, override, allowed))
