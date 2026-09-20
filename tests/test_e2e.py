@@ -81,6 +81,7 @@ class FakeQB:
 
     def add_stopped(self, data, fn, save_path, cat, tags):
         self.calls.append("add")
+        self.category = cat
         self.t = parse(data)
         self.save_path = "/qbit/" + os.path.basename(save_path)  # deliberately wrong at first
 
@@ -144,6 +145,7 @@ def test_run_end_to_end(tmp_path, monkeypatch):
     assert ("add", NAME, "nzb2seed", PP_REPAIR) in FakeSAB.calls
     qb = FakeQB.inst
     assert qb.calls[0] == "add" and ("setLocation", "/qbit-root") in qb.calls and "recheck" in qb.calls
+    assert qb.category == "nzb2seed"      # its own category, so builds stand out in qBittorrent
     assert qb.progress == 1.0 and qb.started
     tree = {os.path.relpath(os.path.join(d, n), sab_root).replace("\\", "/")
             for d, _, ns in os.walk(sab_root) for n in ns}

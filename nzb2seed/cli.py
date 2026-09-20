@@ -163,6 +163,33 @@ def cmd_run(cfg: Config, args) -> int:
     return 0
 
 
+def cmd_prune(cfg: Config, args) -> int:
+    """Remove builds past the retention age. Lists them unless --apply is given."""
+    import dataclasses
+
+    from . import retention
+    from .clients import QBittorrent
+    if args.days is not None:
+        cfg = dataclasses.replace(cfg, retention_days=args.days)
+    if not cfg.retention_enabled:
+        # listing what would go is how you decide whether to switch it on, so it is
+        # always answered; only --apply needs you to mean it
+        print(f"retention is off; showing what would go at {cfg.retention_days} days")
+    qb = None
+    if cfg.qbit_url:
+        qb = QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
+        qb.login()
+    if not retention.due(cfg, qb, force=True):
+        print(f"nothing built more than {cfg.retention_days} days ago")
+        return 0
+    out = retention.sweep(cfg, qb, log=print, dry_run=not args.apply, force=True)
+    print(f"{'would free' if not args.apply else 'freed'} {retention.gb(out['bytes'])} "
+          f"from {len(out['removed'])} build(s)")
+    if not args.apply:
+        print("nothing was removed; run it again with --apply to remove them")
+    return 0
+
+
 def cmd_season(cfg: Config, args) -> int:
     from . import metadata
     cfg.match_episode_names = cfg.match_episode_names or args.match_names
@@ -312,6 +339,11 @@ def main(argv=None) -> int:
     a.add_argument("--no-fetch", action="store_true",
                    help="do not download files that are in none of the folders from Usenet")
 
+    pr = sub.add_parser("prune", help="remove builds older than the retention age (and their files)")
+    pr.add_argument("--days", type=int, help="override retention.days for this run")
+    pr.add_argument("--apply", action="store_true",
+                    help="actually remove them (without this it only lists what would go)")
+
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -329,7 +361,7 @@ def main(argv=None) -> int:
     cfg = load(args.config)
     try:
         return {"search": cmd_search, "run": cmd_run, "assemble": cmd_assemble,
-                "season": cmd_season, "series": cmd_series}[args.cmd](cfg, args)
+                "season": cmd_season, "series": cmd_series, "prune": cmd_prune}[args.cmd](cfg, args)
     except (Abort, Cancelled) as e:
         print(f"\n!! {e}", file=sys.stderr)
         return 2
