@@ -94,6 +94,8 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
 .side { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
 .side > .head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--rule); }
+.side > .head .right { display: flex; align-items: baseline; gap: 10px; }
+.sortsel { width: auto; padding: 2px 6px; font-size: .88rem; }
 .side.torrent > .head { border-top: 4px solid var(--torrent); }
 .side.usenet > .head { border-top: 4px solid var(--usenet); }
 .side .head small { color: var(--ink-2); }
@@ -115,6 +117,8 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .findrow .btn { white-space: nowrap; border-color: var(--usenet); color: var(--usenet); font-weight: 700; }
 .findrow .btn:disabled { opacity: .5; }
 .row .new { color: var(--torrent); font-weight: 700; }
+.usel { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--rule); }
+.usel .btn { padding: 4px 12px; }
 .rows { max-height: 58vh; overflow-y: auto; }
 .row { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 10px 16px; border-bottom: 1px solid var(--rule); cursor: pointer; }
 .row:last-child { border-bottom: 0; }
@@ -202,6 +206,27 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 .maprow { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 8px; align-items: center; }
 .maprow .arrow { color: var(--ink-2); }
 .actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.owned { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule); display: grid; gap: 8px; }
+.owned .check { display: flex; gap: 8px; align-items: center; font-weight: 700; }
+.owned fieldset { border: 0; margin: 0; padding: 0; display: grid; gap: 6px; min-width: 0; }
+.owned fieldset:disabled { opacity: .5; }
+.owned .chosen { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.owned .chosen code { word-break: break-all; }
+.folders { border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.folders .here { padding: 8px 12px; background: var(--slate); font-size: .88rem; word-break: break-all; display: flex; gap: 10px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.folders .list { max-height: 260px; overflow: auto; }
+.folders .list button { display: block; width: 100%; text-align: left; padding: 7px 12px; border: 0; border-top: 1px solid var(--rule); background: none; cursor: pointer; font: inherit; word-break: break-all; }
+.folders .list button:hover, .folders .list button:focus-visible { background: var(--slate); }
+.prio { margin-top: 12px; border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+.prio h3 { margin: 0; padding: 8px 12px; font-size: .95rem; background: var(--slate); display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.prio h3 small { font-weight: 400; color: var(--ink-2); }
+.prio ol { list-style: none; margin: 0; padding: 0; counter-reset: prio; }
+.prio li { display: grid; grid-template-columns: 2em 1fr auto; gap: 8px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--rule); counter-increment: prio; }
+.prio li::before { content: counter(prio) "."; font-weight: 700; color: var(--ink-2); }
+.prio li .n { word-break: break-all; }
+.prio li .n small { display: block; color: var(--ink-2); }
+.prio li .b { display: flex; gap: 4px; }
+.prio li .b button { padding: 2px 8px; }
 .status { color: var(--ink-2); }
 .tests { display: grid; gap: 6px; }
 .tests div { display: grid; grid-template-columns: 120px 1fr; gap: 10px; }
@@ -212,6 +237,33 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 .notice a { color: inherit; font-weight: 700; }
 /* ---------- seasons */
 .sgrid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+#view-auto .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+@media (max-width: 700px) { #view-auto .two { grid-template-columns: 1fr; } }
+.autodot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 6px; background: var(--idle); vertical-align: middle; }
+.autodot.on { background: var(--ok); }
+.autotop { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; justify-content: space-between; }
+.switch { display: inline-flex; gap: 10px; align-items: center; font-weight: 700; font-size: 1.05rem; cursor: pointer; }
+.switch input { width: 42px; height: 22px; appearance: none; background: var(--idle); border-radius: 11px; position: relative; cursor: pointer; transition: background .15s; }
+.switch input::after { content: ""; position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; transition: left .15s; }
+.switch input:checked { background: var(--ok); }
+.switch input:checked::after { left: 23px; }
+.switch input:focus-visible { outline: 2px solid var(--torrent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .switch input, .switch input::after { transition: none; } }
+.autogrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; align-items: start; margin-top: 20px; }
+.flist .row { cursor: pointer; }
+.flist .row .state { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: .86rem; }
+.flist .row .state b { font-weight: 700; }
+.flist .row .on-b { color: var(--ok); }
+.flist .row .off-b { color: var(--ink-2); }
+.flist .row .race { color: var(--bad); font-weight: 700; }
+.flist .replace { margin: 6px 0 0; font-size: .88rem; display: flex; gap: 8px; align-items: flex-start; }
+.flist .replace input { margin-top: 3px; }
+.flist .warn { color: var(--bad); font-weight: 700; }
+.alist { display: grid; gap: 0; }
+.alist .arow { padding: 10px 0; border-top: 1px solid var(--rule); display: grid; gap: 4px; }
+.alist .arow:first-child { border-top: 0; }
+.alist .st { font-weight: 700; }
+.alist .st.done { color: var(--ok); } .alist .st.failed { color: var(--bad); } .alist .st.waiting, .alist .st.queued { color: var(--ink-2); }
 .panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 20px; min-width: 0; }
 .panel h2 { margin-bottom: 10px; }
 .panel + .panel { margin-top: 20px; }
@@ -259,6 +311,7 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
     <a href="#jobs">Jobs<span class="count hidden" id="runcount"></span></a>
     <a href="#seasons">Seasons</a>
     <a href="#assemble">Assemble</a>
+    <a href="#auto">Automatic<span class="autodot" id="autodot" title="Automatic builds are off"></span></a>
     <a href="#settings">Settings</a>
   </nav>
 </header>
@@ -291,17 +344,36 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 
     <div id="results" class="pair hidden">
       <div class="side torrent">
-        <div class="head"><h2>Torrent</h2><small id="tcount"></small></div>
+        <div class="head"><h2>Torrent</h2><span class="right"><small id="tcount"></small>
+          <select id="tsort" class="sortsel" aria-label="Sort torrents">
+            <option value="best">Best match</option>
+            <option value="new">Newest first</option>
+            <option value="old">Oldest first</option>
+            <option value="big">Largest first</option>
+            <option value="small">Smallest first</option>
+          </select></span></div>
         <div class="filter"><input type="text" id="tfilter" placeholder="Filter torrents" aria-label="Filter torrents"></div>
         <div class="rows" id="trows" role="radiogroup" aria-label="Torrent to build"></div>
       </div>
       <div class="side usenet">
-        <div class="head"><h2>Usenet</h2><small id="ucount"></small></div>
+        <div class="head"><h2>Usenet</h2><span class="right"><small id="ucount"></small>
+          <select id="usort" class="sortsel" aria-label="Sort NZBs">
+            <option value="best">Best match</option>
+            <option value="new">Newest first</option>
+            <option value="old">Oldest first</option>
+            <option value="big">Largest first</option>
+            <option value="small">Smallest first</option>
+          </select></span></div>
         <div class="hint hidden" id="pairhint"></div>
         <form class="filter findrow" id="ufind">
           <input type="text" id="ufilter" placeholder="Filter, or search Usenet for other NZBs" aria-label="Filter NZBs, or search Usenet">
           <button class="btn" id="ufindbtn">Search Usenet</button>
         </form>
+        <div class="usel">
+          <button type="button" class="btn" id="uselall">Select all shown</button>
+          <button type="button" class="btn" id="uselnone">Clear</button>
+          <small class="status" id="uselcount"></small>
+        </div>
         <div class="rows" id="urows" aria-label="NZBs to download"></div>
         <div class="earlier hidden" id="earlier">
           <div class="head"><h2>Downloaded on earlier attempts</h2><small id="ecount"></small></div>
@@ -343,7 +415,7 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 
   <!-- ================= Seasons -->
   <section id="view-seasons" class="view hidden">
-    <h1>Grab a whole season</h1>
+    <h1>Grab a season, or the whole series</h1>
     <p class="lede">One release group, one resolution, every episode. nzb2seed tries a season NZB first, then the missing episodes on their own, checks every episode against TVmaze and - for scene releases - against srrDB's CRC of the original video, and puts MediaInfo, screenshots and links in a separate <code>-metadata</code> folder next to the season.</p>
     <div class="sgrid">
       <div>
@@ -355,8 +427,32 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
           </form>
           <div class="picklist hidden" id="sshows" role="radiogroup" aria-label="Shows"></div>
           <div class="hidden" id="sseasonbox" style="margin-top:12px">
-            <label class="field"><span>Season</span>
+            <label class="field"><span>Episode list from</span>
+              <select id="ssource" style="width:auto">
+                <option value="all">All sources - per season the longest list</option>
+                <option value="tvmaze">TVmaze</option>
+                <option value="tmdb">TMDB</option>
+                <option value="tvdb">TheTVDB</option>
+                <option value="imdb">IMDb (official dataset)</option>
+              </select></label>
+            <label class="check" style="margin-top:8px"><input type="checkbox" id="smatchnames"> Also find posts named only by episode title</label>
+            <small class="status" style="display:block;margin:2px 0 0 26px">For shows posted as "Show De Dierenwinkel - GRP" instead of S01E14: matched by the episode names on TMDB, TheTVDB and TVmaze (only when a name belongs to exactly one episode); files named that way in your folder count as yours. Takes more indexer API searches. Remembered per show.</small>
+            <label class="field" style="margin-top:8px"><span>Season</span>
               <select id="sseason" style="width:auto"></select></label>
+            <div class="owned">
+              <label class="check"><input type="checkbox" id="sskip"> Skip episodes I already have</label>
+              <fieldset id="sskipset" disabled>
+                <small class="status">Episodes in this show's folder (any layout underneath) and in qBittorrent are not downloaded - any copy counts, whatever its group or resolution.</small>
+                <div class="chosen"><span>Show folder:</span> <code id="slib">none chosen - only qBittorrent is checked</code>
+                  <button type="button" class="btn" id="slibbtn">Choose folder…</button></div>
+                <div class="folders hidden" id="sfolders">
+                  <div class="here"><span id="sfhere"></span>
+                    <span class="actions"><button type="button" class="btn" id="sfup">Up</button>
+                      <button type="button" class="btn primary" id="sfuse">Use this folder</button></span></div>
+                  <div class="list" id="sflist" role="list"></div>
+                </div>
+              </fieldset>
+            </div>
             <div class="actions" style="margin-top:10px"><button class="btn primary" id="soptbtn">Find releases</button>
               <span class="status" id="slinks"></span></div>
           </div>
@@ -364,7 +460,16 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
         <div class="panel hidden" id="soptpanel">
           <h2 id="sopttitle">Releases on Usenet</h2>
           <p class="status" id="soptsub" style="margin:0"></p>
-          <div class="picklist" id="sopts" role="radiogroup" aria-label="Release group and resolution"></div>
+          <div class="actions" style="margin-top:8px">
+            <button type="button" class="btn" id="sselall">Select all</button>
+            <button type="button" class="btn" id="sselnone">Clear</button>
+            <small class="status">Tick one release, or several: episodes come from the first in the priority list that has them, then the next.</small>
+          </div>
+          <div class="picklist" id="sopts" role="group" aria-label="Release groups and resolutions"></div>
+          <div class="prio hidden" id="sprio">
+            <h3>Priority <small id="sprioSum"></small></h3>
+            <ol id="sprioList"></ol>
+          </div>
           <div class="actions">
             <label title="Keep scene RARs: releases that were RAR'd end up as their original scene RAR set. A post that is the scene RARs is kept as it is; an obfuscated, re-packed or encrypted post is unpacked, and when its video matches srrDB's CRC the original RARs are rebuilt byte for byte from srrDB's .srr. If that is not possible the release stays unpacked and the report says why. Unpack all: every release is left unpacked.">RARs
               <select id="spacking" style="width:auto" aria-describedby="spackhelp">
@@ -373,6 +478,44 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
               </select></label>
             <small class="status" id="spackhelp" style="flex-basis:100%">Keep scene RARs: releases that were RAR'd end up as their original scene RAR set. A post that is the scene RARs is kept as it is; an obfuscated, re-packed or encrypted post is unpacked, and when its video matches srrDB's CRC the original RARs are rebuilt byte for byte from srrDB's .srr. If that is not possible the release stays unpacked and the report says why. Unpack all: every release is left unpacked.</small>
             <button class="btn primary" id="sgrab" disabled>Grab season</button>
+          </div>
+        </div>
+        <div class="panel hidden" id="sseriespanel">
+          <h2 id="sseriestitle">All seasons</h2>
+          <p class="status" style="margin:0">Every season TVmaze lists, one after another. One release group and resolution for the series - the one covering the most missing episodes - and, for a season without it, that season's most complete option at the same resolution. <b>Show the plan</b> lists each season's choice without downloading anything.</p>
+          <div class="actions">
+            <label>Resolution
+              <select id="sres" style="width:auto">
+                <option value="">Most complete</option>
+                <option value="2160p">2160p</option>
+                <option value="1080p">1080p</option>
+                <option value="720p">720p</option>
+                <option value="576p">576p</option>
+                <option value="480p">480p</option>
+              </select></label>
+            <label>RARs
+              <select id="spacking2" style="width:auto">
+                <option value="scene">Keep scene RARs</option>
+                <option value="unpack">Unpack all</option>
+              </select></label>
+            <button class="btn" id="splan">Show the plan</button>
+            <button class="btn primary" id="sgraball">Grab all seasons</button>
+          </div>
+          <div class="actions" style="margin-top:10px">
+            <button type="button" class="btn" id="sserfind">Find releases for all seasons</button>
+            <small class="status" id="sserstatus">Optional: list every release group and resolution over all seasons, tick the ones to use and put them in order. Without a list, nzb2seed picks per season and fills gaps from other releases at the same resolution.</small>
+          </div>
+          <div class="hidden" id="sserbox">
+            <p class="status" id="sserinfo" style="margin:8px 0 0"></p>
+            <div class="actions" style="margin-top:8px">
+              <button type="button" class="btn" id="sserall">Select all</button>
+              <button type="button" class="btn" id="ssernone">Clear</button>
+            </div>
+            <div class="picklist" id="sseropts" role="group" aria-label="Release groups and resolutions over all seasons"></div>
+            <div class="prio hidden" id="sserprio">
+              <h3>Priority <small id="sserprioSum"></small></h3>
+              <ol id="sserprioList"></ol>
+            </div>
           </div>
         </div>
         <div class="panel report hidden" id="sreport"></div>
@@ -406,6 +549,60 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
   </section>
 
   <!-- ================= Settings -->
+  <section id="view-auto" class="view hidden">
+    <div class="autotop">
+      <div>
+        <h1 style="margin:0">Automatic builds</h1>
+        <p class="lede" style="margin:.3em 0 0">autobrr drops torrents from the filters you pick into a folder; nzb2seed builds each one from Usenet by itself - it waits for the post, never asks, never downloads over BitTorrent, and starts seeding only at a 100.0% recheck.</p>
+      </div>
+      <label class="switch"><input type="checkbox" id="autoon" role="switch" aria-describedby="autostatus"> <span id="autoonlabel">Off</span></label>
+    </div>
+    <p class="status" id="autostatus" role="status"></p>
+    <div class="autogrid">
+      <div class="panel">
+        <h2>autobrr</h2>
+        <div class="two">
+          <label class="field"><span>URL</span><input type="text" id="abrurl" placeholder="http://nas.local:7474"></label>
+          <label class="field"><span>API key</span><input type="password" id="abrkey" autocomplete="off" placeholder="autobrr: Settings → API keys"></label>
+        </div>
+        <div class="actions" style="margin-top:10px">
+          <button type="button" class="btn primary" id="abrload">Connect and list filters</button>
+          <small class="status" id="abrstatus"></small>
+        </div>
+        <div class="hidden" id="abrbox">
+          <p class="status" style="margin:10px 0 6px">Tick the filters whose torrents nzb2seed should build. Ticking adds a watch-folder action called "nzb2seed" to the filter and enables the filter in autobrr; <b>unticking removes that action and disables the filter in autobrr</b>, so nothing acts on its releases until you enable it there again. The filter's other actions (qBittorrent, SABnzbd…) are not removed.</p>
+          <div class="picklist flist" id="abrfilters" role="group" aria-label="autobrr filters"></div>
+          <small class="status" style="display:block;margin:8px 0 0">A ticked filter is enabled in autobrr and its releases come to nzb2seed. Unticking puts that filter and its actions back exactly as they were.</small>
+          <div class="actions" style="margin-top:10px">
+            <button type="button" class="btn primary" id="abrapply">Save to autobrr</button>
+            <small class="status" id="abrapplied"></small>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Inbox and behaviour</h2>
+        <label class="field"><span>Inbox folder (as the NAS sees it)</span><input type="text" id="afolder"></label>
+        <label class="field" style="margin-top:8px"><span>The same folder as autobrr sees it</span><input type="text" id="aabrfolder" placeholder="/config/nzb2seed-inbox"></label>
+        <div class="actions" style="margin-top:8px"><button type="button" class="btn" id="adetect">Find autobrr's folder</button>
+          <small class="status">Uses autobrr's own config folder, which it can already write to - no change to autobrr's container needed.</small></div>
+        <hr>
+        <div class="two">
+          <label class="field"><span>Wait for the Usenet post up to (hours)</span><input type="number" id="await" min="0" step="1"></label>
+          <label class="field"><span>Search again every (minutes)</span><input type="number" id="aretry" min="1" step="1"></label>
+          <label class="field"><span>Builds at once</span><input type="number" id="aparallel" min="1" max="8" step="1"></label>
+          <label class="field"><span>Prowlarr searches an hour (automatic only)</span><input type="number" id="asearches" min="1" step="1"></label>
+        </div>
+        <label class="check" style="margin-top:10px"><input type="checkbox" id="astart"> Start seeding when the recheck is exactly 100.0% (below that a torrent always stays stopped)</label>
+        <div class="actions" style="margin-top:12px"><button type="button" class="btn primary" id="asave">Save</button>
+          <small class="status" id="asaved"></small></div>
+      </div>
+    </div>
+    <div class="panel" style="margin-top:20px">
+      <h2>Activity</h2>
+      <div class="alist" id="alist"><div class="empty">Nothing has arrived yet.</div></div>
+    </div>
+  </section>
+
   <section id="view-settings" class="view hidden">
     <h1>Settings</h1>
     <p class="lede" id="cfgpath"></p>
@@ -501,6 +698,17 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
             <option value="scene">Keep scene RARs (rebuilt from srrDB when a post is obfuscated or re-packed)</option>
             <option value="unpack">Unpack all</option>
           </select></label>
+        <label class="field"><span>Season grabs: episode list</span>
+          <select data-k="behaviour.episode_source">
+            <option value="all">All sources - per season the longest list</option>
+                <option value="tvmaze">TVmaze</option>
+                <option value="tmdb">TMDB</option>
+                <option value="tvdb">TheTVDB</option>
+                <option value="imdb">IMDb (official dataset)</option>
+          </select>
+          <small>Where a show's episode list comes from. TVmaze's lists are often incomplete for small shows; "All sources" takes, per season, whichever lists the most. Lookups are cached for a day.</small></label>
+        <div class="actions"><button type="button" class="btn" id="clearcache">Clear metadata cache</button>
+          <small class="status" id="cachestatus">Forgets cached episode lists and show lookups, so the next grab asks TVmaze, TMDB, TheTVDB and IMDb again.</small></div>
         <label class="check"><input type="checkbox" data-k="behaviour.retry_bad_pieces"> If pieces fail, download other posts of the same release until every piece verifies (switches hashing on)</label>
       </fieldset>
       <div class="actions">
@@ -555,7 +763,7 @@ const age = (d) => { const t = Date.parse(d); if (!t) return ""; const days = Ma
 const norm = (s) => s.trim().toLowerCase().replace(/[\s._]+/g, ".").replace(/\.?-\.?/g, "-").replace(/^\.|\.$/g, "");
 
 /* ================= routing */
-const views = ["build", "jobs", "seasons", "assemble", "settings"];
+const views = ["build", "jobs", "seasons", "assemble", "auto", "settings"];
 function route() {
   const v = views.includes(location.hash.slice(1)) ? location.hash.slice(1) : "build";
   for (const name of views) $("view-" + name).classList.toggle("hidden", name !== v);
@@ -565,8 +773,146 @@ function route() {
   if (v === "jobs") refreshJobs();
   if (v === "seasons") loadReports();
   if (v === "settings") loadSettings();
+  if (v === "auto") { autoPaint.done = false; loadAuto(); }
 }
 window.addEventListener("hashchange", route);
+
+/* ================= automatic builds */
+let autoTimer = null;
+function autoPaint(r) {
+  const s = r.settings;
+  $("autoon").checked = !!s.enabled;
+  $("autoonlabel").textContent = s.enabled ? "On" : "Off";
+  $("autodot").classList.toggle("on", !!s.enabled);
+  $("autodot").title = s.enabled ? "Automatic builds are on" : "Automatic builds are off";
+  $("autostatus").textContent = s.enabled
+    ? `Watching ${s.folder || "(no folder)"} - new torrents are picked up within half a minute.`
+    : "Off: nothing in the inbox is picked up (builds already running carry on; stop them in Jobs).";
+  if (!autoPaint.done) {                    // fields: on opening the tab and after saving only
+    $("abrurl").value = s.autobrr_url || ""; $("abrkey").placeholder = r.has_key ? "saved - leave empty to keep it" : "autobrr: Settings → API keys";
+    $("afolder").value = s.folder || ""; $("aabrfolder").value = s.autobrr_folder || "";
+    $("await").value = s.wait_hours; $("aretry").value = s.retry_minutes; $("aparallel").value = s.parallel;
+    $("asearches").value = s.searches_per_hour; $("astart").checked = !!s.start;
+    autoPaint.done = true;
+  }
+  const label = { queued: "Queued", waiting: "Waiting for the Usenet post", building: "Building", done: "Done", failed: "Stopped" };
+  $("alist").replaceChildren(...(r.items.length ? r.items.map(it => h("div", { class: "arow" },
+    h("div", { class: "title" }, it.name || it.infohash),
+    h("div", { class: "meta" },
+      h("span", { class: "st " + it.status }, label[it.status] || it.status),
+      it.first_seen ? h("span", {}, "arrived " + new Date(it.first_seen * 1000).toLocaleString()) : null,
+      it.attempts ? h("span", {}, `${it.attempts} attempt${it.attempts > 1 ? "s" : ""}`) : null,
+      it.status === "waiting" && it.next_try ? h("span", {}, "next try " + new Date(it.next_try * 1000).toLocaleTimeString()) : null,
+      it.job ? h("a", { href: "#jobs", onclick: () => setTimeout(() => openJob(it.job), 0) }, "log") : null),
+    it.why ? h("div", { class: "status" }, it.why) : null,
+    !it.running && ["failed", "done"].includes(it.status) ? h("div", { class: "actions" },
+      it.status === "failed" ? h("button", { type: "button", class: "btn", onclick: () => autoAct("retry", it.infohash) }, "Try again") : null,
+      h("button", { type: "button", class: "btn", onclick: () => autoAct("forget", it.infohash) }, "Remove from the list")) : null))
+    : [h("div", { class: "empty" }, "Nothing has arrived yet.")]));
+}
+async function loadAuto() {
+  try { autoPaint(await api("/api/auto/state", {})); } catch (err) { toast("Could not load: " + err.message); }
+  clearTimeout(autoTimer);
+  if (location.hash === "#auto") autoTimer = setTimeout(loadAuto, 5000);
+}
+async function autoAct(what, infohash) {
+  try { autoPaint(await api("/api/auto/" + what, { infohash })); } catch (err) { toast(err.message); }
+}
+function autoSettings() {
+  return { folder: $("afolder").value.trim(), autobrr_folder: $("aabrfolder").value.trim(),
+    wait_hours: Number($("await").value) || 24, retry_minutes: Number($("aretry").value) || 15,
+    parallel: Number($("aparallel").value) || 1, searches_per_hour: Number($("asearches").value) || 40,
+    start: $("astart").checked, autobrr_url: $("abrurl").value.trim(), autobrr_key: $("abrkey").value.trim() };
+}
+$("autoon").addEventListener("change", async () => {
+  try { autoPaint(await api("/api/auto/save", { ...autoSettings(), enabled: $("autoon").checked })); }
+  catch (err) { $("autoon").checked = !$("autoon").checked; toast(err.message); }
+});
+$("asave").addEventListener("click", async () => {
+  try { autoPaint.done = false; autoPaint(await api("/api/auto/save", autoSettings())); $("asaved").textContent = "Saved."; $("abrkey").value = ""; }
+  catch (err) { toast(err.message); }
+});
+$("adetect").addEventListener("click", async () => {
+  try { const r = await api("/api/auto/detect", {}); $("afolder").value = r.folder; $("aabrfolder").value = r.autobrr_folder;
+    $("asaved").textContent = "Found - press Save to keep it."; }
+  catch (err) { toast(err.message); }
+});
+$("abrload").addEventListener("click", async () => {
+  const btn = $("abrload"); btn.disabled = true; $("abrstatus").textContent = "Connecting…";
+  try {
+    const r = await api("/api/auto/filters", { autobrr_url: $("abrurl").value.trim(), autobrr_key: $("abrkey").value.trim(),
+      autobrr_folder: $("aabrfolder").value.trim() });
+    $("abrstatus").textContent = `autobrr ${r.version}: ${r.filters.length} filter${r.filters.length === 1 ? "" : "s"}.`;
+    $("abrfilters").replaceChildren(...(r.filters.length ? r.filters.map(filterRow)
+      : [h("div", { class: "empty" }, "autobrr has no filters yet.")]));
+    $("abrbox").classList.remove("hidden");
+  } catch (err) { $("abrstatus").textContent = err.message; }
+  finally { btn.disabled = false; }
+});
+/* one row per autobrr filter: what it does now, and whether nzb2seed replaces its download */
+function filterRow(f) {
+  const pick = h("input", { type: "checkbox", "data-id": f.id, checked: f.ours, "aria-label": f.name });
+  const grabbers = f.grabbers || [];
+  const on = grabbers.filter(a => a.enabled);
+  const replace = h("input", { type: "checkbox", "data-replace": f.id, checked: true,
+    "aria-label": `nzb2seed download replaces the torrent download for ${f.name}` });
+  const warn = h("span", { class: "warn hidden" }, "both will run: qBittorrent downloads the release while nzb2seed builds it from Usenet");
+  replace.addEventListener("change", () => {
+    if (!replace.checked && !confirm(
+      `"${f.name}": leave its own download actions on?\n\n` +
+      `${(on.map(a => a.name).join(", ") || "They")} will download the release over BitTorrent while ` +
+      `nzb2seed builds the same release from Usenet - the two race, and the torrent download is what ` +
+      `costs you ratio and risks a hit-and-run.\n\nOK to leave them on, Cancel to let nzb2seed replace them.`)) {
+      replace.checked = true;
+    }
+    warn.classList.toggle("hidden", replace.checked);
+  });
+  const row = h("div", { class: "row" + (f.ours ? " on" : "") }, pick, h("div", {},
+    h("label", { class: "title", style: "cursor:pointer" }, f.name),
+    h("div", { class: "meta" }, f.indexers.length ? h("span", {}, f.indexers.join(", ")) : null,
+      f.actions.length ? h("span", {}, "other actions: " + f.actions.join(", ")) : null),
+    h("div", { class: "state" },
+      h("span", {}, "filter: ", h("b", { class: f.enabled ? "on-b" : "off-b" }, f.enabled ? "enabled" : "disabled")),
+      h("span", {}, "nzb2seed: ", h("b", { class: f.ours ? "on-b" : "off-b" }, f.ours ? "on" : "off")),
+      ...grabbers.map(a => h("span", {}, a.name + ": ",
+        h("b", { class: a.enabled ? "race" : "off-b" }, a.enabled ? "downloads it itself" : "off"))),
+      grabbers.length ? null : h("span", { class: "off-b" }, "no download action of its own"),
+      f.ours && !f.folder_ok ? h("span", { class: "new" }, "its nzb2seed action points elsewhere - saving fixes it") : null),
+    h("label", { class: "replace" }, replace,
+      h("span", {}, "nzb2seed dl replaces torrent dl", h("br"),
+        h("small", { class: "status" }, "switches this filter's own download actions off while nzb2seed builds its releases"), warn))));
+  pick.addEventListener("change", () => {
+    // unticking here disables the filter in autobrr: nothing acts on the release afterwards
+    if (!pick.checked && f.enabled && !confirm(
+      `"${f.name}": disable it in autobrr too?\n\n` +
+      `Unticking it here switches the filter off in autobrr, so nothing will act on its ` +
+      `releases at all - neither nzb2seed nor autobrr's own download actions.\n\n` +
+      `OK to switch it off, Cancel to leave it ticked.`)) {
+      pick.checked = true;
+    }
+    row.classList.toggle("on", pick.checked);
+  });
+  return row;
+}
+$("abrapply").addEventListener("click", async () => {
+  const boxes = [...$("abrfilters").querySelectorAll("input[data-id]")];
+  const ids = boxes.filter(i => i.checked).map(i => Number(i.dataset.id));
+  const replace = {};
+  $("abrfilters").querySelectorAll("input[data-replace]").forEach(i => { replace[i.dataset.replace] = i.checked; });
+  try {
+    await api("/api/auto/save", autoSettings());           // the folder and key first
+    const r = await api("/api/auto/apply", { filters: ids, replace,
+      autobrr_url: $("abrurl").value.trim(), autobrr_key: $("abrkey").value.trim() });
+    $("abrapplied").textContent = `Saved to autobrr: ${r.added} added, ${r.removed} removed`
+      + (r.fixed ? `, ${r.fixed} pointed at the inbox` : "")
+      + (r.on ? `, ${r.on} filter${r.on > 1 ? "s" : ""} enabled` : "")
+      + (r.stopped ? `, ${r.stopped} filter${r.stopped > 1 ? "s" : ""} disabled in autobrr` : "")
+      + (r.off ? `, ${r.off} download action${r.off > 1 ? "s" : ""} switched off` : "")
+      + (r.back ? `, ${r.back} switched back on` : "") + ".";
+    $("abrload").click();
+  } catch (err) { toast(err.message); }
+});
+api("/api/auto/state", {}).then(r => { $("autodot").classList.toggle("on", !!r.settings.enabled); }).catch(() => {});
 
 /* ================= options (shared by build bar and assemble) */
 let settings = null;
@@ -584,13 +930,16 @@ function optionControls(prefix) {
       h("input", { type: "checkbox", id: prefix + "retry", checked: b.retry_bad_pieces !== false }), "Try other posts if pieces fail"),
     h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "start", checked: !!q.start_when_complete }), "Start seeding at 100%"),
     h("label", { class: "check" }, h("input", { type: "checkbox", id: prefix + "keep", checked: b.cleanup === false }), "Keep extra files"),
-  ];
+    prefix === "a-" ? h("label", { class: "check", title: "Files the torrent needs that are in none of the folders are downloaded from Usenet, like a build does - only those files" },
+      h("input", { type: "checkbox", id: prefix + "fetch", checked: true }), "Download missing files from Usenet") : null,
+  ].filter(Boolean);
 }
 function readOptions(prefix) {
   return {
     pp: $(prefix + "pp").value, local_verify: $(prefix + "verify").checked,
     retry_bad: $(prefix + "retry") ? $(prefix + "retry").checked : undefined,
     start: $(prefix + "start").checked, no_cleanup: $(prefix + "keep").checked,
+    fetch_missing: $(prefix + "fetch") ? $(prefix + "fetch").checked : undefined,
   };
 }
 function renderOptions() {
@@ -644,6 +993,11 @@ $("tupload").addEventListener("change", async () => {
   finally { text.textContent = "Upload .torrent"; label.removeAttribute("aria-busy"); }
 });
 $("tfilter").addEventListener("input", renderResults);
+$("uselall").addEventListener("click", () => {
+  (state.shownUsenet || []).forEach(u => state.picked.add(u.guid));   // what the filter shows
+  state.how = ""; renderResults(); renderBar();
+});
+$("uselnone").addEventListener("click", () => { state.picked.clear(); state.how = ""; renderResults(); renderBar(); });
 $("ufilter").addEventListener("input", renderResults);
 $("ufind").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -679,18 +1033,51 @@ function releaseRow(r, kind, on, onpick) {
   input.addEventListener("change", () => onpick(input.checked));
   return row;
 }
+/* every word of the filter must appear, in any order; dots, dashes and underscores in
+   release names count as spaces ("show grp" finds "The.Show.S01...-GRP") */
+function filterMatch(text, filter) {
+  const words = filter.toLowerCase().split(/[\s._-]+/).filter(Boolean);
+  const hay = " " + text.toLowerCase().replace(/[._-]+/g, " ") + " ";
+  return words.every(w => hay.includes(w));
+}
+/* sorting the result lists: "best" keeps the order they came in */
+function sortKey(a, b, how) {
+  const t = r => Date.parse(r.publish_date) || 0;
+  if (how === "new") return t(b) - t(a);
+  if (how === "old") return t(a) - t(b);
+  if (how === "big") return (b.size || 0) - (a.size || 0);
+  if (how === "small") return (a.size || 0) - (b.size || 0);
+  return 0;
+}
+function sortBy(list, how) {
+  return how === "best" ? list : [...list].sort((a, b) => sortKey(a, b, how));
+}
+for (const id of ["tsort", "usort"]) {
+  try { const v = localStorage.getItem("nzb2seed." + id); if (v) $(id).value = v; } catch { /* storage may be off */ }
+  $(id).addEventListener("change", () => {
+    try { localStorage.setItem("nzb2seed." + id, $(id).value); } catch { /* storage may be off */ }
+    renderResults();
+  });
+}
 function renderResults() {
-  const tf = $("tfilter").value.toLowerCase(), uf = $("ufilter").value.toLowerCase();
-  const ts = state.torrents.filter(t => (t.title + " " + t.indexer).toLowerCase().includes(tf));
+  const tf = $("tfilter").value, uf = $("ufilter").value;
+  const ts = sortBy(state.torrents.filter(t => filterMatch(t.title + " " + t.indexer, tf)), $("tsort").value);
   $("tcount").textContent = `${state.torrents.length} found`;
   $("trows").replaceChildren(...(ts.length ? ts.map(t => releaseRow(t, "torrent", state.torrent?.guid === t.guid, () => selectTorrent(t)))
     : [h("div", { class: "empty" }, state.torrents.length ? "Nothing matches the filter." : "No torrents found. Try a shorter search.")]));
 
   // picked NZBs first, then the rest
-  const us = state.usenet.filter(u => (u.title + " " + u.indexer).toLowerCase().includes(uf) || state.picked.has(u.guid))
-    .sort((a, b) => state.picked.has(b.guid) - state.picked.has(a.guid)
-      || state.found.has(b.guid) - state.found.has(a.guid) || (b.grabs || 0) - (a.grabs || 0));
+  const how = $("usort").value;
+  const us = state.usenet.filter(u => filterMatch(u.title + " " + u.indexer, uf) || state.picked.has(u.guid))
+    .sort((a, b) => state.picked.has(b.guid) - state.picked.has(a.guid)          // ticked ones stay on top
+      || (how === "best" ? state.found.has(b.guid) - state.found.has(a.guid) || (b.grabs || 0) - (a.grabs || 0)
+                         : sortKey(a, b, how)));
   $("ucount").textContent = `${state.usenet.length} found`;
+  const shown = state.usenet.filter(u => filterMatch(u.title + " " + u.indexer, uf));
+  state.shownUsenet = shown;
+  $("uselall").disabled = !shown.length || shown.every(u => state.picked.has(u.guid));
+  $("uselnone").disabled = !state.picked.size;
+  $("uselcount").textContent = state.picked.size ? `${state.picked.size} ticked` : "";
   $("urows").replaceChildren(...(us.length ? us.map(u => releaseRow(u, "usenet", state.picked.has(u.guid), (on) => {
       on ? state.picked.add(u.guid) : state.picked.delete(u.guid); state.how = ""; renderResults(); renderBar();
     }))
@@ -910,23 +1297,77 @@ $("sshowform").addEventListener("submit", async (e) => {
 async function pickShow(s, row) {
   ss.show = s;
   $("sshows").querySelectorAll(".row").forEach(r => r.classList.toggle("on", r === row));
-  const seasons = await api("/api/season/seasons", { show_id: s.id });
-  $("sseason").replaceChildren(...seasons.map(x => h("option", { value: x.number },
-    `Season ${x.number}` + (x.episodes ? ` (${x.episodes} episodes)` : "") + (x.premiere ? `, ${x.premiere.slice(0, 4)}` : ""))));
+  if (!ss.sourceSet) { $("ssource").value = settings?.settings?.behaviour?.episode_source || "all"; ss.sourceSet = true; }
+  let named = false;
+  try { named = localStorage.getItem("nzb2seed.matchNames." + s.id) === "1"; } catch { /* storage may be off */ }
+  $("smatchnames").checked = named;
+  const seasons = await api("/api/season/seasons", { show_id: s.id, source: $("ssource").value });
+  $("sseason").replaceChildren(h("option", { value: "all" }, `All seasons (${seasons.length})`),
+    ...seasons.map(x => h("option", { value: x.number },
+    `Season ${x.number}` + (x.episodes ? ` (${x.episodes} episodes` + (x.source ? `, ${x.source}` : "") + ")" : "") + (x.premiere ? `, ${x.premiere.slice(0, 4)}` : ""))));
+  $("sseason").value = seasons.length ? String(seasons[0].number) : "all";
   $("sseasonbox").classList.remove("hidden");
+  $("sseriespanel").classList.add("hidden");
+  $("soptpanel").classList.add("hidden");
+  ss.serPicked = []; ss.serOptions = []; $("sserbox").classList.add("hidden"); $("sres").disabled = false;
 }
+
+/* episode-name matching: per show, remembered in this browser */
+function namesBody() { return { match_names: $("smatchnames").checked }; }
+$("smatchnames").addEventListener("change", () => {
+  try { if (ss.show) localStorage.setItem("nzb2seed.matchNames." + ss.show.id, $("smatchnames").checked ? "1" : "0"); }
+  catch { /* storage may be off */ }
+});
+
+/* skip what you already have: the checkbox unlocks the show-folder chooser */
+ss.library = "";
+function skipBody() {
+  return $("sskip").checked ? { skip_owned: true, library: ss.library } : {};
+}
+$("sskip").addEventListener("change", () => {
+  $("sskipset").disabled = !$("sskip").checked;
+  if (!$("sskip").checked) $("sfolders").classList.add("hidden");
+});
+async function browse(path) {
+  try {
+    const r = await api("/api/folders", { path });
+    ss.browsing = r.path;
+    $("sfhere").textContent = r.path || "Data folders";
+    $("sfuse").disabled = !r.path;
+    $("sfup").disabled = r.parent === null;
+    $("sfup").onclick = () => browse(r.parent || "");
+    $("sflist").replaceChildren(...(r.dirs.length ? r.dirs.map(d => h("button", { type: "button", role: "listitem", onclick: () => browse(d.path) }, d.name + "/"))
+      : [h("div", { class: "empty", style: "padding:8px 12px" }, r.path ? "No folders inside." : "No data folders configured (Settings → Paths).")]));
+    $("sfolders").classList.remove("hidden");
+  } catch (err) { toast("Could not list folders: " + err.message); }
+}
+$("slibbtn").addEventListener("click", () => browse(ss.library ? ss.library : ""));
+$("sfuse").addEventListener("click", () => {
+  if (!ss.browsing) return;
+  ss.library = ss.browsing;
+  $("slib").textContent = ss.library;
+  $("sfolders").classList.add("hidden");
+});
 $("soptbtn").addEventListener("click", async () => {
   if (!ss.show) return;
+  if ($("sseason").value === "all") {
+    $("soptpanel").classList.add("hidden");
+    $("sseriestitle").textContent = `${ss.show.name}: all seasons`;
+    $("spacking2").value = settings?.settings?.behaviour?.season_packing || "scene";
+    $("sseriespanel").classList.remove("hidden");
+    return;
+  }
+  $("sseriespanel").classList.add("hidden");
   ss.season = Number($("sseason").value);
   const btn = $("soptbtn"); btn.disabled = true; btn.textContent = "Searching…";
   try {
-    const r = await api("/api/season/options", { show_id: ss.show.id, season: ss.season });
-    ss.episodes = r.episodes; ss.option = null; $("sgrab").disabled = true;
+    const r = await api("/api/season/options", { show_id: ss.show.id, season: ss.season, source: $("ssource").value, ...namesBody() });
+    ss.episodes = r.episodes; ss.options = r.options; ss.picked = []; $("sgrab").disabled = true;
     $("slinks").replaceChildren(...Object.entries(r.links).map(([k, u]) => h("a", { href: u, target: "_blank", rel: "noopener", style: "margin-right:10px" }, k)));
     $("sopttitle").textContent = `${r.show.name} season ${ss.season} on Usenet`;
-    $("soptsub").textContent = `TVmaze lists ${r.episodes.length} episodes. Pick a release group and resolution.`;
+    $("soptsub").textContent = `${r.source || "The episode list"} lists ${r.episodes.length} episodes. Pick a release group and resolution.`;
     $("sopts").replaceChildren(...(r.options.length ? r.options.map(o => {
-      const input = h("input", { type: "radio", name: "sopt", "aria-label": o.name });
+      const input = h("input", { type: "checkbox", name: "sopt", "aria-label": o.name, "data-key": o.key });
       const got = o.episodes_found.length, all = r.episodes.length;
       const row = h("label", { class: "row opt" }, input, h("div", {},
         h("div", { class: "title" }, o.name || `${o.group} ${o.res || ""}`),
@@ -936,23 +1377,145 @@ $("soptbtn").addEventListener("click", async () => {
                           : `${got}/${all} episodes`),
           o.size ? h("span", {}, size(o.size)) : null),
         h("div", { class: "eplist" }, r.episodes.map(e => h("span", { class: "ep" + (o.season_nzbs || o.episodes_found.includes(e.number) ? "" : " no") }, "E" + String(e.number).padStart(2, "0"))))));
-      input.addEventListener("change", () => { ss.option = o; $("sgrab").disabled = false;
-        $("sopts").querySelectorAll(".row").forEach(x => x.classList.toggle("on", x === row)); });
+      input.addEventListener("change", () => {
+        ss.picked = input.checked ? [...ss.picked.filter(x => x.key !== o.key), o] : ss.picked.filter(x => x.key !== o.key);
+        renderPrio();
+      });
       return row;
     }) : [h("div", { class: "empty" }, "No NZBs for this season on your indexers.")]));
+    renderPrio();
     $("spacking").value = settings?.settings?.behaviour?.season_packing || "scene";
     $("soptpanel").classList.remove("hidden");
   } catch (err) { toast("Search failed: " + err.message); }
   finally { btn.disabled = false; btn.textContent = "Find releases"; }
 });
+/* the picked releases, highest priority first */
+function renderPrio() {
+  const keys = new Set(ss.picked.map(o => o.key));
+  $("sopts").querySelectorAll("input[data-key]").forEach(i => {
+    i.checked = keys.has(i.dataset.key);
+    i.closest(".row").classList.toggle("on", i.checked);
+  });
+  $("sgrab").disabled = !ss.picked.length;
+  $("sgrab").textContent = ss.picked.length > 1 ? `Grab season from ${ss.picked.length} releases` : "Grab season";
+  $("sprio").classList.toggle("hidden", ss.picked.length < 2);
+  const all = ss.episodes.length;
+  const covered = new Set();
+  let seasonNzb = false;
+  ss.picked.forEach(o => { o.episodes_found.forEach(e => covered.add(e)); seasonNzb ||= o.season_nzbs > 0; });
+  $("sprioSum").textContent = seasonNzb ? "together: a season NZB + " + `${covered.size}/${all} episodes` : `together: ${covered.size}/${all} episodes`;
+  const move = (i, d) => { const j = i + d; if (j < 0 || j >= ss.picked.length) return;
+    [ss.picked[i], ss.picked[j]] = [ss.picked[j], ss.picked[i]]; renderPrio();
+    $("sprioList").children[j]?.querySelector(d < 0 ? ".up" : ".down")?.focus(); };
+  $("sprioList").replaceChildren(...ss.picked.map((o, i) => {
+    const name = o.name || `${o.group} ${o.res || ""}`;
+    return h("li", {},
+      h("div", { class: "n" }, name, h("small", {}, `${o.group}${o.res ? " · " + o.res : ""} · ` +
+        (o.season_nzbs ? "season NZB" : `${o.episodes_found.length}/${all} episodes`))),
+      h("div", { class: "b" },
+        h("button", { type: "button", class: "btn up", "aria-label": `Move ${name} up`, disabled: i === 0, onclick: () => move(i, -1) }, "↑"),
+        h("button", { type: "button", class: "btn down", "aria-label": `Move ${name} down`, disabled: i === ss.picked.length - 1, onclick: () => move(i, 1) }, "↓"),
+        h("button", { type: "button", class: "btn", "aria-label": `Remove ${name}`, onclick: () => { ss.picked = ss.picked.filter(x => x.key !== o.key); renderPrio(); } }, "✕")));
+  }));
+}
+$("sselall").addEventListener("click", () => {
+  const have = new Set(ss.picked.map(o => o.key));
+  ss.picked = [...ss.picked, ...(ss.options || []).filter(o => !have.has(o.key))];   // added in the listed order
+  renderPrio();
+});
+$("sselnone").addEventListener("click", () => { ss.picked = []; renderPrio(); });
 $("sgrab").addEventListener("click", async () => {
-  if (!ss.option) return;
+  if (!ss.picked?.length) return;
   try {
-    const r = await api("/api/season/grab", { show_id: ss.show.id, season: ss.season, key: ss.option.key,
-      packing: $("spacking").value, label: ss.option.name || `${ss.show.name} S${ss.season}` });
+    const first = ss.picked[0];
+    const r = await api("/api/season/grab", { show_id: ss.show.id, season: ss.season, keys: ss.picked.map(o => o.key), ...namesBody(),
+      packing: $("spacking").value, source: $("ssource").value, ...skipBody(),
+      label: ss.picked.length > 1 ? `${ss.show.name} S${String(ss.season).padStart(2, "0")} (${ss.picked.length} releases)`
+                                  : (first.name || `${ss.show.name} S${ss.season}`) });
     openJob(r.id);
   } catch (err) { toast("Could not start the grab: " + err.message); }
 });
+/* the whole series: every group/resolution over all seasons, in your order */
+ss.serPicked = []; ss.serOptions = []; ss.serSeasons = [];
+$("sserfind").addEventListener("click", async () => {
+  if (!ss.show) return;
+  const btn = $("sserfind"); btn.disabled = true; btn.textContent = "Searching all seasons…";
+  try {
+    const r = await api("/api/series/options", { show_id: ss.show.id, source: $("ssource").value, ...skipBody(), ...namesBody() });
+    ss.serOptions = r.options; ss.serSeasons = r.seasons; ss.serPicked = [];
+    const missing = r.seasons.reduce((n, x) => n + x.missing, 0);
+    $("sserinfo").textContent = r.seasons.map(x => `S${String(x.season).padStart(2, "0")}: ${x.missing} of ${x.episodes} missing`).join(" · ")
+      + ` - ${missing} missing in all. ` + (r.options.length ? `${r.options.length} release group/resolution combinations on Usenet.` : "Nothing on Usenet.");
+    $("sseropts").replaceChildren(...(r.options.length ? r.options.map(o => {
+      const input = h("input", { type: "checkbox", "aria-label": `${o.group} ${o.res || ""}`, "data-key": o.key });
+      const row = h("label", { class: "row opt" }, input, h("div", {},
+        h("div", { class: "title" }, `${o.group}${o.res ? " · " + o.res : ""}`),
+        h("div", { class: "meta" }, h("span", { class: "cov part" }, `${o.total} missing episode${o.total === 1 ? "" : "s"}`),
+          o.season_nzbs ? h("span", {}, `${o.season_nzbs} season NZB${o.season_nzbs > 1 ? "s" : ""}`) : null,
+          h("span", {}, Object.entries(o.seasons).map(([n, c]) => `S${String(n).padStart(2, "0")} ${c}`).join(" · ")))));
+      input.addEventListener("change", () => {
+        ss.serPicked = input.checked ? [...ss.serPicked.filter(x => x.key !== o.key), o] : ss.serPicked.filter(x => x.key !== o.key);
+        renderSerPrio();
+      });
+      return row;
+    }) : [h("div", { class: "empty" }, "No release of this show on your indexers.")]));
+    $("sserbox").classList.remove("hidden");
+    renderSerPrio();
+  } catch (err) { toast("Search failed: " + err.message); }
+  finally { btn.disabled = false; btn.textContent = "Find releases for all seasons"; }
+});
+function renderSerPrio() {
+  const keys = new Set(ss.serPicked.map(o => o.key));
+  $("sseropts").querySelectorAll("input[data-key]").forEach(i => {
+    i.checked = keys.has(i.dataset.key); i.closest(".row").classList.toggle("on", i.checked);
+  });
+  $("sserprio").classList.toggle("hidden", !ss.serPicked.length);
+  $("sres").disabled = ss.serPicked.length > 0;               // your list decides
+  // together: every missing episode at least one picked release has
+  const got = new Set();
+  ss.serPicked.forEach(o => Object.entries(o.episodes).forEach(([n, eps]) => eps.forEach(e => got.add(`${n}x${e}`))));
+  const missing = ss.serSeasons.reduce((n, x) => n + x.missing, 0);
+  $("sserprioSum").textContent = ss.serPicked.length ? `together: ${got.size} of ${missing} missing episodes` : "";
+  const move = (i, d) => { const j = i + d; if (j < 0 || j >= ss.serPicked.length) return;
+    [ss.serPicked[i], ss.serPicked[j]] = [ss.serPicked[j], ss.serPicked[i]]; renderSerPrio();
+    $("sserprioList").children[j]?.querySelector(d < 0 ? ".up" : ".down")?.focus(); };
+  $("sserprioList").replaceChildren(...ss.serPicked.map((o, i) => {
+    const name = `${o.group}${o.res ? " · " + o.res : ""}`;
+    return h("li", {},
+      h("div", { class: "n" }, name, h("small", {}, `${o.total} missing episode${o.total === 1 ? "" : "s"} in ${Object.keys(o.seasons).length} season(s)`)),
+      h("div", { class: "b" },
+        h("button", { type: "button", class: "btn up", "aria-label": `Move ${name} up`, disabled: i === 0, onclick: () => move(i, -1) }, "↑"),
+        h("button", { type: "button", class: "btn down", "aria-label": `Move ${name} down`, disabled: i === ss.serPicked.length - 1, onclick: () => move(i, 1) }, "↓"),
+        h("button", { type: "button", class: "btn", "aria-label": `Remove ${name}`, onclick: () => { ss.serPicked = ss.serPicked.filter(x => x.key !== o.key); renderSerPrio(); } }, "✕")));
+  }));
+}
+$("sserall").addEventListener("click", () => {
+  const have = new Set(ss.serPicked.map(o => o.key));
+  ss.serPicked = [...ss.serPicked, ...ss.serOptions.filter(o => !have.has(o.key))];
+  renderSerPrio();
+});
+$("ssernone").addEventListener("click", () => { ss.serPicked = []; renderSerPrio(); });
+async function seriesJob(planOnly) {
+  if (!ss.show) return;
+  try {
+    const r = await api("/api/series/grab", { show_id: ss.show.id, packing: $("spacking2").value, res: $("sres").value, source: $("ssource").value, ...namesBody(),
+      priority: ss.serPicked.map(o => o.key),
+      plan_only: planOnly, label: ss.show.name, ...skipBody() });
+    openJob(r.id);
+  } catch (err) { toast("Could not start: " + err.message); }
+}
+$("splan").addEventListener("click", () => seriesJob(true));
+$("ssource").addEventListener("change", () => {
+  const row = $("sshows").querySelector(".row.on");
+  if (ss.show && row) pickShow(ss.show, row);      // the season list follows the chosen source
+});
+$("clearcache").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/metadata/clear_cache", {});
+    $("cachestatus").textContent = r.removed ? `Cleared ${r.removed} cached lookup${r.removed > 1 ? "s" : ""}.` : "The cache was already empty.";
+  } catch (err) { toast("Could not clear the cache: " + err.message); }
+});
+$("sgraball").addEventListener("click", () => seriesJob(false));
 async function loadReports() {
   try {
     const list = await api("/api/season/reports");
@@ -975,7 +1538,7 @@ async function showReport(name) {
     h("h3", {}, "Episodes (TVmaze)"),
     h("table", {}, h("tr", {}, h("th", {}, ""), h("th", {}, "Title"), h("th", {}, "Aired"), h("th", {}, ""), h("th", {}, "File")),
       ...r.episodes.map(e => h("tr", {}, h("td", {}, "E" + String(e.number).padStart(2, "0")), h("td", {}, e.name),
-        h("td", {}, e.airdate), h("td", { class: e.present ? "good" : "flag" }, e.present ? "present" : "MISSING"), h("td", {}, e.file || "")))),
+        h("td", {}, e.airdate), h("td", { class: e.present || e.owned ? "good" : "flag" }, e.present ? "present" : e.owned ? "already yours" : "MISSING"), h("td", {}, e.file || "")))),
     (r.notes || []).length ? h("h3", {}, "Notes") : null,
     (r.notes || []).length ? h("ul", {}, ...r.notes.map(n => h("li", { class: "flag" }, n))) : null,
     ...r.releases.flatMap(c => [

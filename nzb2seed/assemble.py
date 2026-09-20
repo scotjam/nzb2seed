@@ -251,9 +251,10 @@ PART_SUFFIX = ".nzb2seed-part"
 COPY_CHUNK = 8 << 20
 
 
-def _copy_across(src: str, dst: str, progress=None):
+def _copy_across(src: str, dst: str, progress=None, remove_src: bool = True):
     """Move between filesystems without ever leaving a truncated file under the
-    final name: copy to <dst>.part, fsync, rename into place, then delete src."""
+    final name: copy to <dst>.part, fsync, rename into place, then delete src
+    (unless ``remove_src`` is False: a copy)."""
     part = dst + PART_SUFFIX
     total = os.path.getsize(src)
     done = 0
@@ -273,7 +274,8 @@ def _copy_across(src: str, dst: str, progress=None):
         raise OSError(f"copy of {src} came out the wrong size")
     shutil.copystat(src, part)
     os.replace(part, dst)
-    os.remove(src)
+    if remove_src:
+        os.remove(src)
 
 
 def _move(src: str, dst: str, owned: Owned, progress=None):
@@ -292,6 +294,32 @@ def _move(src: str, dst: str, owned: Owned, progress=None):
         _copy_across(src, dst, progress)
     owned.forget_file(src)
     owned.add_file(dst)
+
+
+def _place_copy(src: str, dst: str, owned: Owned, progress=None) -> str:
+    """Put a copy of someone else's file at ``dst``, leaving ``src`` where it is: a hard link
+    on the same filesystem (no extra space), a copy otherwise. Returns "link" or "copy"."""
+    if _key(src) == _key(dst):
+        return "keep"
+    owned.makedirs(os.path.dirname(dst))
+    if os.path.lexists(dst):
+        if not owned.owns(dst):
+            raise RuntimeError(f"{dst} already exists and was not created by nzb2seed; not touching it")
+        os.remove(dst)
+    how = "link"
+    try:
+        os.link(src, dst)
+    except OSError:
+        _copy_across(src, dst, progress, remove_src=False)
+        how = "copy"
+    owned.add_file(dst)
+    return how
+
+
+def _under(path: str, dirs) -> bool:
+    k = _key(path)
+    return any(k == _key(d) or k.startswith(_key(d).rstrip("/\\") + os.sep.lower()) or
+               k.startswith(_key(d).rstrip("/\\") + "/") for d in dirs)
 
 
 # ---------------------------------------------------------------- text files
@@ -375,10 +403,13 @@ def fix_text_files(torrent: Torrent, pairs, locate, res: Result) -> dict[str, tu
 
 
 def assemble(torrent: Torrent, source_dirs: list[str], output_dir: str,
-             dry_run: bool = False, log=print, progress=None, owned: Owned | None = None) -> Result:
+             dry_run: bool = False, log=print, progress=None, owned: Owned | None = None,
+             keep: list[str] = ()) -> Result:
     """Put every torrent file at ``<output_dir>/<torrent path>``.
 
     Sources are the given folders plus files nzb2seed placed on an earlier run (``owned``).
+    Files in ``keep`` folders (someone else's, e.g. a library) are never moved: they are
+    hard-linked, or copied across disks; files anywhere else are nzb2seed's and moved.
     A file already at a target path that nzb2seed did not create is used as-is when it has
     the right size and is otherwise reported as a conflict - it is never moved, rewritten
     or deleted. ``progress(name, done, total)`` reports copies between disks."""
@@ -414,10 +445,15 @@ def assemble(torrent: Torrent, source_dirs: list[str], output_dir: str,
 
     for rel, s in chosen.items():
         dst = target_path(output_dir, by_rel[rel])
+        theirs = _under(s.path, keep)
         if _key(s.path) != _key(dst):
-            log(f"    move  {s.name}  ->  {rel}   [{res.how[rel]}]")
+            log(f"    {'link' if theirs else 'move'}  {s.name}  ->  {rel}   [{res.how[rel]}"
+                + ("; the original stays where it is]" if theirs else "]"))
         if not dry_run:
-            _move(s.path, dst, owned, progress)
+            if theirs:
+                _place_copy(s.path, dst, owned, progress)
+            else:
+                _move(s.path, dst, owned, progress)
         res.placed[rel] = dst
 
     # where each binary file is *now* (a dry run has not moved anything)
@@ -434,10 +470,11 @@ def assemble(torrent: Torrent, source_dirs: list[str], output_dir: str,
         if pick != data or _key(s.path) != _key(dst):
             log(f"    {'fix ' if pick != data else 'move'}  {s.name}  ->  {f.relpath}   [{how}]")
         if not dry_run:
+            place = _place_copy if _under(s.path, keep) else _move
             if pick == data:
-                _move(s.path, dst, owned, progress)
+                place(s.path, dst, owned, progress)
             else:
-                _move(s.path, dst, owned, progress)    # first take it over (it is ours: downloaded by us)
+                place(s.path, dst, owned, progress)    # first take it over (or a copy of theirs)
                 tmp = dst + ".nzb2seed-tmp"
                 with open(tmp, "wb") as fh:
                     fh.write(pick)

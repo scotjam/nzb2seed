@@ -62,6 +62,10 @@ class Release:
         )
 
 
+# Called before every Prowlarr search (the automatic builds' hourly search budget waits here).
+SEARCH_GATE = None
+
+
 class Prowlarr:
     def __init__(self, url: str, api_key: str):
         self.url = url.rstrip("/")
@@ -77,6 +81,8 @@ class Prowlarr:
         return f"Prowlarr {r.json().get('version', '?')}, {n} indexer(s)"
 
     def search(self, query: str, indexer_ids=None, categories=None, limit: int = 1000) -> list[Release]:
+        if SEARCH_GATE:
+            SEARCH_GATE()
         params = [("query", query), ("type", "search"), ("limit", str(limit)), ("offset", "0")]
         params += [("indexerIds", str(i)) for i in indexer_ids or []]
         params += [("categories", str(c)) for c in categories or []]
@@ -111,6 +117,68 @@ class Prowlarr:
                 raise ApiError(f"download from {release.indexer} failed: {short_reason(r)}")
             return r.content
         raise ApiError("too many redirects while downloading release")
+
+
+# ================================================================ autobrr
+
+class Autobrr:
+    """autobrr's API: its filters, and the watch-folder action that hands a filter's
+    torrents to nzb2seed. Only actions nzb2seed made (named ACTION_NAME) are ever changed."""
+    ACTION_NAME = "nzb2seed"
+    # actions that would fetch the release themselves - a torrent client downloading it over
+    # BitTorrent is exactly what building from Usenet avoids
+    GRABBERS = {"QBITTORRENT", "DELUGE_V1", "DELUGE_V2", "RTORRENT", "TRANSMISSION", "PORLA",
+                "SABNZBD", "RADARR", "SONARR", "LIDARR", "WHISPARR", "READARR", "WATCH_FOLDER"}
+
+    def __init__(self, url: str, api_key: str):
+        self.url = url.rstrip("/")
+        self.s = requests.Session()
+        self.s.trust_env = False
+        self.s.headers["X-API-Token"] = api_key
+
+    def _call(self, method: str, path: str, **kw):
+        r = self.s.request(method, f"{self.url}/api/{path}", timeout=TIMEOUT, **kw)
+        if r.status_code == 401 or r.status_code == 403:
+            raise ApiError("autobrr refused the API key")
+        if r.status_code >= 400:
+            raise ApiError(f"autobrr {path}: {short_reason(r)}")
+        return r.json() if r.content and "json" in r.headers.get("Content-Type", "") else None
+
+    def version(self) -> str:
+        d = self._call("GET", "config") or {}
+        return d.get("version") or "?"
+
+    def filters(self) -> list[dict]:
+        return self._call("GET", "filters") or []
+
+    def filter(self, fid: int) -> dict:
+        return self._call("GET", f"filters/{fid}") or {}
+
+    def ours(self, f: dict, folder: str) -> list[dict]:
+        return [a for a in f.get("actions") or [] if a.get("name") == self.ACTION_NAME
+                and a.get("type") == "WATCH_FOLDER"]
+
+    def add_action(self, fid: int, folder: str) -> dict:
+        return self._call("POST", "actions", json={
+            "name": self.ACTION_NAME, "type": "WATCH_FOLDER", "enabled": True,
+            "watch_folder": folder, "filter_id": fid, "client_id": 0})
+
+    def delete_action(self, aid: int):
+        self._call("DELETE", f"actions/{aid}")
+
+    def set_folder(self, action: dict, folder: str):
+        self._call("PUT", f"actions/{action['id']}", json=dict(action, watch_folder=folder))
+
+    def grabbers(self, f: dict) -> list[dict]:
+        """The filter's own actions that would fetch the release (not nzb2seed's)."""
+        return [a for a in f.get("actions") or []
+                if a.get("type") in self.GRABBERS and a.get("name") != self.ACTION_NAME]
+
+    def toggle(self, aid: int):
+        self._call("PATCH", f"actions/{aid}/toggleEnabled")
+
+    def set_enabled(self, fid: int, on: bool):
+        self._call("PUT", f"filters/{fid}/enabled", json={"enabled": bool(on)})
 
 
 # ================================================================ SABnzbd
@@ -283,6 +351,10 @@ class QBittorrent:
 
     def files(self, infohash: str) -> list[dict]:
         return self._ok(self._req("GET", "torrents/files", params={"hash": infohash}), "files").json()
+
+    def torrents(self) -> list[dict]:
+        """Every torrent in the client (read only)."""
+        return self._ok(self._req("GET", "torrents/info"), "info").json()
 
     def piece_states(self, infohash: str) -> list[int]:
         """0 = not downloaded, 1 = downloading, 2 = downloaded (verified)."""

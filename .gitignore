@@ -6,3 +6,5 @@ jobs.json
 *.owned.json
 *.log
 sab_jobs.json
+inbox.json
+autobrr.json
