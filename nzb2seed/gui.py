@@ -29,6 +29,7 @@ from . import metadata
 from . import season as season_mod
 from . import series as series_mod
 from . import episodes as episodes_mod
+from . import retention as retention_mod
 from .torrent import TorrentError, parse as parse_torrent
 from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
                        previous_downloads, search)
@@ -256,6 +257,36 @@ class App:
         self.inbox = inbox_mod.Inbox(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
                                                         "inbox.json"))
 
+    def start_retention(self):
+        """Hourly sweep that removes builds past their retention age (idle while off)."""
+        def loop():
+            while True:
+                time.sleep(3600)
+                cfg = self.cfg
+                if not cfg.retention_enabled:
+                    continue
+                try:
+                    out = retention_mod.sweep(cfg, self._qbit(), log=self._retention_log)
+                except Exception as e:                       # never let the sweep kill its thread
+                    print(f"retention sweep failed: {e}", flush=True)
+                    continue
+                if out["removed"]:
+                    self._retention_log(
+                        f"removed {len(out['removed'])} build(s), freeing "
+                        f"{retention_mod.gb(out['bytes'])}")
+        threading.Thread(target=loop, name="retention", daemon=True).start()
+
+    def _retention_log(self, text: str):
+        print(f"[retention] {text}", flush=True)
+
+    def _qbit(self) -> QBittorrent | None:
+        cfg = self.cfg
+        if not cfg.qbit_url:
+            return None
+        qb = QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
+        qb.login()
+        return qb
+
     def start_job(self, title: str, kind: str, fn) -> Job:
         with self.lock:
             job = Job(self._next, title, kind, self.store.changed)
@@ -466,6 +497,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._send(200, page, "text/html; charset=utf-8")
             if path == "/api/settings":
                 return self._json(self.settings_payload())
+            if path == "/api/retention":
+                try:
+                    return self._json(retention_mod.state(app.cfg, app._qbit()))
+                except (ApiError, OSError) as e:
+                    return self._json({**retention_mod.state(app.cfg, None), "warning": str(e)})
             if path == "/api/season/reports":
                 return self._json(season_mod.reports(app.cfg, SABnzbd(app.cfg.sab_url, app.cfg.sab_key)))
             if path in ("/api/season/report", "/api/season/file"):
@@ -496,6 +532,18 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             try:
                 if path == "/api/settings":
                     return self.save_settings(body)
+                if path == "/api/retention/sweep":
+                    # the Settings button: preview by default, remove only when asked to.
+                    # Both work while retention is still off - seeing what would go is how
+                    # you decide whether to switch it on, and the age can be tried without
+                    # saving it.
+                    dry = bool(body.get("dry_run", True))
+                    # 0 is a real age ("everything"), so only a missing value falls back
+                    days = None if body.get("days") is None else float(body["days"])
+                    qb = app._qbit()
+                    out = retention_mod.sweep(app.cfg, qb, log=app._retention_log,
+                                              dry_run=dry, force=True, days=days)
+                    return self._json({**retention_mod.state(app.cfg, qb, days), **out})
                 if path == "/api/test":
                     return self._json(self.test_connections())
                 if path == "/api/search":
@@ -955,6 +1003,7 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     allowed = own_names(host) | {h.lower() for h in extra_hosts}
     app = App(config_path)
     app.start_inbox()
+    app.start_retention()
     override = (username or app.cfg.gui_username or config_mod.DEFAULT_GUI_USER, password) \
         if password is not None else None
     httpd = ThreadingHTTPServer((host, port), make_handler(app, override, allowed))

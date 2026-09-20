@@ -201,3 +201,25 @@ def test_unticking_disables_the_filter_in_autobrr_even_if_you_had_it_on(server, 
     assert status == 200 and r["stopped"] == 1
     assert ("filter", 1, False) in FakeAutobrr.log           # switched off, not left enabled
     assert FakeAutobrr.filters_[0]["enabled"] is False
+
+
+def test_a_zero_day_preview_means_everything_not_the_saved_age(server, monkeypatch):  # noqa: F811
+    """Asking the API for 0 days must not fall back to the configured 30."""
+    app, url = server
+    import dataclasses
+    from nzb2seed import gui as gui_mod
+    app.cfg = dataclasses.replace(app.cfg, retention_days=30, retention_enabled=False)
+    monkeypatch.setattr(gui_mod.App, "_qbit", lambda self: None)
+    seen = {}
+
+    def fake_sweep(cfg, qb, log=print, dry_run=False, force=False, days=None):
+        seen["days"] = days
+        return {"removed": [], "kept": [], "bytes": 0, "dry_run": dry_run,
+                "days": cfg.retention_days if days is None else days, "was_off": True}
+
+    monkeypatch.setattr(gui_mod.retention_mod, "sweep", fake_sweep)
+    status, r = call(url + "/api/retention/sweep", *AUTH, body={"dry_run": True, "days": 0})
+    assert status == 200 and seen["days"] == 0.0 and r["days"] == 0
+
+    status, r = call(url + "/api/retention/sweep", *AUTH, body={"dry_run": True})
+    assert seen["days"] is None and r["days"] == 30      # no age given: the saved one
