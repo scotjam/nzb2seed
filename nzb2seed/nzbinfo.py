@@ -92,6 +92,25 @@ def trim(data: bytes, wanted: str) -> bytes | None:
     return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="utf-8")
 
 
+_PART = re.compile(r"\.part(\d+)\.rar$", re.I)
+
+
+def first_volume(files: list[NzbFile]) -> str | None:
+    """The posted file that starts a RAR set. Its headers name the files the set holds, so
+    fetching just this one file says what the post really carries - before the rest of it
+    is downloaded. None when the post is not a RAR set."""
+    names = sorted(f.name for f in files if _RAR.search(f.name) and not _PAR2.search(f.name))
+    for n in names:
+        m = _PART.search(n)
+        if m and int(m.group(1)) == 1:
+            return n
+    plain = [n for n in names if n.lower().endswith(".rar") and not _PART.search(n)]
+    if plain:
+        return plain[0]
+    numbered = [n for n in names if n.endswith(".001")]
+    return numbered[0] if numbered else None
+
+
 def score(files: list[NzbFile], torrent: Torrent, part: list | None = None) -> Score:
     """How likely this post holds ``part`` of the torrent (default: all of it)."""
     part = part if part is not None else torrent.real_files

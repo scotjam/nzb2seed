@@ -9,6 +9,7 @@ import dataclasses
 import itertools
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import time
@@ -44,6 +45,9 @@ class Options:
     start: bool = False
     dry_run: bool = False
     retry_bad: bool | None = None  # None = config default (behaviour.retry_bad_pieces)
+    fetch_missing: bool = False    # assemble: download what the folders do not have from Usenet
+    unattended: bool = False       # automatic builds: never ask the person to pick a post
+    peek: bool | None = None       # look inside a RAR post first (None = behaviour.peek_archives)
 
 
 def gb(n: int) -> str:
@@ -223,14 +227,28 @@ def _contents(first: str) -> tuple[list, bool]:
     return _listings[key], True
 
 
+def _merge_nzb(a: bytes, b: bytes | None) -> bytes:
+    """One NZB with the files of two trimmed NZBs of the same post."""
+    if b is None:
+        return a
+    ra, rb = ET.fromstring(a), ET.fromstring(b)
+    ns = ra.tag[:ra.tag.index("}") + 1] if ra.tag.startswith("{") else ""
+    seen = {f.get("subject") for f in ra if f.tag == f"{ns}file"}
+    for f in rb:
+        if f.tag == f"{ns}file" and f.get("subject") not in seen:
+            ra.append(f)
+    return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(ra, encoding="utf-8")
+
+
 def _drop(pr, rel: Release):
     """A post that will not be downloaded: its paused NZB-check job goes."""
     if hasattr(pr, "drop"):
         pr.drop(rel)
 
 
-def unpack_from_archives(d: str, wanted: list) -> bool:
-    """Extract the torrent files in ``wanted`` from RAR sets in download folder ``d``.
+def unpack_from_archives(d: str, wanted: list, dest: str | None = None) -> bool:
+    """Extract the torrent files in ``wanted`` from RAR sets in download folder ``d`` (into
+    ``d``'s unpack folder, or ``dest``).
     A file is recognised by its exact size (and, for small files, its name too - posters
     often obfuscate the names of big ones). Returns True when anything was unpacked."""
     sets = archives.rar_sets(d)
@@ -258,7 +276,7 @@ def unpack_from_archives(d: str, wanted: list) -> bool:
         info(f"{name} holds {len(members)} needed file(s): " + ", ".join(os.path.basename(m) for m in members[:3])
              + " - unpacking into the download folder")
         try:
-            archives.extract(first, members, os.path.join(d, archives.UNPACK_DIR))
+            archives.extract(first, members, dest or os.path.join(d, archives.UNPACK_DIR))
             extracted = True
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             warn(f"unpacking {name} failed: {e}")
@@ -328,6 +346,90 @@ def reuse(cfg: Config, sab: SABnzbd, rel: Release, ok) -> tuple[str, str | None]
             info(f"{rel.title}: reusing the finished download {j['nzo']} in {d}")
             return j["nzo"], d
     return None
+
+
+PEEK_PREFIX = "nzb2seed-peek-"
+
+
+def archive_holds(files: list, entries: list[tuple[str, int]]) -> bool | None:
+    """Judging from the file list inside a RAR set, does it hold ``files`` (torrent files)?
+
+    True when it holds a file of exactly the right size, False when it holds the right name
+    at a different size or a file as large as the one wanted that is not it (a different
+    encode of the same title), None when the listing cannot say."""
+    if not entries or not files:
+        return None
+    want_names = {os.path.basename(f.name).lower() for f in files}
+    want_sizes = {f.length for f in files}
+    if any(size in want_sizes for _, size in entries):
+        return True
+    if any(os.path.basename(n).lower() in want_names for n, _ in entries):
+        return False
+    if max(size for _, size in entries) >= max(want_sizes):
+        return False
+    return None            # only small files listed so far: the rest is in later volumes
+
+
+def worth_peeking(nzb: bytes, files: list) -> bool:
+    """Is a post worth looking inside? Only when it is a RAR set that names none of the
+    torrent's files - then the NZB alone cannot say whether it is the same release."""
+    try:
+        posted = nzbinfo.parse(nzb)
+    except ET.ParseError:
+        return False
+    if not nzbinfo.first_volume(posted):
+        return False
+    names = {os.path.basename(f.name).lower() for f in files}
+    return not any(p.name.lower() in names for p in posted)
+
+
+def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files: list) -> bool | None:
+    """Look inside a RAR post before downloading all of it: only its first volume is
+    fetched, and the names and sizes in that volume's headers are compared with the torrent's
+    files. False means the post holds a different encode - skip it and keep the bytes."""
+    try:
+        vol = nzbinfo.first_volume(nzbinfo.parse(nzb))
+    except ET.ParseError:
+        return None
+    part = nzbinfo.trim(nzb, vol) if vol else None
+    if part is None:
+        return None
+    name = PEEK_PREFIX + secrets.token_hex(4)
+    try:
+        nzo = sab.add_nzb(part, name, cfg.sab_category, PP_REPAIR, cfg.sab_priority)
+    except ApiError as e:
+        warn(f"could not look inside {rel.title}: {e}")
+        return None
+    info(f"looking inside {rel.title} ({rel.indexer}, {gb(rel.size)}): fetching {vol} only")
+    d = None
+    try:
+        status, slot = sab_wait(sab, {nzo: f"first volume of {rel.title}"})[nzo]
+        if status not in SAB_DONE:
+            return None
+        d = job_dir(cfg, slot, name)
+        got = [os.path.join(d, f) for f in os.listdir(d)]
+        got = [p for p in got if os.path.isfile(p)]
+        if not got:
+            return None
+        entries = archives.list_contents(max(got, key=os.path.getsize))
+        held = archive_holds(files, entries)
+        if held is False:
+            big = max(entries, key=lambda e: e[1])
+            info(f"{rel.title}: its archive holds {big[0]} ({gb(big[1])}), which is not "
+                 f"{files[0].name} ({gb(files[0].length)}) - skipping it, {gb(rel.size)} not downloaded")
+        elif held:
+            info(f"{rel.title}: its archive holds the torrent's file - downloading it")
+        return held
+    except (Abort, ApiError, OSError, RuntimeError, subprocess.SubprocessError) as e:
+        warn(f"could not look inside {rel.title}: {e}")
+        return None
+    finally:
+        if d and os.path.isdir(d) and os.path.basename(d).startswith(PEEK_PREFIX):
+            shutil.rmtree(d, ignore_errors=True)
+        try:
+            sab.delete_history(nzo)
+        except ApiError:
+            pass
 
 
 def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
@@ -795,9 +897,71 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 return r
         return None
 
+    def fetch_extras(u: Unit):
+        """Files of ``u`` no child covers - a season's own .nfo/.sfv next to its episodes -
+        downloaded on their own: each of ``u``'s posts (same group/resolution) is trimmed
+        to files of those types, so a few KB come down instead of the whole season."""
+        covered = {f.relpath for c in u.children for f in c.files}
+        extras = [f for f in u.files if f.relpath not in covered and f.relpath not in placed]
+        if not extras:
+            return
+        want = {f.relpath for f in extras}
+        have = set(asm.find_sources(t, dirs + [d for d, _ in partials]))
+        if want <= have:
+            return
+        exts = sorted({f.ext for f in extras if f.ext})
+        names = ", ".join(f.name for f in extras[:3])
+        if not exts or sum(f.length for f in extras) > 50 << 20:
+            warn(f"{u.need.label}: {names} belong to no single episode and are too big to fetch on their own")
+            return
+        step(f"Fetching {names} ({u.need.label} itself, not any one episode)")
+        cands = [r for r in sorted(usenet_results(cfg, pr, u.need, u.seeded), key=lambda r: -(r.grabs or 0))
+                 if _fits(dataclasses.replace(u.need, min_size=0), r) is None][:MAX_PEEK]
+        for rel in cands:
+            check_cancel()
+            try:
+                data = pr.fetch(rel)
+                trimmed = None
+                for ext in exts:                 # every posted file of those types
+                    part = nzbinfo.trim(data, ext)
+                    trimmed = part if trimmed is None else _merge_nzb(trimmed, part)
+            except (ApiError, ET.ParseError) as e:
+                warn(f"{rel.indexer}: {e}")
+                continue
+            finally:
+                _drop(pr, rel)
+            if trimmed is None:
+                info(f"{rel.title} ({rel.indexer}) lists no {'/'.join(exts)} file")
+                continue
+            name = f"{t.name}.extras"
+            try:
+                nzo = sab.add_nzb(trimmed, name, cfg.sab_category, PP_REPAIR, cfg.sab_priority)
+                ledger_for(cfg).record(nzo, name, rel.guid, rel.indexer, None, _current_torrent)
+                info(f"{nzo}  {', '.join(exts)} from {rel.title} ({rel.indexer})")
+                status, slot = sab_wait(sab, {nzo: name})[nzo]
+                if status not in SAB_DONE:
+                    continue
+                d = job_dir(cfg, slot, name)
+            except (ApiError, Abort) as e:
+                warn(f"{rel.indexer}: {e}")
+                continue
+            if os.path.isfile(d):
+                d = os.path.dirname(d) if matching.norm(os.path.basename(os.path.dirname(d))).startswith(
+                    matching.norm(name)) else d
+            partials.append((d, name))
+            if want <= set(asm.find_sources(t, dirs + [p for p, _ in partials])):
+                info(f"{u.need.label}: got {names}")
+                if d not in dirs:
+                    dirs.append(d)
+                nzos.append(nzo)
+                return
+            warn(f"{rel.title} had no {names} that fits the torrent")
+        warn(f"{u.need.label}: no post of this group has {names}")
+
     def split(u: Unit):
         kinds = {c.level for c in u.children}
         info(f"{u.need.label}: going to {'season' if 'season' in kinds else 'episode'} NZBs")
+        fetch_extras(u)
         for c in u.children:
             d = next((d for d, _ in partials if satisfied(c, d)), None)
             if d:
@@ -828,7 +992,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 if u.children:
                     split(u)
                     return
-                rel = ask_for_post(cfg, pr, u.need, u.tried, u.seeded)
+                rel = None if opts.unattended else ask_for_post(cfg, pr, u.need, u.tried, u.seeded)
                 if rel is None:
                     raise Abort(f"no Usenet post could supply {u.need.label}")
             u.tried.append(rel)
@@ -860,6 +1024,11 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     return
                 info(f"{why}, and that one " + ("failed in SABnzbd" if state == "failed"
                                                 else f"did not hold all of {u.need.label}") + " - skipping it")
+                _drop(pr, rel)
+                continue
+            peek = cfg.peek_archives if opts.peek is None else opts.peek
+            if peek and worth_peeking(data, u.files) \
+                    and peek_archive(cfg, pr, sab, rel, data, u.files) is False:
                 _drop(pr, rel)
                 continue
             try:
@@ -954,7 +1123,7 @@ def usenet_multi(cfg: Config, pr: Prowlarr, sab: SABnzbd, t: Torrent, groups: li
     return dirs, nzos
 
 
-def next_post(cfg: Config, pr: Prowlarr, slot) -> Release | None:
+def next_post(cfg: Config, pr: Prowlarr, slot, ask: bool = True) -> Release | None:
     """The next post to try for a unit when repairing: queued ones, then other posts of the
     same release group (searched once), then whatever the person picks."""
     while True:
@@ -967,7 +1136,7 @@ def next_post(cfg: Config, pr: Prowlarr, slot) -> Release | None:
             slot.queue = find_alternatives(cfg, pr, slot.need, slot.tried, slot.known)
             if slot.queue:
                 continue
-        return ask_for_post(cfg, pr, slot.need, slot.tried, slot.known)
+        return ask_for_post(cfg, pr, slot.need, slot.tried, slot.known) if ask else None
 
 
 def remove_rejected(rejected: list[tuple[str, str]]):
@@ -1071,6 +1240,7 @@ class Retry:
     sab: SABnzbd
     pp: int
     slots: list
+    unattended: bool = False
 
 
 def inner_pieces(t: Torrent, f) -> range:
@@ -1133,7 +1303,7 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
     def fetch_copy(f) -> tuple[str, Release] | None:
         slot = file_slot[f.relpath]
         while True:
-            rel = next_post(rt.cfg, rt.pr, slot)
+            rel = next_post(rt.cfg, rt.pr, slot, not rt.unattended)
             if rel is None:
                 return None
             slot.tried.append(rel)
@@ -1260,7 +1430,8 @@ def owned_record(cfg: Config, t: Torrent) -> asm.Owned:
 def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dirs: list[str],
            output_dir: str, qb: QBittorrent | None, existing: dict | None,
            sources_are_ours: bool = True, retry: Retry | None = None,
-           earlier_dirs: list[str] = ()) -> dict:
+           earlier_dirs: list[str] = (), keep_dirs: list[str] = (),
+           ours_dirs: list[str] | None = None) -> dict:
     """``sources_are_ours``: the source folders are SABnzbd jobs this build submitted, so
     their leftovers may be deleted. False for folders the user pointed at (assemble)."""
     step(f"Laying out files for the torrent in {output_dir}")
@@ -1281,7 +1452,7 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     owned = owned_record(cfg, t)
     try:
         res = asm.assemble(t, source_dirs, output_dir, dry_run=opts.dry_run, log=line,
-                           progress=copying, owned=owned)
+                           progress=copying, owned=owned, keep=keep_dirs)
     finally:
         if not opts.dry_run:
             owned.save()
@@ -1299,8 +1470,8 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
         warn(f"WRONG SIZE  {f.relpath}: have {size}, need {f.length}")
     if opts.dry_run:
         info("dry run: nothing moved")
-        asm.cleanup(t, res, source_dirs if sources_are_ours else [], output_dir, owned,
-                    dry_run=True, log=line)
+        asm.cleanup(t, res, (source_dirs if sources_are_ours else []) if ours_dirs is None else ours_dirs,
+                    output_dir, owned, dry_run=True, log=line)
         return {"result": "dry run"}
     if not res.complete:
         raise Abort("the NZB download(s) do not contain every file of the torrent; not adding it "
@@ -1335,6 +1506,8 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     if cfg.cleanup and not opts.no_cleanup:
         step("Removing files that are not part of the torrent")
         ours = (list(source_dirs) + [d for d in earlier_dirs if d not in source_dirs]) if sources_are_ours else []
+        if ours_dirs is not None:
+            ours = list(ours_dirs)            # e.g. only the downloads an assemble made
         removed = asm.cleanup(t, res, ours, output_dir, owned, log=line)
         owned.save()
         info(f"{len(removed)} file(s) removed" + ("" if sources_are_ours else
@@ -1465,7 +1638,7 @@ def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor
 
     output_dir = opts.output_dir or cfg.output_dir or os.path.dirname(os.path.abspath(dirs[0]))
     out = finish(cfg, opts, t, path, dirs, output_dir, qb, existing,
-                 retry=Retry(cfg, pr, sab, pp, slots), earlier_dirs=earlier_dirs(cfg, sab, t))
+                 retry=Retry(cfg, pr, sab, pp, slots, opts.unattended), earlier_dirs=earlier_dirs(cfg, sab, t))
     if rejected and cfg.cleanup and not opts.no_cleanup and not opts.dry_run:
         remove_rejected(rejected)
     if cfg.sab_delete_history:
@@ -1488,4 +1661,55 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
     if not opts.no_qbit and not opts.dry_run:
         qb = QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
         existing = qbit_preflight(qb, t)
-    return finish(cfg, opts, t, path, dirs, output_dir, qb, existing, sources_are_ours=False)
+    # files the torrent has unpacked, still inside RAR sets here (a scene release next to a
+    # torrent of its unpacked videos): unpacked onto the output disk, never into your folders
+    work = None
+    missing = asm.assemble(t, dirs, PROBE_DIR, dry_run=True, log=lambda *_: None).missing
+    if missing and not opts.dry_run and any(archives.rar_sets(d) for d in dirs):
+        work = os.path.join(output_dir, f".nzb2seed-unpacked-{t.infohash[:12]}")
+        step(f"Unpacking {len(missing)} file(s) the torrent has unpacked from the RAR sets")
+        info(f"into {work} (removed afterwards; your folders are not written to)")
+        # an interrupted earlier run: keep what it unpacked in full, drop a cut-off file
+        # (the unpacker never overwrites, so a partial file would otherwise stay)
+        sizes = {f.length for f in t.real_files}
+        for root_, _, names in os.walk(work):
+            for n in names:
+                p = os.path.join(root_, n)
+                if os.path.getsize(p) not in sizes:
+                    os.remove(p)
+                    info(f"removed the cut-off {n} an interrupted run left")
+        for d in dirs:
+            left = asm.assemble(t, dirs + [work], PROBE_DIR, dry_run=True, log=lambda *_: None).missing
+            if not left:
+                break
+            unpack_from_archives(d, left, dest=work)
+    avail = dirs + ([work] if work else [])
+    # what the folders do not have at all: from Usenet, like a build - only those files
+    fetched, retry, pr = [], None, None
+    missing = asm.assemble(t, avail, PROBE_DIR, dry_run=True, log=lambda *_: None).missing
+    try:
+        if missing and opts.fetch_missing and not opts.dry_run:
+            step(f"Downloading the {len(missing)} file(s) the folders do not have from Usenet")
+            for f in missing[:10]:
+                info(f"needed: {f.relpath} ({gb(f.length)})")
+            sab = SABnzbd(cfg.sab_url, cfg.sab_key)
+            pr = grab.Source(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), sab)
+            grab.remove_stray_checks(sab)
+            metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
+            global _current_torrent
+            _current_torrent = t.infohash
+            pp = choose_pp(opts, cfg, t)
+            sab_preflight(sab, pp)
+            have = {f.relpath for f in t.real_files} - {f.relpath for f in missing}
+            fetched, _, units, _ = plan_and_fetch(cfg, opts, pr, sab, t, t.name, [], pp, have)
+            retry = Retry(cfg, pr, sab, pp, units)
+        elif missing and not opts.dry_run:
+            info(f"{len(missing)} file(s) are in none of the folders; downloading them from Usenet is switched off")
+        return finish(cfg, opts, t, path, avail + [d for d in fetched if d not in avail], output_dir, qb, existing,
+                      sources_are_ours=False, keep_dirs=dirs, ours_dirs=fetched, retry=retry)
+    finally:
+        if pr:
+            pr.close()
+            metadata.close_session()
+        if work:
+            shutil.rmtree(work, ignore_errors=True)

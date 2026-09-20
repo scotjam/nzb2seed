@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 
 from . import assemble as asm
-from . import archives, grab, matching, metadata, scenerar
+from . import archives, episodes as episodes_mod, grab, matching, metadata, scenerar
 from .clients import PP_REPAIR, PP_UNPACK, SAB_DONE, ApiError, Prowlarr, Release, SABnzbd
 from .config import Config
 from .pathmap import map_path
@@ -86,14 +86,76 @@ class Option:
                          or sum(max(r.size for r in rs) for rs in self.episodes.values()))}
 
 
+class Picked:
+    """Several options, highest priority first, used as one: an episode is taken from the
+    first option that has a post of it that works out, then the next."""
+
+    def __init__(self, opts: list[Option]):
+        self.opts = opts
+
+    @property
+    def group(self) -> str:
+        return "/".join(dict.fromkeys(o.group for o in self.opts))
+
+    @property
+    def res(self) -> str | None:
+        rs = list(dict.fromkeys(o.res for o in self.opts if o.res))
+        return "/".join(rs) or None
+
+    @property
+    def seasons(self) -> list[Release]:
+        return [r for o in self.opts for r in o.seasons]
+
+    @property
+    def episodes(self) -> dict[int, list[Release]]:
+        out: dict[int, list[Release]] = {}
+        for o in self.opts:
+            for e, rs in o.episodes.items():
+                out.setdefault(e, []).extend(rs)
+        return out
+
+
+_SHOW_EXTRA = r"(?:(?:19|20)\d\d|us|uk|au|nz|ca)"
+_AND = {"&", "and", "en", "und", "et"}          # 'Tom & Jess' is often posted as 'Tom.En.Jess'
+MAX_EPISODE_SEARCHES = 12                        # per season, on top of the season search
+MAX_GROUP_SEARCHES = 8                           # "<show> <group>" searches per season
+
+
+def show_key(n: str) -> str:
+    """A normalised name with every 'and' word made the same."""
+    return ".".join("and" if t in _AND else t for t in n.split("."))
+
+
+def mentions_show(name: str, show_norm: str) -> bool:
+    """Does ``name`` start with the show's name (any 'and' spelling)?"""
+    return show_key(matching.norm(name)).startswith(show_key(show_norm) + ".")
+
+
+def show_names(show_name: str) -> list[str]:
+    """The show's name as releases may spell it: 'Tom & Jess' -> also 'Tom en Jess'."""
+    out = [show_name]
+    if "&" in show_name:
+        out += [show_name.replace("&", w) for w in ("en", "and")]
+    return out
+
+
+def same_show(title: str, show_norm: str, year: int | None = None) -> bool:
+    """Is ``title`` a release of the show ``show_norm`` (normalised name)? The show part must
+    be exactly the show, optionally with a year and/or country - not a longer title. With
+    ``year``, a release naming another year is another show of the same name."""
+    if not mentions_show(title, show_norm):
+        return False
+    rest = re.sub(r"[()\[\]]", "", show_key(show_prefix(title))[len(show_key(show_norm)):]).strip(".")
+    if rest and not re.fullmatch(rf"{_SHOW_EXTRA}(?:\.{_SHOW_EXTRA})?", rest):
+        return False
+    years = re.findall(r"(?:19|20)\d\d", rest)
+    return not (year and years and int(years[0]) != year)
+
+
 def classify(r: Release, show_norm: str, season: int):
     """(prefix, group, res, episode numbers or None for a season NZB), or None if unrelated."""
     n = matching.norm(r.title)
-    if not n.startswith(show_norm + "."):
-        return None
-    # the show part must be exactly the show (optionally + year or country), not a longer title
-    rest = show_prefix(r.title)[len(show_norm):].strip(".")
-    if rest and not re.fullmatch(r"(?:(?:19|20)\d\d|us|uk|au|nz|ca)(?:\.(?:(?:19|20)\d\d|us|uk|au|nz|ca))?", rest):
+    if not same_show(r.title, show_norm):
         return None
     group, res = group_of(r.title), _RES.search(n)
     if not group:
@@ -108,44 +170,173 @@ def classify(r: Release, show_norm: str, season: int):
     return show_prefix(r.title), group, res.group(0) if res else None, None
 
 
-def find_options(cfg: Config, pr: Prowlarr, show_name: str, season: int, wanted: list[int]) -> list[Option]:
-    """Every (show prefix, release group, resolution) that has this season on Usenet."""
-    show_norm = matching.norm(show_name)
-    seen, results = set(), []
+def _words(s: str) -> list[str]:
+    """Lower-case words without accents or punctuation; every 'and' spelling the same."""
+    import unicodedata
+    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode().lower().replace("&", " and ")
+    return ["and" if w in _AND else w for w in re.findall(r"[a-z0-9]+", s)]
 
-    def search(q):
-        for r in pr.search(q, cfg.indexer_ids, cfg.categories):
-            if r.protocol == "usenet" and r.guid not in seen:
-                seen.add(r.guid)
-                results.append(r)
-    search(f"{show_name} S{season:02d}")
-    found_eps = set()
-    for r in results:
-        c = classify(r, show_norm, season)
-        if c and c[3]:
-            found_eps |= c[3]
-    for e in wanted:                                   # episodes the season search missed
-        if e not in found_eps:
-            search(f"{show_name} S{season:02d}E{e:02d}")
-    opts: dict[str, Option] = {}
-    for r in results:
-        c = classify(r, show_norm, season)
-        if not c:
-            continue
-        prefix, group, res, eps = c
-        o = opts.setdefault(f"{prefix}|{group}|{res or ''}", Option(prefix, group, res))
-        if eps is None:
-            o.seasons.append(r)
-        else:
-            for e in eps:
-                o.episodes.setdefault(e, []).append(r)
-    for o in opts.values():
-        o.seasons.sort(key=lambda r: -(r.grabs or 0))
-        for rs in o.episodes.values():
-            rs.sort(key=lambda r: -(r.grabs or 0))
-    return sorted(opts.values(), key=lambda o: (
-        not o.summary(wanted)["complete"], -len(o.summary(wanted)["episodes_found"]),
-        -int((o.res or "0p")[:-1] or 0)))
+
+MIN_NAME_CHARS = 5                     # shorter episode names ('De', 'Pech') match too easily
+
+
+class NameIndex:
+    """Episodes by their names, to place posts named only by episode title - 'Show De
+    Dierenwinkel FLEMISH - GRP' - or files in your library named that way. Only an
+    unambiguous match counts: the longest episode name the title's words start with,
+    belonging to exactly one episode."""
+
+    def __init__(self, names: dict[tuple[int, int], set[str]]):
+        self.index: dict[tuple, set[tuple[int, int]]] = {}
+        for ep, ns in names.items():
+            for n in ns:
+                w = tuple(_words(n))
+                if w and len("".join(w)) >= MIN_NAME_CHARS:
+                    self.index.setdefault(w, set()).add(ep)
+        self.longest = max((len(k) for k in self.index), default=0)
+
+    def __bool__(self):
+        return bool(self.index)
+
+    @classmethod
+    def for_show(cls, show: dict) -> "NameIndex":
+        try:
+            return cls(episodes_mod.all_names(show))
+        except Exception:                       # names are a bonus; never fail a grab over them
+            return cls({})
+
+    def match(self, title: str, show_norm: str) -> tuple[int, int] | None:
+        """(season, episode) for a title named after an episode - None when it has SxxEyy or
+        season numbering, is not this show, or does not name exactly one episode."""
+        if _EP.search(matching.norm(title)) or re.search(r"(?<![a-z0-9])s\d{1,3}(?![0-9])", matching.norm(title)):
+            return None
+        words, show = _words(title), _words(show_norm.replace(".", " "))
+        if not show or words[:len(show)] != show:
+            return None
+        rest = words[len(show):]
+        for n in range(min(len(rest), self.longest), 0, -1):
+            hits = self.index.get(tuple(rest[:n]))
+            if hits:
+                return next(iter(hits)) if len(hits) == 1 else None     # one name, several episodes: skip
+        return None
+
+
+def names_for(cfg: Config, show: dict) -> "NameIndex | None":
+    """The episode-name matcher when the setting is on (it costs extra searches), else None."""
+    return NameIndex.for_show(show) if cfg.match_episode_names else None
+
+
+def named_group(title: str) -> str | None:
+    """The release group of a post named by episode title: its usual group, or the word
+    after the final dash ('... FLEMISH - GRP')."""
+    g = group_of(title)
+    if g:
+        return g
+    m = re.search(r"-\s*([A-Za-z0-9]+)\s*$", title)
+    return m.group(1).lower() if m else None
+
+
+class Pool:
+    """Usenet search results for one show, gathered once and shared by its seasons."""
+
+    def __init__(self, cfg: Config, pr, show_name: str, names: NameIndex | None = None):
+        self.cfg, self.pr = cfg, pr
+        self.names = show_names(show_name)
+        self.show_norm = matching.norm(show_name)
+        self.episode_names = names
+        self.seen: set[str] = set()
+        self.results: list[Release] = []
+
+    def classify(self, r: Release, season: int):
+        """classify(), and for a post named only by episode title: its matched episode."""
+        c = classify(r, self.show_norm, season)
+        if c or not self.episode_names:
+            return c
+        hit = self.episode_names.match(r.title, self.show_norm)
+        group = named_group(r.title) if hit else None
+        if not hit or hit[0] != season or not group:
+            return None
+        res = _RES.search(matching.norm(r.title))
+        prefix = ".".join(matching.norm(r.title).split(".")[:len(self.show_norm.split("."))]) + "."
+        return prefix, group, res.group(0) if res else None, {hit[1]}
+
+    def search(self, *queries: str):
+        """Run searches (four at a time); new Usenet results join the pool."""
+        from concurrent.futures import ThreadPoolExecutor
+        todo = [q for q in queries if q]
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            for found in ex.map(lambda q: self.pr.search(q, self.cfg.indexer_ids, self.cfg.categories), todo):
+                for r in found:
+                    if r.protocol == "usenet" and r.guid not in self.seen:
+                        self.seen.add(r.guid)
+                        self.results.append(r)
+
+    def groups(self, seasons) -> list[str]:
+        """Release groups seen for these seasons, most posts first."""
+        count: dict[str, int] = {}
+        for r in self.results:
+            for s in seasons:
+                c = self.classify(r, s)
+                if c:
+                    count[c[1]] = count.get(c[1], 0) + 1
+                    break
+        return sorted(count, key=lambda g: -count[g])
+
+    def search_groups(self, seasons):
+        """Each group seen, searched by name: one query finds that group's posts across the
+        show (long seasons of named episodes are rarely all in a season search)."""
+        self.search(*[f"{self.names[0]} {g}" for g in self.groups(seasons)[:MAX_GROUP_SEARCHES]])
+
+    def options(self, season: int, wanted: list[int]) -> list[Option]:
+        opts: dict[str, Option] = {}
+        for r in self.results:
+            c = self.classify(r, season)
+            if not c:
+                continue
+            prefix, group, res, eps = c
+            o = opts.setdefault(f"{prefix}|{group}|{res or ''}", Option(prefix, group, res))
+            if eps is None:
+                o.seasons.append(r)
+            else:
+                for e in eps:
+                    o.episodes.setdefault(e, []).append(r)
+        for o in opts.values():
+            o.seasons.sort(key=lambda r: -(r.grabs or 0))
+            for rs in o.episodes.values():
+                rs.sort(key=lambda r: -(r.grabs or 0))
+        return sorted(opts.values(), key=lambda o: (
+            not o.summary(wanted)["complete"], -len(o.summary(wanted)["episodes_found"]),
+            -int((o.res or "0p")[:-1] or 0)))
+
+
+def find_options(cfg: Config, pr: Prowlarr, show_name: str, season: int, wanted: list[int],
+                 names: NameIndex | None = None) -> list[Option]:
+    """Every (show prefix, release group, resolution) that has this season on Usenet. With
+    ``names``, posts named only by episode title count too (and the show's name is searched
+    on its own, which is how those are found)."""
+    pool = Pool(cfg, pr, show_name, names)
+    pool.search(*[f"{name} S{season:02d}" for name in pool.names], *(pool.names if names else []))
+    pool.search_groups([season])
+    found_eps = {e for o in pool.options(season, wanted) for e in o.episodes}
+    # episodes still not found, searched one by one - capped, so a long season does
+    # not use up the indexers' API limits
+    unfound = [e for e in wanted if e not in found_eps]
+    pool.search(*[f"{name} S{season:02d}E{e:02d}" for e in unfound[:MAX_EPISODE_SEARCHES] for name in pool.names])
+    if len(unfound) > MAX_EPISODE_SEARCHES:
+        info(f"S{season:02d}: {len(unfound)} episodes were not in the season search; searched the first "
+             f"{MAX_EPISODE_SEARCHES} one by one (to spare the indexers' API limits)")
+    return pool.options(season, wanted)
+
+
+def find_series_options(cfg: Config, pr, show_name: str, wanted: dict[int, list[int]],
+                        names: NameIndex | None = None) -> dict[int, list[Option]]:
+    """Options for every season at once, from one shared pool of searches: the show's name,
+    each season, and each release group - not every season searching everything again."""
+    pool = Pool(cfg, pr, show_name, names)
+    seasons = sorted(wanted)
+    pool.search(*pool.names, *[f"{pool.names[0]} S{s:02d}" for s in seasons])
+    pool.search_groups(seasons)
+    return {s: pool.options(s, wanted[s]) for s in seasons}
 
 
 # ---------------------------------------------------------------- what a download holds
@@ -269,10 +460,12 @@ def downloads_root(cfg: Config, sab: SABnzbd) -> str:
 PACKING = {"scene": "Keep scene RARs", "unpack": "Unpack all"}
 
 
-def grab_season(cfg: Config, show_id: int, season: int, key: str, packing: str | None = None,
-                screens: int = 4) -> dict:
+def grab_season(cfg: Config, show_id: int, season: int, key, packing: str | None = None,
+                screens: int = 4, skip=None, source: str | None = None) -> dict:
     """``packing``: "scene" keeps (or rebuilds from srrDB's .srr) the original scene RAR set of
-    every RAR'd release, "unpack" leaves the unpacked video. None = the configured default."""
+    every RAR'd release, "unpack" leaves the unpacked video. None = the configured default.
+    ``key``: one option's key, or a list of them in priority order (an episode comes from
+    the first that has it). ``skip``: episode numbers you already have - not downloaded."""
     packing = packing or cfg.season_packing or "scene"
     if packing not in PACKING:
         raise Abort(f"unknown packing {packing!r} (use one of: {', '.join(PACKING)})")
@@ -280,34 +473,56 @@ def grab_season(cfg: Config, show_id: int, season: int, key: str, packing: str |
     pr = grab.Source(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), sab)
     srr = Srr()
     metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
+    episodes_mod.configure_cache(cfg.path)
     grab.remove_stray_checks(sab)
     try:
-        return _grab_season(cfg, pr, sab, srr, show_id, season, key, packing, screens)
+        return _grab_season(cfg, pr, sab, srr, show_id, season, key, packing, screens, set(skip or ()),
+                            source or cfg.episode_source or "all")
     finally:
         pr.close()
         metadata.close_session()
 
 
-def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing: str,
-                 screens: int) -> dict:
+def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key, packing: str,
+                 screens: int, skip: set[int] = frozenset(), source: str = "all") -> dict:
     step("Looking up the season")
     show = metadata.tvmaze_show(show_id)
-    episodes = metadata.tvmaze_episodes(show_id, season)
-    wanted = [e["number"] for e in episodes]
+    episodes, used = episodes_mod.season_episodes(show, season, source, log=info)
+    listed = [e["number"] for e in episodes]
+    if not listed:
+        raise Abort(f"{episodes_mod.SOURCES[source]} lists no episodes for {show['name']} season {season}")
+    info(f"{show['name']} season {season}: {len(listed)} episodes on {episodes_mod.SOURCES[used]}")
+    skip = set(skip) & set(listed)
+    wanted = [e for e in listed if e not in skip]
+    if skip:
+        info(f"already yours, not downloaded: " + ", ".join(f"E{e:02d}" for e in sorted(skip)))
     if not wanted:
-        raise Abort(f"TVmaze lists no episodes for {show['name']} season {season}")
-    info(f"{show['name']} season {season}: {len(wanted)} episodes on TVmaze")
-    opt = next((o for o in find_options(cfg, pr, show["name"], season, wanted) if o.key == key), None)
-    if opt is None:
+        return {"result": f"nothing to grab: all {len(listed)} episodes are already yours", "report": None}
+    keys = [key] if isinstance(key, str) else list(dict.fromkeys(key))
+    found = {o.key: o for o in find_options(cfg, pr, show["name"], season, wanted, names_for(cfg, show))}
+    opts = [found[k] for k in keys if k in found]
+    for k in keys:
+        if k not in found:
+            warn(f"{k.split('|')[1].upper()} {k.split('|')[2]}: no longer found for this season - left out")
+    if not opts:
         raise Abort("that release group / resolution is no longer found for this season")
-    info(f"{opt.group.upper()} {opt.res or ''}: {len(opt.seasons)} season NZB(s), "
-         f"episode NZBs for {len(opt.episodes)} of {len(wanted)} episodes")
+    for n, o in enumerate(opts, 1):
+        info((f"{n}. " if len(opts) > 1 else "") + f"{o.group.upper()} {o.res or ''}: {len(o.seasons)} season NZB(s), "
+             f"episode NZBs for {sum(1 for e in wanted if o.episodes.get(e))} of {len(wanted)} episodes")
+    opt = opts[0] if len(opts) == 1 else Picked(opts)
+    if len(opts) > 1:
+        info(f"together: {sum(1 for e in wanted if opt.episodes.get(e))} of {len(wanted)} episodes as episode NZBs"
+             + (f", {len(opt.seasons)} season NZB(s)" if opt.seasons else ""))
     pp = PP_UNPACK        # never +Delete; the archives stay until the RAR decision below
     info(f"packing: {PACKING[packing]}")
 
     root = downloads_root(cfg, sab)
     example = (opt.seasons or [r for e in sorted(opt.episodes) for r in opt.episodes[e]])[0]
     name = season_release_name(example.title)
+    if len(opts) > 1:
+        # several groups: the season folder is named after the show and season only
+        m = re.search(r"(?i)(?<![a-z0-9])S\d{1,4}(?![0-9e])", name)
+        name = name[:m.end()] if m else name
     dest = os.path.join(root, name)
     side = dest + SIDE_SUFFIX
     owned = asm.Owned(os.path.join(side, "owned.json"))
@@ -351,16 +566,22 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing
             have[e] = (d, release)
         return ok
 
-    # 1. season NZBs of this group/resolution, all of them before going down a level
-    if opt.seasons:
-        step("Trying season NZBs")
-    for rel in opt.seasons:
+    # 1. season NZBs of this group/resolution, all of them before going down a level - unless
+    #    episodes are skipped: then a season NZB would download those again, so the missing
+    #    episodes are tried on their own first and season NZBs only fill what is left
+    def season_nzbs():
+        if opt.seasons and not set(wanted) <= set(have):
+            step("Trying season NZBs" + (" for the episodes still missing" if skip else ""))
+        for rel in opt.seasons:
+            season_nzb(rel)
+
+    def season_nzb(rel):
         check_cancel()
         if set(wanted) <= set(have):
-            break
+            return
         with _Skip(rel.title, notes):
             if failed_before(cfg, sab, rel):
-                continue
+                return
             again = reuse(cfg, sab, rel, lambda d: set(wanted) <= set(episodes_in(d, season)))
             if again and again[1]:
                 d = again[1]
@@ -369,21 +590,18 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing
                     nzo = again[0] if again else sab_submit(cfg, pr, sab, rel, None, pp)
                 except ApiError as e:
                     warn(f"{rel.indexer}: {e}")
-                    continue
+                    return
                 status, slot = sab_wait(sab, {nzo: rel.title})[nzo]
                 if status not in SAB_DONE:
-                    continue
+                    return
                 d = job_dir(cfg, slot, rel.title)
             got = accept(d, episodes_in(d, season), scene_name(rel.title), check=False)
-            info(f"{rel.title}: holds {len(got)} of {len(wanted)} episodes")
+            info(f"{rel.title}: holds {len(got)} of the {len(wanted)} episodes wanted")
             partial.append((d, scene_name(rel.title)))
 
     # 2. episode NZBs for whatever is still missing - every candidate before giving up
-    missing = [e for e in wanted if e not in have]
-    if missing:
-        step(f"Downloading {len(missing)} episode(s) on their own")
-    queue = {e: list(opt.episodes.get(e, [])) for e in missing}
     pending: dict[str, tuple[int, Release]] = {}
+    queue: dict[int, list[Release]] = {}
 
     def submit_next(e: int):
         while queue[e]:
@@ -403,28 +621,53 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing
                     continue
                 pending[nzo] = (e, rel)
                 return
+        if skip and opt.seasons:
+            info(f"E{e:02d}: no {opt.group.upper()} {opt.res or ''} post of this episode alone worked out"
+                 " - trying the season NZBs next")
+            return
         msg = f"E{e:02d}: no {opt.group.upper()} {opt.res or ''} post of this episode worked out"
         warn(msg)
         notes.append(msg)
 
-    for e in missing:
-        submit_next(e)
-    while pending:
-        batch = dict(pending)
-        pending.clear()
-        for nzo, (status, slot) in sab_wait(sab, {n: r.title for n, (_, r) in batch.items()}).items():
-            e, rel = batch[nzo]
-            if status in SAB_DONE:
-                done_ok = False
-                with _Skip(f"E{e:02d} {rel.title}", notes):
-                    d = job_dir(cfg, slot, rel.title)
-                    eps = episodes_in(d, season, e)
-                    done_ok = e in eps and bool(accept(d, {e: eps[e]}, scene_name(rel.title), True))
-                    if e not in eps:
-                        warn(f"{rel.title} does not hold E{e:02d}")
-                if done_ok:
-                    continue
+    def episode_nzbs():
+        missing = [e for e in wanted if e not in have]
+        if not missing:
+            return
+        step(f"Downloading {len(missing)} episode(s) on their own")
+        queue.update({e: list(opt.episodes.get(e, [])) for e in missing})
+        for e in missing:
             submit_next(e)
+        wait_episodes()
+
+    def wait_episodes():
+        while pending:
+            batch = dict(pending)
+            pending.clear()
+            for nzo, (status, slot) in sab_wait(sab, {n: r.title for n, (_, r) in batch.items()}).items():
+                e, rel = batch[nzo]
+                if status in SAB_DONE:
+                    done_ok = False
+                    with _Skip(f"E{e:02d} {rel.title}", notes):
+                        d = job_dir(cfg, slot, rel.title)
+                        eps = episodes_in(d, season, e)
+                        done_ok = e in eps and bool(accept(d, {e: eps[e]}, scene_name(rel.title), True))
+                        if e not in eps:
+                            warn(f"{rel.title} does not hold E{e:02d}")
+                    if done_ok:
+                        continue
+                submit_next(e)
+
+    if skip:
+        episode_nzbs()
+        season_nzbs()
+        for e in wanted:
+            if e not in have and opt.seasons:          # (without season NZBs: reported already)
+                msg = f"E{e:02d}: no {opt.group.upper()} {opt.res or ''} post of this episode worked out"
+                warn(msg)
+                notes.append(msg)
+    else:
+        season_nzbs()
+        episode_nzbs()
 
     if not have:
         raise Abort(f"none of the {len(wanted)} episodes could be downloaded from "
@@ -445,7 +688,21 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing
         owned.dirs.add(os.path.abspath(dst))
 
     sources = {have[e][0] for e in wanted if e in have}
-    if len(sources) == 1 and set(wanted) <= set(have) and next(iter(sources)) in season_srcs - in_place:
+    whole = not skip and len(sources) == 1 and set(wanted) <= set(have) and \
+        next(iter(sources)) in season_srcs - in_place
+    aside = None
+    if not whole and os.path.abspath(dest) in {os.path.abspath(p) for p in season_srcs - in_place}:
+        # SABnzbd named the season download like the season folder, but only some of its
+        # episodes are wanted: move the download aside, take those, then remove the rest
+        aside = dest + ".nzb2seed-download"
+        os.replace(dest, aside)
+        owned.makedirs(dest)
+        owned.dirs.add(os.path.abspath(dest))
+        swap = lambda p: aside if os.path.abspath(p) == os.path.abspath(dest) else p  # noqa: E731
+        have = {e: (swap(p), r) for e, (p, r) in have.items()}
+        season_srcs = {swap(p) for p in season_srcs}
+        sources = {swap(p) for p in sources}
+    if whole:
         # one complete season release: its contents are the season folder
         src = next(iter(sources))
         for n in os.listdir(src):
@@ -490,6 +747,9 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing
                             asm._move(p, os.path.join(target, n), owned)
                 releases[os.path.basename(target)] = target
                 laid.add(e)
+    if aside:
+        shutil.rmtree(aside, ignore_errors=True)   # nzb2seed's own download; what was wanted moved out
+        owned.dirs.discard(os.path.abspath(aside))
     owned.save()
 
     # 4. MediaInfo and screenshots - while the videos are still unpacked
@@ -551,6 +811,7 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing
         "links": metadata.links(show), "packing": PACKING[packing],
         "episodes": [{"number": e["number"], "name": e["name"], "airdate": e["airdate"],
                       "present": e["number"] in placed or e["number"] in laid,
+                      "owned": e["number"] in skip,
                       "file": os.path.relpath(placed[e["number"]], dest).replace(os.sep, "/")
                       if e["number"] in placed else None}
                      for e in episodes],
@@ -561,11 +822,12 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key: str, packing
         json.dump(report, fh, indent=1)
     write_html(report, side)
     owned.save()
-    got, total = sum(1 for e in report["episodes"] if e["present"]), len(wanted)
-    missing = [f"E{e['number']:02d}" for e in report["episodes"] if not e["present"]]
+    got = sum(1 for e in report["episodes"] if e["present"] and not e["owned"])
+    missing = [f"E{e['number']:02d}" for e in report["episodes"] if not e["present"] and not e["owned"]]
     if missing:
         warn("missing: " + ", ".join(missing))
-    return {"result": f"{got}/{total} episodes" + ("" if not missing else " - missing " + ", ".join(missing)),
+    return {"result": f"{got}/{len(wanted)} episodes" + (f" ({len(skip)} already yours)" if skip else "")
+            + ("" if not missing else " - missing " + ", ".join(missing)),
             "report": name}
 
 
@@ -797,9 +1059,12 @@ def _esc(s) -> str:
 
 def write_html(r: dict, side: str):
     """A self-contained report.html in the sidecar, for opening straight from the share."""
+    def state(e):
+        if e["present"]:
+            return "<td class=ok>present</td>"
+        return "<td class=ok>already yours</td>" if e.get("owned") else "<td class=bad>MISSING</td>"
     rows = "".join(f"<tr><td>E{e['number']:02d}</td><td>{_esc(e['name'])}</td><td>{_esc(e['airdate'])}</td>"
-                   f"<td class={'ok' if e['present'] else 'bad'}>{'present' if e['present'] else 'MISSING'}</td>"
-                   f"<td>{_esc(e.get('file') or '')}</td></tr>" for e in r["episodes"])
+                   f"{state(e)}<td>{_esc(e.get('file') or '')}</td></tr>" for e in r["episodes"])
     rel_html = ""
     for c in r["releases"]:
         files = "".join(f"<tr><td>{_esc(f['name'])}</td><td>{f['size']}</td>"

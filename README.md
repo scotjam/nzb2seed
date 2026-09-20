@@ -28,6 +28,8 @@ python3 -m nzb2seed search "Show.S01E01.1080p.BluRay.x264-GRP"
 python3 -m nzb2seed run    "Show.S01E01.1080p.BluRay.x264-GRP" --indexer MyTracker -y
 python3 -m nzb2seed run    --torrent "Show.S01.1080p.BluRay.x264-GRP.torrent" --dry-run   # show the plan
 python3 -m nzb2seed assemble my.torrent /path/to/finished/download --dry-run
+python3 -m nzb2seed season "Show Name" 1 --group GRP --res 720p
+python3 -m nzb2seed series "Show Name" --library "/data/tv/Show Name" --plan
 ```
 
 To keep the GUI running, install it as a systemd service (see below). It
@@ -125,6 +127,82 @@ instead of trying other posts when pieces fail), `--start` (start seeding at
 11. **qBittorrent**: added stopped, stopped again if it came up running, save
     path set, force recheck. Below 100.0% it reports per file and stays stopped.
 
+## Grabbing a season, or a whole series
+
+The GUI's *Seasons* tab (or `season` / `series` on the command line) grabs from
+Usenet without a torrent: one release group and resolution per season, every
+episode checked against TVmaze's list and - for scene releases - against srrDB's
+CRC of the original video; scene RARs kept or rebuilt, .nfo/.sfv/Sample fetched,
+MediaInfo, screenshots, links and a report in a `<Season.Name>-metadata` folder
+next to the season (so they never end up in a torrent).
+
+* **All seasons** (the first entry of the season list, or `series`): every season
+  TVmaze lists, one after another. The series gets one release group and
+  resolution - the one covering the most missing episodes (a resolution in the
+  name beats none), or your preferred resolution - and a season without it gets
+  its most complete option at the same resolution. *Show the plan* / `--plan`
+  lists each season's choice and downloads nothing. A show of the same name from
+  another year (the 1998 original next to a 2016 revival) is never mixed in.
+* **Skip episodes I already have** (a checkbox that unlocks a chooser for the
+  show's folder, or `--library` / `--skip-owned`): episodes in that folder (any
+  layout, recognised by SxxEyy in file and folder names; folders of a same-named
+  show from another year are left out) and in qBittorrent are not downloaded -
+  any copy counts. Where some episodes of a season are skipped, the missing ones
+  are fetched as episode NZBs first; a season NZB only fills what is left, and
+  the episodes you have are never laid out from it.
+
+* **Several releases, in your order**: tick several releases of a season (or,
+  for all seasons, *Find releases for all seasons*) and put them in a priority
+  list; each episode comes from the highest release that has it, the next ones
+  fill the gaps. Without a list, a series grab fills each season's gaps from
+  the other releases at the same resolution.
+* **Posts named by episode title** (`Show De Dierenwinkel FLEMISH - GRP`, no
+  SxxEyy) - a checkbox on the Seasons tab, off by default and remembered per
+  show (or `--match-names`), because it takes more indexer API searches: they
+  are placed by the episode's name from TMDB /
+  TheTVDB / TVmaze - only when the name belongs to exactly one episode - and
+  offered like any other release; files in your library named that way count
+  as yours too.
+* **Episode list** (a choice in the tab and in Settings, or `--episodes`): TVmaze,
+  TMDB, TheTVDB, IMDb, or **all sources** - per season, whichever lists the most
+  episodes (TVmaze's lists are often incomplete for smaller shows). TMDB and
+  TheTVDB are read from their public pages, IMDb from its official episode
+  dataset (IMDb's pages answer automated requests with a bot check, which
+  nzb2seed does not get around). All of it goes through the outbound proxy and
+  is cached for a day in `cache/metadata` next to the config (IMDb's dataset for
+  a week); *Settings → Clear metadata cache* forgets it. `--library` can be
+  given more than once when a show is spread over several folders.
+
+```
+python3 -m nzb2seed series "Show Name" --year 2016 --library "/data/tv/Show Name" --plan
+python3 -m nzb2seed series "Show Name" --year 2016 --library "/data/tv/Show Name" --res 1080p
+```
+
+## Automatic builds from autobrr
+
+The *Automatic* tab (switch at the top; a dot in the menu shows whether it is on):
+
+1. **autobrr**: enter its URL and an API key (autobrr: *Settings → API keys*), list
+   the filters and tick the ones to build. nzb2seed adds a *watch folder* action
+   called "nzb2seed" to each ticked filter through autobrr's API, and removes it
+   again when you untick. A ticked filter is enabled in autobrr, and its own
+   download actions (qBittorrent,
+   SABnzbd, Sonarr...) are switched off while nzb2seed builds its releases -
+   otherwise they would download the same release over BitTorrent, which is what
+   building from Usenet avoids. Unticking puts it all back as it was: the filter
+   to whatever it was before, and only the actions nzb2seed switched off back on.
+2. **Inbox**: *Find autobrr's folder* uses autobrr's own config folder
+   (`<autobrr config>/nzb2seed-inbox`, `/config/nzb2seed-inbox` inside autobrr),
+   which autobrr can already write to - no change to autobrr's container.
+3. **Each torrent** autobrr saves there becomes an automatic job: it waits for the
+   Usenet post (searching again every *n* minutes, for up to *h* hours), never asks
+   anything, builds like the Build tab does, adds the torrent stopped, rechecks, and
+   starts seeding only at exactly 100.0%. Anything short stays stopped and is listed
+   as such. autobrr fetches the .torrent from the tracker; nzb2seed never contacts it.
+4. At most *n* builds at once, and automatic builds make at most *n* Prowlarr
+   searches an hour (your own searches are not counted). What happened to each
+   torrent is kept in `inbox.json`, so a restart picks up where it was.
+
 ## Only removing what it added
 
 nzb2seed deletes only:
@@ -138,7 +216,14 @@ nzb2seed deletes only:
 A file already at a target path that nzb2seed did not create is used as-is when
 it has the right size and otherwise stops the build - it is never moved,
 rewritten or deleted. Other files in an existing torrent folder are never
-touched. `assemble` never deletes anything from the folders you point it at.
+touched. `assemble` never moves, changes or deletes anything in the folders you point it at:
+their files are hard-linked into place (or copied, across disks), and files the
+torrent has unpacked but your folder holds as RAR sets (a scene release next to a
+torrent of its videos) are unpacked into a temporary folder on the output disk.
+Files that are in none of the folders are downloaded from Usenet the way a build
+does it - only those files (the Assemble tab's *Download missing files from Usenet*,
+on by default; `--no-fetch` on the command line) - and only those downloads are
+tidied afterwards.
 
 ## Paths
 

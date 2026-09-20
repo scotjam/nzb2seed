@@ -165,20 +165,26 @@ def cmd_run(cfg: Config, args) -> int:
 
 def cmd_season(cfg: Config, args) -> int:
     from . import metadata
+    cfg.match_episode_names = cfg.match_episode_names or args.match_names
     from . import season as season_mod
     metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
+    from . import episodes as episodes_mod
+    episodes_mod.configure_cache(cfg.path)
     shows = metadata.tvmaze_search(args.show)
     if args.year:
         shows = [s for s in shows if s["premiered"].startswith(str(args.year))] or shows
     if not shows:
         raise Abort(f"TVmaze does not know {args.show!r}")
-    show = shows[0]
-    eps = metadata.tvmaze_episodes(show["id"], args.season)
+    show = metadata.tvmaze_show(shows[0]["id"])
+    source = args.episodes or cfg.episode_source or "all"
+    eps, used = episodes_mod.season_episodes(show, args.season, source, log=info)
     wanted = [e["number"] for e in eps]
-    step(f"{show['name']} ({show['premiered'][:4]}) season {args.season}: {len(wanted)} episodes on TVmaze")
+    step(f"{show['name']} ({show['premiered'][:4]}) season {args.season}: {len(wanted)} episodes"
+         + (f" on {episodes_mod.SOURCES[used]}" if used else ""))
     for k, u in metadata.links(show).items():
         info(f"{k}: {u}")
-    opts = season_mod.find_options(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), show["name"], args.season, wanted)
+    opts = season_mod.find_options(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), show["name"], args.season, wanted,
+                                   season_mod.names_for(cfg, show))
     for i, o in enumerate(opts, 1):
         s = o.summary(wanted)
         cov = (f"{s['season_nzbs']} season NZB(s), " if s["season_nzbs"] else "") +             f"{len(s['episodes_found'])}/{len(wanted)} episodes"
@@ -193,13 +199,35 @@ def cmd_season(cfg: Config, args) -> int:
         raise Abort(f"{len(pick)} options match --group {args.group}" + (f" --res {args.res}" if args.res else "")
                     + "; narrow it down with --res / --year")
     out = season_mod.grab_season(cfg, show["id"], args.season, pick[0].key,
-                                 packing="unpack" if args.unpack else None)
+                                 packing="unpack" if args.unpack else None, source=source)
+    info(out["result"])
+    return 0
+
+
+def cmd_series(cfg: Config, args) -> int:
+    from . import metadata
+    cfg.match_episode_names = cfg.match_episode_names or args.match_names
+    from . import series as series_mod
+    metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
+    shows = metadata.tvmaze_search(args.show)
+    if args.year:
+        shows = [s for s in shows if s["premiered"].startswith(str(args.year))] or shows
+    if not shows:
+        raise Abort(f"TVmaze does not know {args.show!r}")
+    show = shows[0]
+    info(f"{show['name']} ({show['premiered'][:4]})")
+    out = series_mod.grab_series(cfg, show["id"], packing="unpack" if args.unpack else None,
+                                 library=args.library, skip_owned=args.skip_owned or bool(args.library),
+                                 plan_only=args.plan, prefer_group=args.group, prefer_res=args.res,
+                                 source=args.episodes)
     info(out["result"])
     return 0
 
 
 def cmd_assemble(cfg: Config, args) -> int:
-    execute_assemble(cfg, options(args), args.torrent, args.source)
+    opts = options(args)
+    opts.fetch_missing = not args.no_fetch
+    execute_assemble(cfg, opts, args.torrent, args.source)
     return 0
 
 
@@ -253,12 +281,36 @@ def main(argv=None) -> int:
     sn.add_argument("--year", type=int, help="the show's first year, to tell same-named shows apart")
     sn.add_argument("--group", help="release group to grab")
     sn.add_argument("--res", help="resolution, e.g. 720p")
+    sn.add_argument("--match-names", action="store_true",
+                    help="also find posts named only by episode title (more indexer API searches)")
+    sn.add_argument("--episodes", choices=["all", "tvmaze", "tmdb", "tvdb", "imdb"],
+                    help="where the episode list comes from (default: config, else all: per season the longest)")
     sn.add_argument("--unpack", action="store_true",
+                    help="unpack everything (default: keep - or rebuild from srrDB - the scene RARs)")
+
+    se = sub.add_parser("series", help="grab every season of a show, skipping episodes you already have")
+    se.add_argument("show", help="show name, as TVmaze knows it")
+    se.add_argument("--year", type=int, help="the show's first year, to tell same-named shows apart")
+    se.add_argument("--library", action="append",
+                    help="the show's folder: episodes in it are not downloaded (implies --skip-owned); "
+                         "give it more than once for several folders")
+    se.add_argument("--skip-owned", action="store_true",
+                    help="skip episodes already in qBittorrent (and in --library)")
+    se.add_argument("--plan", action="store_true", help="show each season's choice, download nothing")
+    se.add_argument("--group", help="prefer this release group for the series")
+    se.add_argument("--res", help="prefer this resolution, e.g. 720p")
+    se.add_argument("--match-names", action="store_true",
+                    help="also find posts named only by episode title (more indexer API searches)")
+    se.add_argument("--episodes", choices=["all", "tvmaze", "tmdb", "tvdb", "imdb"],
+                    help="where the episode list comes from (default: config, else all: per season the longest)")
+    se.add_argument("--unpack", action="store_true",
                     help="unpack everything (default: keep - or rebuild from srrDB - the scene RARs)")
 
     a = sub.add_parser("assemble", parents=[common], help="build from a .torrent and existing folder(s)")
     a.add_argument("torrent", help=".torrent file")
-    a.add_argument("source", nargs="+", help="folder(s) holding the NZB download(s)")
+    a.add_argument("source", nargs="+", help="folder(s) holding the files (they are never moved or changed)")
+    a.add_argument("--no-fetch", action="store_true",
+                   help="do not download files that are in none of the folders from Usenet")
 
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -277,7 +329,7 @@ def main(argv=None) -> int:
     cfg = load(args.config)
     try:
         return {"search": cmd_search, "run": cmd_run, "assemble": cmd_assemble,
-                "season": cmd_season}[args.cmd](cfg, args)
+                "season": cmd_season, "series": cmd_series}[args.cmd](cfg, args)
     except (Abort, Cancelled) as e:
         print(f"\n!! {e}", file=sys.stderr)
         return 2

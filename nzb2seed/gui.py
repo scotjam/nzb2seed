@@ -23,9 +23,12 @@ from urllib.parse import urlsplit
 
 from . import config as config_mod
 from . import report
-from .clients import ApiError, Prowlarr, QBittorrent, Release, SABnzbd
+from .clients import ApiError, Autobrr, Prowlarr, QBittorrent, Release, SABnzbd
+from . import inbox as inbox_mod
 from . import metadata
 from . import season as season_mod
+from . import series as series_mod
+from . import episodes as episodes_mod
 from .torrent import TorrentError, parse as parse_torrent
 from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
                        previous_downloads, search)
@@ -213,6 +216,7 @@ class App:
         self.config_path = config_path
         self.cfg = config_mod.load_or_default(config_path)
         metadata.configure(self.cfg.flaresolverr_url, self.cfg.outbound_proxy)
+        episodes_mod.configure_cache(self.cfg.path)
         self.jobs: dict[int, Job] = {}
         self.lock = threading.Lock()
         self.store = JobStore(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "jobs.json"),
@@ -229,6 +233,28 @@ class App:
         with self.lock:
             return next((j for j in self.jobs.values() if j.kind == "build" and j.title == title
                          and j.status in ("running", "waiting")), None)
+
+    def autobrr_memo(self, memo=None) -> dict:
+        """What nzb2seed changed in autobrr, so unticking a filter puts it back:
+        {"switched_off": [action ids], "filters_were": {filter id: enabled before}}."""
+        path = os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "autobrr.json")
+        if memo is None:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    d = json.load(fh)
+            except (OSError, ValueError):
+                d = {}
+            return {"switched_off": list(d.get("switched_off", [])),
+                    "filters_were": {str(k): bool(v) for k, v in (d.get("filters_were") or {}).items()}}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"switched_off": sorted(set(memo["switched_off"])),
+                       "filters_were": memo["filters_were"]}, fh)
+        return memo
+
+    def start_inbox(self):
+        """The automatic-build watcher (idle while switched off on the Automatic tab)."""
+        self.inbox = inbox_mod.Inbox(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
+                                                        "inbox.json"))
 
     def start_job(self, title: str, kind: str, fn) -> Job:
         with self.lock:
@@ -302,12 +328,55 @@ def uploaded_data(cfg, rel: Release) -> bytes | None:
         raise ValueError("the uploaded .torrent is gone; upload it again") from None
 
 
+def data_roots(cfg) -> list[str]:
+    """The folders the GUI's folder chooser may show: the configured data folders (where
+    finished torrents and downloads live), never the rest of the disk."""
+    roots = [p[0] for p in (cfg.local_to_qbit or [])] + [p[1] for p in (cfg.sab_to_local or [])]
+    roots += [cfg.output_dir] if cfg.output_dir else []
+    out = []
+    for r in roots:
+        r = os.path.realpath(r)
+        if os.path.isdir(r) and r not in out:
+            out.append(r)
+    return out
+
+
+def local_folder(cfg, path: str) -> str:
+    """A path as this machine sees it. A network path from another computer -
+    '\\\\nas\\share\\rest', '//nas/share/rest' or 'smb://nas/share/rest' - is found by its
+    share name among the configured data folders (a share is usually a folder on one of
+    the data disks). Relative paths are refused: nzb2seed runs here, not on your PC."""
+    p = path.strip().strip('"').strip()
+    m = re.match(r"^(?:smb:)?(?:\\\\|//)([^\\/]+)[\\/]+([^\\/]+)[\\/]*(.*)$", p, re.I)
+    if m:
+        share, rest = m.group(2), [x for x in re.split(r"[\\/]+", m.group(3)) if x]
+        for root in data_roots(cfg):
+            for base in (root, os.path.dirname(root)):
+                cand = base if os.path.basename(base).casefold() == share.casefold() else None
+                if cand is None and os.path.isdir(base):
+                    cand = next((os.path.join(base, n) for n in os.listdir(base)
+                                 if n.casefold() == share.casefold() and os.path.isdir(os.path.join(base, n))), None)
+                if cand:
+                    return os.path.join(cand, *rest)
+        raise ValueError(f"{path} is a network path, and no shared folder called {share!r} was found in "
+                         "the configured data folders - give the folder as the NAS sees it")
+    if not os.path.isabs(p):
+        raise ValueError(f"{path} is not a full path on the NAS (nzb2seed runs there, not on your PC)")
+    return p
+
+
+def within_roots(cfg, path: str) -> bool:
+    real = os.path.realpath(path)
+    return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in data_roots(cfg))
+
+
 def _opts(d: dict) -> Options:
     return Options(pp=d.get("pp") or None, output_dir=d.get("output_dir") or None,
                    no_cleanup=bool(d.get("no_cleanup")), local_verify=bool(d.get("local_verify")),
                    no_qbit=bool(d.get("no_qbit")), start=bool(d.get("start")),
                    dry_run=bool(d.get("dry_run")),
-                   retry_bad=None if d.get("retry_bad") is None else bool(d.get("retry_bad")))
+                   retry_bad=None if d.get("retry_bad") is None else bool(d.get("retry_bad")),
+                   fetch_missing=bool(d.get("fetch_missing")))
 
 
 def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts: set[str]):
@@ -443,11 +512,22 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 if path == "/api/season/shows":
                     return self._json(metadata.tvmaze_search((body.get("query") or "").strip()))
                 if path == "/api/season/seasons":
-                    return self._json(metadata.tvmaze_seasons(int(body["show_id"])))
+                    show = metadata.tvmaze_show(int(body["show_id"]))
+                    return self._json(episodes_mod.seasons_summary(show, self._source(body)))
+                if path == "/api/metadata/clear_cache":
+                    return self._json({"removed": episodes_mod.clear_cache()})
                 if path == "/api/season/options":
                     return self.season_options(body)
                 if path == "/api/season/grab":
                     return self.season_grab(body)
+                if path == "/api/series/grab":
+                    return self.series_grab(body)
+                if path.startswith("/api/auto/"):
+                    return self._json(self.auto(path.rsplit("/", 1)[1], body))
+                if path == "/api/series/options":
+                    return self.series_options(body)
+                if path == "/api/folders":
+                    return self.list_folders(body)
                 if path == "/api/previous":
                     sab = SABnzbd(app.cfg.sab_url, app.cfg.sab_key)
                     return self._json({"previous": previous_downloads(app.cfg, sab, body.get("title") or "")})
@@ -508,23 +588,226 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
             return self._json(self.settings_payload())
 
+        def _source(self, body) -> str:
+            src = (body.get("source") or app.cfg.episode_source or "all").lower()
+            if src not in episodes_mod.SOURCES:
+                raise ValueError(f"unknown episode source {src!r}")
+            return src
+
+        def _with_names(self, body, cfg=None):
+            """The config with episode-name matching as the Seasons tab's checkbox says."""
+            return dataclasses.replace(cfg or app.cfg, match_episode_names=bool(body.get("match_names")))
+
         def season_options(self, body):
             show = metadata.tvmaze_show(int(body["show_id"]))
             sn = int(body["season"])
-            eps = metadata.tvmaze_episodes(show["id"], sn)
+            eps, used = episodes_mod.season_episodes(show, sn, self._source(body))
             wanted = [e["number"] for e in eps]
             pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key)
-            opts = season_mod.find_options(app.cfg, pr, show["name"], sn, wanted)
+            cfg = self._with_names(body)
+            opts = season_mod.find_options(cfg, pr, show["name"], sn, wanted, season_mod.names_for(cfg, show))
             return self._json({"show": show, "episodes": eps, "links": metadata.links(show),
+                               "source": episodes_mod.SOURCES.get(used or "", ""),
                                "options": [o.summary(wanted) for o in opts]})
 
+        def _library(self, body) -> tuple[bool, str | None]:
+            """(skip owned episodes?, the show's folder) - the folder must lie inside one of the
+            configured data folders."""
+            if not body.get("skip_owned"):
+                return False, None
+            lib = (body.get("library") or "").strip() or None
+            lib = local_folder(app.cfg, lib) if lib else None
+            if lib and not within_roots(app.cfg, lib):
+                raise ValueError("choose a folder inside one of the configured data folders")
+            return True, lib
+
         def season_grab(self, body):
-            sid, sn, key = int(body["show_id"]), int(body["season"]), body["key"]
+            sid, sn = int(body["show_id"]), int(body["season"])
+            key = [str(k) for k in body.get("keys") or []] or body["key"]     # a priority list, or one
             packing = body.get("packing") or None
             label = body.get("label") or f"season {sn}"
-            job = app.start_job(label, "season",
-                                lambda cfg: season_mod.grab_season(cfg, sid, sn, key, packing))
+            skip_owned, lib = self._library(body)
+            source = self._source(body)
+
+            def run(cfg):
+                cfg = self._with_names(body, cfg)
+                skip = None
+                if skip_owned:
+                    report.step("Looking for episodes you already have")
+                    skip = series_mod.owned(cfg, metadata.tvmaze_show(sid), lib).get(sn, set())
+                return season_mod.grab_season(cfg, sid, sn, key, packing, skip=skip, source=source)
+            job = app.start_job(label, "season", run)
             return self._json({"id": job.id})
+
+        def series_options(self, body):
+            """Every release group/resolution over all seasons, for the priority list."""
+            show = metadata.tvmaze_show(int(body["show_id"]))
+            skip_owned, lib = self._library(body)
+            source = self._source(body)
+            lists, used = episodes_mod.episode_lists(show, source)
+            cfg = self._with_names(body)
+            have = series_mod.owned(cfg, show, lib) if skip_owned else {}
+            pr = Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key)      # searching only
+            plans = series_mod.options_for(cfg, pr, show, lists, have)
+            out = series_mod.summary(plans)
+            for srow in out["seasons"]:
+                srow["source"] = episodes_mod.SOURCES.get(used.get(srow["season"], ""), "")
+            return self._json(out)
+
+        def series_grab(self, body):
+            sid = int(body["show_id"])
+            packing = body.get("packing") or None
+            plan_only = bool(body.get("plan_only"))
+            skip_owned, lib = self._library(body)
+            label = (body.get("label") or f"show {sid}") + (" - plan" if plan_only else " - all seasons")
+            res = (body.get("res") or "").strip().lower() or None
+            source = self._source(body)
+            priority = [str(k) for k in body.get("priority") or []]
+            job = app.start_job(label, "season", lambda cfg: series_mod.grab_series(
+                self._with_names(body, cfg), sid, packing, library=lib, skip_owned=skip_owned, plan_only=plan_only, prefer_res=res,
+                source=source, priority=priority))
+            return self._json({"id": job.id})
+
+        # ------------------------------------------------ the Automatic tab
+        AUTO_FIELDS = {"enabled": ("auto_enabled", bool), "folder": ("auto_folder", str),
+                       "autobrr_folder": ("auto_autobrr_folder", str), "wait_hours": ("auto_wait_hours", float),
+                       "retry_minutes": ("auto_retry_minutes", float), "start": ("auto_start", bool),
+                       "parallel": ("auto_parallel", int), "searches_per_hour": ("auto_searches_per_hour", int),
+                       "autobrr_url": ("autobrr_url", str), "autobrr_key": ("autobrr_key", str)}
+
+        def _auto_state(self):
+            cfg = app.cfg
+            box = getattr(app, "inbox", None)
+            return {"settings": {k: getattr(cfg, f) for k, (f, _) in self.AUTO_FIELDS.items() if k != "autobrr_key"},
+                    "has_key": bool(cfg.autobrr_key), "items": box.items() if box else []}
+
+        def _autobrr(self, body=None):
+            url = ((body or {}).get("autobrr_url") or app.cfg.autobrr_url or "").strip()
+            key = ((body or {}).get("autobrr_key") or app.cfg.autobrr_key or "").strip()
+            if not url or not key:
+                raise ValueError("enter autobrr's URL and API key (autobrr: Settings, API keys)")
+            return Autobrr(url, key)
+
+        def auto(self, what, body):
+            cfg = app.cfg
+            if what == "state":
+                return self._auto_state()
+            if what == "save":
+                changes = {}
+                for k, (field, typ) in self.AUTO_FIELDS.items():
+                    if k in body and not (k == "autobrr_key" and not body[k]):
+                        changes[field] = typ(body[k]) if typ is not bool else bool(body[k])
+                if changes.get("auto_folder"):
+                    changes["auto_folder"] = local_folder(cfg, changes["auto_folder"])
+                if changes.get("auto_enabled") and not (changes.get("auto_folder") or cfg.auto_folder):
+                    raise ValueError("set the inbox folder first")
+                new = dataclasses.replace(cfg, **changes)
+                if new.auto_folder:
+                    os.makedirs(new.auto_folder, exist_ok=True)
+                config_mod.save(new)
+                app.cfg = new
+                return self._auto_state()
+            if what == "detect":
+                found = inbox_mod.detect_autobrr_folder()
+                if not found:
+                    raise ValueError("no autobrr container found on this machine - enter both paths yourself")
+                return {"folder": found[0], "autobrr_folder": found[1]}
+            if what == "filters":
+                ab = self._autobrr(body)
+                folder = body.get("autobrr_folder") or cfg.auto_autobrr_folder
+                out = []
+                for f in ab.filters():
+                    full = ab.filter(f["id"])
+                    ours = ab.ours(full, folder)
+                    out.append({"id": f["id"], "name": f.get("name", ""), "enabled": f.get("enabled", True),
+                                "indexers": [i.get("name") or i.get("identifier") for i in full.get("indexers") or []],
+                                # actions that neither nzb2seed nor a download client: shown as "other"
+                                "actions": [a.get("name") or a.get("type") for a in full.get("actions") or []
+                                            if a not in ours and a not in ab.grabbers(full)],
+                                "ours": bool(ours), "folder_ok": all(a.get("watch_folder") == folder for a in ours),
+                                "grabbers": [{"id": a["id"], "name": a.get("name") or a.get("type"),
+                                              "enabled": bool(a.get("enabled"))} for a in ab.grabbers(full)]})
+                return {"version": ab.version(), "filters": out}
+            if what == "apply":
+                folder = cfg.auto_autobrr_folder
+                if not folder:
+                    raise ValueError("set the folder as autobrr sees it first")
+                ab = self._autobrr(body)
+                want = {int(x) for x in body.get("filters") or []}
+                replace = {int(k): bool(v) for k, v in (body.get("replace") or {}).items()}
+                memo = app.autobrr_memo()
+                switched, were = memo["switched_off"], memo["filters_were"]
+                added = removed = fixed = off = back = on = stopped = 0
+                for f in ab.filters():
+                    fid, was = f["id"], bool(f.get("enabled"))
+                    full = ab.filter(f["id"])
+                    ours = ab.ours(full, folder)
+                    if f["id"] in want and not ours:
+                        ab.add_action(f["id"], folder)
+                        added += 1
+                    elif f["id"] in want:
+                        for a in ours:
+                            if a.get("watch_folder") != folder:
+                                ab.set_folder(a, folder)
+                                fixed += 1
+                    else:
+                        for a in ours:
+                            ab.delete_action(a["id"])
+                            removed += 1
+                    # the filter's own download actions: off while nzb2seed builds it from
+                    # Usenet, back on (the ones nzb2seed switched off) when it stops
+                    for a in ab.grabbers(full):
+                        if fid in want and replace.get(fid, True) and a.get("enabled"):
+                            ab.toggle(a["id"])
+                            switched.append(a["id"])
+                            off += 1
+                        elif (fid not in want or not replace.get(fid, True)) and a["id"] in switched \
+                                and not a.get("enabled"):
+                            ab.toggle(a["id"])
+                            switched.remove(a["id"])
+                            back += 1
+                    # the filter itself: enabled in autobrr while nzb2seed builds its releases,
+                    # and disabled there when you untick it - so unticking always stops the
+                    # filter, never leaves autobrr acting on it on its own
+                    if fid in want:
+                        were.setdefault(str(fid), was)
+                        if not was:
+                            ab.set_enabled(fid, True)
+                            on += 1
+                    elif str(fid) in were:
+                        if was:
+                            ab.set_enabled(fid, False)
+                            stopped += 1
+                        del were[str(fid)]
+                app.autobrr_memo({"switched_off": switched, "filters_were": were})
+                return {"added": added, "removed": removed, "fixed": fixed, "off": off, "back": back,
+                        "on": on, "stopped": stopped}
+            if what == "retry":
+                app.inbox.retry(str(body.get("infohash")))
+                return self._auto_state()
+            if what == "forget":
+                app.inbox.forget(str(body.get("infohash")))
+                return self._auto_state()
+            raise ValueError(f"unknown request {what!r}")
+
+        def list_folders(self, body):
+            roots = data_roots(app.cfg)
+            path = (body.get("path") or "").strip()
+            if not path:
+                return self._json({"path": "", "parent": None, "roots": roots,
+                                   "dirs": [{"name": r, "path": r} for r in roots]})
+            if not within_roots(app.cfg, path) or not os.path.isdir(path):
+                return self._err("not a folder inside the configured data folders")
+            real = os.path.realpath(path)
+            try:
+                names = sorted((n for n in os.listdir(real)
+                                if not n.startswith(".") and os.path.isdir(os.path.join(real, n))), key=str.casefold)
+            except OSError as e:
+                return self._err(f"cannot list {path}: {e.strerror}")
+            parent = os.path.dirname(real)
+            return self._json({"path": real, "roots": roots,
+                               "parent": parent if within_roots(app.cfg, parent) else "",
+                               "dirs": [{"name": n, "path": os.path.join(real, n)} for n in names]})
 
         def season_file(self, path):
             q = dict(p.split("=", 1) for p in urlsplit(self.path).query.split("&") if "=" in p)
@@ -597,10 +880,14 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             return self._json({"id": job.id})
 
         def assemble(self, body):
-            sources = [s.strip() for s in body.get("sources", []) if s.strip()]
+            sources = [local_folder(app.cfg, s) for s in body.get("sources", []) if s.strip()]
             if not sources:
                 return self._err("add at least one folder holding the NZB download")
+            for src in sources:
+                if not os.path.isdir(src):
+                    return self._err(f"{src} does not exist on the NAS")
             tpath = (body.get("torrent_path") or "").strip()
+            tpath = local_folder(app.cfg, tpath) if tpath else tpath
             if body.get("torrent_b64"):
                 os.makedirs(app.cfg.torrent_dir, exist_ok=True)
                 name = os.path.basename(body.get("torrent_name") or "upload.torrent")
@@ -667,6 +954,7 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
           open_browser: bool, extra_hosts=(), username: str | None = None) -> int:
     allowed = own_names(host) | {h.lower() for h in extra_hosts}
     app = App(config_path)
+    app.start_inbox()
     override = (username or app.cfg.gui_username or config_mod.DEFAULT_GUI_USER, password) \
         if password is not None else None
     httpd = ThreadingHTTPServer((host, port), make_handler(app, override, allowed))
