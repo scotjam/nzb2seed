@@ -126,6 +126,8 @@ def srrdb_for(e):
 def world(tmp_path, monkeypatch):
     monkeypatch.setattr(metadata, "tvmaze_show", lambda i: SHOW)
     monkeypatch.setattr(metadata, "tvmaze_episodes", lambda i, s: EPS)
+    monkeypatch.setattr(metadata, "tvmaze_seasons", lambda i: [{"number": 1, "episodes": 3, "premiere": "2016-01-01"}])
+    # the other episode sources are pages on the internet: no proxy in tests, so they are unavailable
     details = {ep_title(e): srrdb_for(e) for e in (1, 2, 3)}
     monkeypatch.setattr(metadata, "srrdb_details", lambda r: details.get(r))
     stored = {"sfv": b"; sfv file here!\r\n\r\n"}      # 20 bytes, as srrDB lists it
@@ -413,3 +415,63 @@ def test_unpack_all_never_keeps_rars(world, monkeypatch):
     out, dest, r = grab_one(world, monkeypatch, posts, {ep_title(e): with_volume(e) for e in (1, 2, 3)}, "unpack")
     assert not any(n.endswith(".rar") for n in files_of(dest, 1)) and any(n.endswith(".mkv") for n in files_of(dest, 1))
     assert r["packing"] == "Unpack all"
+
+
+def test_episodes_you_already_have_are_not_downloaded(world, monkeypatch):
+    """With E01 already yours, the season pack (which would bring E01 again) is not
+    downloaded while the missing episodes can be had on their own."""
+    tmp_path, cfg = world
+    season_pack = {**post(1), **post(2), **post(3)}
+    posts = {"pack": season_pack, "e2": post(2), "e3": post(3)}
+    results = [rel("Test.Show.2016.S01.720p.HDTV.x264-GRP", "pack", grabs=99),
+               rel(ep_title(2), "e2"), rel(ep_title(3), "e3")]
+    sab = SAB(str(tmp_path / "dl"), posts)
+    monkeypatch.setattr(season, "Prowlarr", lambda *a: PR(results))
+    monkeypatch.setattr(season, "SABnzbd", lambda *a: sab)
+    key = next(o.key for o in season.find_options(cfg, PR(results), "Test Show", 1, [2, 3]) if o.seasons)
+
+    out = season.grab_season(cfg, 7, 1, key, skip={1})
+    assert sab.added == ["e2", "e3"]                         # never the season pack
+    assert out["result"] == "2/2 episodes (1 already yours)"
+    side = tmp_path / "dl" / "Test.Show.2016.S01.720p.HDTV.x264-GRP-metadata"
+    r = json.loads((side / "report.json").read_text())
+    assert [(e["number"], e["present"], e["owned"]) for e in r["episodes"]] == \
+        [(1, False, True), (2, True, False), (3, True, False)]
+
+
+def test_a_season_pack_fills_in_when_the_episode_posts_fail(world, monkeypatch):
+    tmp_path, cfg = world
+    posts = {"pack": {**post(1), **post(2), **post(3)}, "e2": "fail"}
+    results = [rel("Test.Show.2016.S01.720p.HDTV.x264-GRP", "pack"), rel(ep_title(2), "e2")]
+    sab = SAB(str(tmp_path / "dl"), posts)
+    monkeypatch.setattr(season, "Prowlarr", lambda *a: PR(results))
+    monkeypatch.setattr(season, "SABnzbd", lambda *a: sab)
+    key = next(o.key for o in season.find_options(cfg, PR(results), "Test Show", 1, [2, 3]) if o.seasons)
+
+    out = season.grab_season(cfg, 7, 1, key, skip={1})
+    assert sab.added == ["e2", "pack"]
+    assert out["result"] == "2/2 episodes (1 already yours)"
+    dest = tmp_path / "dl" / "Test.Show.2016.S01.720p.HDTV.x264-GRP"
+    names = {p.name for p in dest.rglob("*.mkv")}
+    assert not any("s01e01" in n for n in names)            # E01 from the pack is not laid out
+
+
+def test_several_releases_in_priority_order_make_one_season(world, monkeypatch):
+    """GRP has E01 and E02, OTHER has E02 and E03: E02 comes from GRP (higher priority),
+    E03 from OTHER, and the season folder is named after the show and season only."""
+    tmp_path, cfg = world
+    posts = {"g1": post(1), "g2": post(2), "o2": post(2), "o3": post(3)}
+    results = [rel(ep_title(1), "g1"), rel(ep_title(2), "g2"),
+               rel(ep_title(2, "OTHER"), "o2", grabs=99), rel(ep_title(3, "OTHER"), "o3")]
+    sab = SAB(str(tmp_path / "dl"), posts)
+    monkeypatch.setattr(season, "Prowlarr", lambda *a: PR(results))
+    monkeypatch.setattr(season, "SABnzbd", lambda *a: sab)
+    by = {o.group: o.key for o in season.find_options(cfg, PR(results), "Test Show", 1, [1, 2, 3])}
+
+    out = season.grab_season(cfg, 7, 1, [by["grp"], by["other"]])
+    assert out["result"] == "3/3 episodes"
+    assert sorted(sab.added) == ["g1", "g2", "o3"]                 # never OTHER's E02
+    dest = tmp_path / "dl" / "Test.Show.2016.S01"
+    assert {p.name for p in dest.iterdir() if p.is_dir()} == {
+        "Test.Show.2016.S01E01.720p.HDTV.x264-GRP", "Test.Show.2016.S01E02.720p.HDTV.x264-GRP",
+        "Test.Show.2016.S01E03.720p.HDTV.x264-OTHER"}

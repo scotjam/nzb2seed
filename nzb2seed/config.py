@@ -42,8 +42,23 @@ class Config:
     cleanup: bool = True
     local_verify: bool = False
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
+    peek_archives: bool = True        # fetch a RAR post's first volume and read its headers
+                                      # before downloading the rest of it
     outbound_proxy: str = ""          # e.g. http://127.0.0.1:8888 (the VPN container's HTTP proxy): srrDB/predb/xrel/TVmaze lookups
     flaresolverr_url: str = ""        # e.g. http://nas:8191 - only used when a site answers with a Cloudflare challenge
+    # automatic builds from autobrr (the Automatic tab)
+    auto_enabled: bool = False
+    auto_folder: str = ""              # the inbox as this machine sees it
+    auto_autobrr_folder: str = ""      # the same folder as autobrr sees it (its watch-folder action)
+    auto_wait_hours: float = 24.0      # how long to wait for the Usenet post to appear
+    auto_retry_minutes: float = 15.0   # how often to search again meanwhile
+    auto_start: bool = True            # start seeding - only ever at a 100.0% recheck
+    auto_parallel: int = 1             # builds at once
+    auto_searches_per_hour: int = 40   # Prowlarr searches automatic builds may make per hour
+    autobrr_url: str = ""
+    autobrr_key: str = ""
+    match_episode_names: bool = False  # place posts/files named only by episode title (more searches)
+    episode_source: str = "all"       # where a show's episode list comes from: all | tvmaze | tmdb | tvdb | imdb
     season_packing: str = "scene"     # "scene" = keep scene RARs (rebuild them from srrDB) | "unpack"
     gui_username: str = DEFAULT_GUI_USER
     gui_password: str = DEFAULT_GUI_PASSWORD   # empty = no login, LAN-only
@@ -74,9 +89,22 @@ LAYOUT = [
     ("behaviour", "cleanup", "cleanup"),
     ("behaviour", "local_verify", "local_verify"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
+    ("behaviour", "peek_archives", "peek_archives"),
     ("behaviour", "season_packing", "season_packing"),
+    ("behaviour", "episode_source", "episode_source"),
+    ("behaviour", "match_episode_names", "match_episode_names"),
     ("flaresolverr", "url", "flaresolverr_url"),
     ("network", "proxy", "outbound_proxy"),
+    ("automatic", "enabled", "auto_enabled"),
+    ("automatic", "folder", "auto_folder"),
+    ("automatic", "autobrr_folder", "auto_autobrr_folder"),
+    ("automatic", "wait_hours", "auto_wait_hours"),
+    ("automatic", "retry_minutes", "auto_retry_minutes"),
+    ("automatic", "start", "auto_start"),
+    ("automatic", "parallel", "auto_parallel"),
+    ("automatic", "searches_per_hour", "auto_searches_per_hour"),
+    ("autobrr", "url", "autobrr_url"),
+    ("autobrr", "api_key", "autobrr_key"),
     ("gui", "username", "gui_username"),
     ("gui", "password", "gui_password"),
 ]
@@ -161,4 +189,8 @@ def save(cfg: Config):
     tmp = str(cfg.path) + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
+    try:
+        os.chmod(tmp, 0o600)          # it holds API keys and passwords: owner only
+    except OSError:
+        pass
     os.replace(tmp, cfg.path)

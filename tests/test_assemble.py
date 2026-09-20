@@ -214,3 +214,28 @@ def test_cross_disk_move_uses_part_file(tmp_path, monkeypatch):
     asm.cleanup(t, res, [str(job)], out, log=lambda *_: None)
     assert not job.exists()
     assert not any(p.name.endswith(asm.PART_SUFFIX) for p in (tmp_path / "hdd").rglob("*"))
+
+
+def test_files_in_your_own_folders_are_linked_not_moved(tmp_path):
+    """assemble pointed at a library folder: every file there stays where it is."""
+    files = scene_layout()
+    t = parse(make_torrent(NAME, files))
+    lib = tmp_path / "library"
+    nzb_job(str(lib))
+    before = sorted(p.relative_to(lib) for p in lib.rglob("*") if p.is_file())
+    out = tmp_path / "out"
+    res = asm.assemble(t, [str(lib)], str(out), log=lambda *_: None, keep=[str(lib)])
+    assert not res.missing
+    assert sorted(p.relative_to(lib) for p in lib.rglob("*") if p.is_file()) == before   # nothing moved
+    for rel, dst in res.placed.items():
+        assert os.path.isfile(dst)
+
+
+def test_nzb2seed_own_folders_are_still_moved(tmp_path):
+    files = scene_layout()
+    t = parse(make_torrent(NAME, files))
+    job = tmp_path / "job"
+    nzb_job(str(job))
+    res = asm.assemble(t, [str(job)], str(tmp_path / "out"), log=lambda *_: None)
+    assert not res.missing
+    assert not any(p.suffix in (".rar", ".mkv") for p in job.rglob("*") if p.is_file())

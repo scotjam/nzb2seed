@@ -220,3 +220,47 @@ def test_a_movie_uses_movie_nzbs(tmp_path):
     sab = SAB(str(tmp_path / "dl"), t, files)
     dirs, _, _, _ = run(tmp_path, t, cfg, sab, PR([other, good]))
     assert sab.added == ["movie"] and covers_all(t, dirs)
+
+
+def test_a_season_nfo_with_the_episodes_in_place_is_fetched_on_its_own(tmp_path):
+    """Every episode is already placed; the season's own .nfo (renamed by the tracker) comes
+    from the season post trimmed to its .nfo - not the whole season."""
+    nfo = b"GRP presents Show\r\nseason one\r\n"
+    files = {ep_name(1, 1): rnd(40_000, 1), ep_name(1, 2): rnd(41_000, 2),
+             "Show 2020 S01 720p HDTV x264-GRP.nfo": nfo}
+    t = parse(make_torrent("Show.2020.S01.720p.HDTV.x264-GRP", files))
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]])
+    season_post = rel("Show.2020.S01.720p.HDTV.x264-GRP", sum(len(v) for v in files.values()) + 10, grabs=5)
+    nzb = ('<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">'
+           + "".join(f'<file subject="&quot;{n}&quot; yEnc (1/1)"><segments><segment bytes="9" number="1">{i}@x</segment>'
+                     f'</segments></file>' for i, n in enumerate([ep_name(1, 1), "show.2020.s01.720p.hdtv.x264-grp.nfo",
+                                                                  "show.2020.s01.720p.hdtv.x264-grp.par2"]))
+           + "</nzb>").encode()
+
+    class P:
+        def search(self, q, *a):
+            return [season_post]
+
+        def fetch(self, r):
+            return nzb
+
+    class S:
+        added = []
+
+        def add_nzb(self, data, name, cat, pp, prio):
+            self.added.append(data.decode())
+            d = tmp_path / "dl" / "nzo1"
+            d.mkdir(parents=True)
+            (d / "show.2020.s01.720p.hdtv.x264-grp.nfo").write_bytes(nfo)
+            return "nzo1"
+
+        def status(self, nzo):
+            return "Completed", {"storage": "/dl/nzo1"}
+
+    placed = {f.relpath for f in t.real_files if f.ext == ".mkv"}
+    sab = S()
+    dirs, nzos, units, rej = plan_and_fetch(cfg, Options(), P(), sab, t, t.name, [], 2, placed)
+    assert len(sab.added) == 1 and ".nfo" in sab.added[0]
+    assert ep_name(1, 1) not in sab.added[0] and ".par2" not in sab.added[0]          # just the .nfo
+    nfo_rel = next(f.relpath for f in t.real_files if f.ext == ".nfo")
+    assert nfo_rel in asm.find_sources(t, dirs)
