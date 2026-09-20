@@ -18,7 +18,7 @@ from dataclasses import dataclass
 
 from . import metadata
 from . import assemble as asm
-from . import archives, grab, matching, nzbinfo
+from . import archives, grab, matching, nzbinfo, space
 from .clients import (PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
                       Prowlarr, QBittorrent, Release, SABnzbd)
 from .config import Config
@@ -180,6 +180,7 @@ _current_torrent = ""   # infohash of the torrent being built, recorded with eac
 def sab_submit(cfg: Config, pr, sab: SABnzbd, rel: Release, data: bytes | None, pp: int) -> str:
     """Start downloading a post. With a grab.Source, the paused SABnzbd job that fetched
     its NZB is resumed (nzb2seed never downloads an NZB from an indexer itself)."""
+    space.wait_for_room(step, progress)     # a download is the biggest write of all
     nzb = data if data is not None else pr.fetch(rel)
     if b"<nzb" not in nzb[:4096].lower():
         raise ApiError(f"{rel.indexer} did not return an NZB for {rel.title}")
@@ -1455,6 +1456,7 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
         elif now - last[0] > 0.5:
             last[0] = now
             progress(f"copying {name}: {gb(done)} of {gb(total)}")
+    space.wait_for_room(step, progress)     # placing files writes as much again
     owned = owned_record(cfg, t, opts)
     try:
         res = asm.assemble(t, source_dirs, output_dir, dry_run=opts.dry_run, log=line,
