@@ -68,11 +68,15 @@ class Owned:
         self.path = path
         self.files: set[str] = set()
         self.dirs: set[str] = set()
+        self.stamps: dict[str, list] = {}   # path -> [size, mtime] as nzb2seed left it
+        self.source = ""                    # "auto" (the Automatic tab) or "manual"; "" = unknown
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 d = json.load(fh)
             self.files = set(d.get("files", []))
             self.dirs = set(d.get("dirs", []))
+            self.stamps = {k: list(v) for k, v in (d.get("stamps") or {}).items()}
+            self.source = d.get("source", "")
 
     def owns(self, p: str) -> bool:
         return _key(p) in {_key(x) for x in self.files}
@@ -102,9 +106,31 @@ class Owned:
             return
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         tmp = self.path + ".tmp"
+        # the size and modification time of each file as nzb2seed leaves it, so a later
+        # cleanup can tell its own file from one BitTorrent has since re-downloaded
+        for f in self.files:
+            try:
+                st = os.stat(f)
+            except OSError:
+                continue
+            self.stamps[f] = [st.st_size, round(st.st_mtime, 3)]
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"files": sorted(self.files), "dirs": sorted(self.dirs)}, fh, indent=1)
+            json.dump({"files": sorted(self.files), "dirs": sorted(self.dirs),
+                       "source": self.source,
+                       "stamps": {k: self.stamps[k] for k in sorted(self.stamps)}}, fh, indent=1)
         os.replace(tmp, self.path)
+
+    def unchanged(self, p: str, tolerance: float = 2.0) -> bool | None:
+        """Is the file on disk still the one nzb2seed wrote? None when this record predates
+        stamps and cannot say."""
+        stamp = self.stamps.get(p) or self.stamps.get(os.path.abspath(p))
+        if not stamp:
+            return None
+        try:
+            st = os.stat(p)
+        except OSError:
+            return False
+        return st.st_size == stamp[0] and abs(st.st_mtime - stamp[1]) <= tolerance
 
 
 def target_path(output_dir: str, f: TFile) -> str:

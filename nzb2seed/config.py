@@ -11,6 +11,7 @@ except ModuleNotFoundError:  # Python < 3.11
     import tomli as tomllib
 
 
+DEFAULT_QBIT_CATEGORY = "nzb2seed"
 DEFAULT_GUI_USER = "admin"
 DEFAULT_GUI_PASSWORD = "nzb2seed"
 
@@ -30,7 +31,7 @@ class Config:
     qbit_url: str = ""
     qbit_user: str = ""
     qbit_pass: str = ""
-    qbit_category: str = ""
+    qbit_category: str = DEFAULT_QBIT_CATEGORY   # what nzb2seed's torrents are filed under
     qbit_tags: list[str] = field(default_factory=list)
     start_when_complete: bool = False
     sab_to_local: list = field(default_factory=list)
@@ -42,6 +43,8 @@ class Config:
     cleanup: bool = True
     local_verify: bool = False
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
+    retention_enabled: bool = False   # remove builds again after retention_days (off by default)
+    retention_days: int = 30          # how long a build stays in qBittorrent before it goes
     peek_archives: bool = True        # fetch a RAR post's first volume and read its headers
                                       # before downloading the rest of it
     outbound_proxy: str = ""          # e.g. http://127.0.0.1:8888 (the VPN container's HTTP proxy): srrDB/predb/xrel/TVmaze lookups
@@ -90,6 +93,8 @@ LAYOUT = [
     ("behaviour", "local_verify", "local_verify"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("behaviour", "peek_archives", "peek_archives"),
+    ("retention", "enabled", "retention_enabled"),
+    ("retention", "days", "retention_days"),
     ("behaviour", "season_packing", "season_packing"),
     ("behaviour", "episode_source", "episode_source"),
     ("behaviour", "match_episode_names", "match_episode_names"),
@@ -134,6 +139,12 @@ def from_sections(d: dict, path: Path) -> Config:
 
 
 def finalize(cfg: Config) -> Config:
+    # torrents nzb2seed adds are filed under their own category, so they are easy to tell
+    # from the rest of qBittorrent. Set it to "-" to add them without any category.
+    if not cfg.qbit_category:
+        cfg.qbit_category = DEFAULT_QBIT_CATEGORY
+    elif cfg.qbit_category == "-":
+        cfg.qbit_category = ""
     if cfg.post_processing not in ("auto", "repair", "unpack"):
         raise ValueError("post_processing must be 'auto', 'repair' or 'unpack' (+Delete is never allowed)")
     raw = cfg.torrent_dir_raw or "torrents"

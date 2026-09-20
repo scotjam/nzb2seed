@@ -361,8 +361,25 @@ class QBittorrent:
         return self._ok(self._req("GET", "torrents/pieceStates", params={"hash": infohash}),
                         "pieceStates").json()
 
+    def ensure_category(self, category: str):
+        """Create the category if qBittorrent does not have it yet - adding a torrent with
+        an unknown category silently leaves it uncategorised on some versions."""
+        if not category:
+            return
+        try:
+            have = self._req("GET", "torrents/categories").json()
+        except (ValueError, ApiError, OSError):
+            return
+        if category in have:
+            return
+        try:
+            self._req("POST", "torrents/createCategory", data={"category": category})
+        except (ApiError, OSError):
+            pass                         # not worth failing a build over
+
     def add_stopped(self, torrent_bytes: bytes, filename: str, save_path: str,
                     category: str = "", tags: str = ""):
+        self.ensure_category(category)
         data = {
             "savepath": save_path,
             "paused": "true",            # WebAPI < 2.11 (qBittorrent 4.x)
@@ -390,6 +407,13 @@ class QBittorrent:
     def start(self, infohash: str):
         path = "torrents/start" if self.api_version() >= (2, 11) else "torrents/resume"
         self._ok(self._req("POST", path, data={"hashes": infohash}), "start")
+
+    def remove(self, infohash: str, delete_files: bool = False):
+        """Remove a torrent. Files are kept unless asked for: nzb2seed deletes the files it
+        placed from its own record, never by handing qBittorrent a folder to empty."""
+        self._ok(self._req("POST", "torrents/delete",
+                           data={"hashes": infohash,
+                                 "deleteFiles": "true" if delete_files else "false"}), "delete")
 
     def set_location(self, infohash: str, location: str):
         self._ok(self._req("POST", "torrents/setLocation",

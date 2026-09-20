@@ -1423,8 +1423,14 @@ def _cancel_tick(_t):
     check_cancel()
 
 
-def owned_record(cfg: Config, t: Torrent) -> asm.Owned:
-    return asm.Owned(os.path.join(cfg.torrent_dir, f"{t.infohash}.owned.json"))
+def owned_record(cfg: Config, t: Torrent, opts: "Options | None" = None) -> asm.Owned:
+    """The record of what nzb2seed placed for this torrent. It also remembers which part of
+    nzb2seed made it: only builds the Automatic tab made are ever removed again by
+    retention, so a build, season or assemble you asked for yourself is never swept away."""
+    owned = asm.Owned(os.path.join(cfg.torrent_dir, f"{t.infohash}.owned.json"))
+    if opts is not None:
+        owned.source = "auto" if opts.unattended else "manual"
+    return owned
 
 
 def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dirs: list[str],
@@ -1449,7 +1455,7 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
         elif now - last[0] > 0.5:
             last[0] = now
             progress(f"copying {name}: {gb(done)} of {gb(total)}")
-    owned = owned_record(cfg, t)
+    owned = owned_record(cfg, t, opts)
     try:
         res = asm.assemble(t, source_dirs, output_dir, dry_run=opts.dry_run, log=line,
                            progress=copying, owned=owned, keep=keep_dirs)

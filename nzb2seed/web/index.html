@@ -251,6 +251,14 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 @media (prefers-reduced-motion: reduce) { .switch input, .switch input::after { transition: none; } }
 .autogrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; align-items: start; margin-top: 20px; }
 .flist .row { cursor: pointer; }
+/* retention rows have no checkbox, so they use the full width rather than .row's 22px column */
+#retlist .retrow { display: block; padding: 10px 16px; border-bottom: 1px solid var(--rule); }
+#retlist .retrow:last-child { border-bottom: 0; }
+#retlist .retrow .title { font-weight: 700; line-height: 1.35; word-break: break-word; }
+#retlist .retrow .why { color: var(--ink-2); font-size: .88rem; margin-top: 3px; max-width: 80ch; }
+#retlist .retrow .meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: .88rem; margin-top: 3px; }
+#retlist .retrow.go .title::before { content: "→ "; color: var(--torrent); }
+#retlist .actions { padding: 10px 16px; }
 .flist .row .state { display: flex; flex-wrap: wrap; gap: 4px 10px; margin-top: 4px; font-size: .86rem; }
 .flist .row .state b { font-weight: 700; }
 .flist .row .on-b { color: var(--ok); }
@@ -262,6 +270,8 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 .alist { display: grid; gap: 0; }
 .alist .arow { padding: 10px 0; border-top: 1px solid var(--rule); display: grid; gap: 4px; }
 .alist .arow:first-child { border-top: 0; }
+.alist .arow .meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; color: var(--ink-2); font-size: .88rem; }
+.alist .arow .meta > span + span::before, .alist .arow .meta > a::before { content: "·"; margin-right: 14px; color: var(--rule); }
 .alist .st { font-weight: 700; }
 .alist .st.done { color: var(--ok); } .alist .st.failed { color: var(--bad); } .alist .st.waiting, .alist .st.queued { color: var(--ink-2); }
 .panel { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 18px 20px; min-width: 0; }
@@ -639,7 +649,7 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
         <legend>qBittorrent</legend>
         <div class="two">
           <label class="field"><span>URL</span><input type="text" data-k="qbittorrent.url" placeholder="http://nas.local:8081"></label>
-          <label class="field"><span>Category</span><input type="text" data-k="qbittorrent.category" placeholder="None"></label>
+          <label class="field"><span>Category</span><input type="text" data-k="qbittorrent.category" placeholder="nzb2seed" title="Torrents nzb2seed adds are filed under this category in qBittorrent (created if it does not exist). Empty means nzb2seed; put a single - here to add them with no category at all."></label>
         </div>
         <div class="two">
           <label class="field"><span>User name</span><input type="text" data-k="qbittorrent.username" autocomplete="off"></label>
@@ -710,6 +720,19 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
         <div class="actions"><button type="button" class="btn" id="clearcache">Clear metadata cache</button>
           <small class="status" id="cachestatus">Forgets cached episode lists and show lookups, so the next grab asks TVmaze, TMDB, TheTVDB and IMDb again.</small></div>
         <label class="check"><input type="checkbox" data-k="behaviour.retry_bad_pieces"> If pieces fail, download other posts of the same release until every piece verifies (switches hashing on)</label>
+        <label class="check"><input type="checkbox" data-k="behaviour.peek_archives"> Look inside a RAR post before downloading all of it (fetches its first volume only)</label>
+      </fieldset>
+
+      <fieldset>
+        <h2>Removing builds again</h2>
+        <p class="status">Off unless you switch it on. When it is on, a torrent nzb2seed built is removed from qBittorrent once it is older than the age below, and the files nzb2seed placed for it are deleted. <b>Only files nzb2seed put there go</b> - it deletes from the record each build writes, so anything you added yourself, a metadata folder, or another torrent's data in the same place is left alone. Seeding stops when the torrent is removed, so set an age your trackers are happy with.</p>
+        <label class="check"><input type="checkbox" data-k="retention.enabled" id="retenabled"> Remove builds after a while</label>
+        <label>Remove builds older than
+          <input type="number" min="0" max="3650" step="1" data-k="retention.days" data-type="int" id="retdays" title="0 means every automatic build, however new - useful for seeing the full list."> days
+        </label>
+        <div class="actions"><button type="button" class="btn" id="retcheck">Show what would go</button>
+          <small class="status" id="retstatus"></small></div>
+        <div class="picklist flist hidden" id="retlist" role="group" aria-label="builds that would be removed"></div>
       </fieldset>
       <div class="actions">
         <button class="btn primary">Save settings</button>
@@ -800,7 +823,8 @@ function autoPaint(r) {
     h("div", { class: "title" }, it.name || it.infohash),
     h("div", { class: "meta" },
       h("span", { class: "st " + it.status }, label[it.status] || it.status),
-      it.first_seen ? h("span", {}, "arrived " + new Date(it.first_seen * 1000).toLocaleString()) : null,
+      it.first_seen ? h("span", {}, "arrived " + new Date(it.first_seen * 1000).toLocaleString([],
+        { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })) : null,
       it.attempts ? h("span", {}, `${it.attempts} attempt${it.attempts > 1 ? "s" : ""}`) : null,
       it.status === "waiting" && it.next_try ? h("span", {}, "next try " + new Date(it.next_try * 1000).toLocaleTimeString()) : null,
       it.job ? h("a", { href: "#jobs", onclick: () => setTimeout(() => openJob(it.job), 0) }, "log") : null),
@@ -1514,6 +1538,57 @@ $("clearcache").addEventListener("click", async () => {
     const r = await api("/api/metadata/clear_cache", {});
     $("cachestatus").textContent = r.removed ? `Cleared ${r.removed} cached lookup${r.removed > 1 ? "s" : ""}.` : "The cache was already empty.";
   } catch (err) { toast("Could not clear the cache: " + err.message); }
+});
+const retGb = (n) => (n / 1073741824).toFixed(2) + " GB";
+function retPaint(r) {
+  // the preview is a list on the page, not a dialog: reading it changes nothing, and
+  // removing is a separate button you have to reach for
+  const box = $("retlist");
+  const rows = [];
+  const total = r.removed.reduce((n, x) => n + x.bytes, 0);
+  for (const x of r.removed) {
+    rows.push(h("div", { class: "retrow go" },
+      h("div", { class: "title" }, x.name),
+      h("div", { class: "meta" }, h("span", {}, `${x.files} file${x.files === 1 ? "" : "s"}`),
+        h("span", {}, retGb(x.bytes)), h("span", {}, "would be removed"))));
+  }
+  for (const x of r.kept) {
+    rows.push(h("div", { class: "retrow" },
+      h("div", { class: "title" }, x.name),
+      h("div", { class: "why" }, "kept: " + x.skipped)));
+  }
+  if (r.removed.length) {
+    rows.push(h("div", { class: "actions" },
+      h("button", { type: "button", class: "btn", onclick: () => retRemove(r) },
+        `Remove these ${r.removed.length} now and free ${retGb(total)}`)));
+  }
+  box.replaceChildren(...rows);
+  box.classList.toggle("hidden", !rows.length);
+  const held = `${r.builds} build${r.builds === 1 ? "" : "s"} held, oldest ${r.oldest_days} days`;
+  $("retstatus").textContent = r.removed.length
+    ? `${r.removed.length} would go at ${r.days} days, freeing ${retGb(total)} - nothing has been removed.`
+    : `Nothing would go at ${r.days} days (${held}).`;
+}
+async function retRemove(r) {
+  const total = r.removed.reduce((n, x) => n + x.bytes, 0);
+  if (!confirm(`Remove ${r.removed.length} build(s) now, freeing ${retGb(total)}?\n\n` +
+               `They stop seeding and the files nzb2seed placed are deleted. This cannot be undone.`)) return;
+  try {
+    const done = await api("/api/retention/sweep", { dry_run: false, days: r.days });
+    $("retlist").classList.add("hidden");
+    $("retstatus").textContent = `Removed ${done.removed.length} build(s), freeing ${retGb(done.bytes)}.`;
+  } catch (err) { toast("Could not remove: " + err.message); }
+}
+$("retcheck").addEventListener("click", async () => {
+  $("retstatus").textContent = "Checking…";
+  $("retlist").classList.add("hidden");
+  try {
+    // answers for the age on screen, saved or not, switched on or not - nothing is changed
+    // 0 is a real answer ("everything"), so only an empty box falls back to the saved age
+    const typed = $("retdays").value.trim();
+    const days = typed === "" || isNaN(Number(typed)) ? undefined : Number(typed);
+    retPaint(await api("/api/retention/sweep", { dry_run: true, days }));
+  } catch (err) { $("retstatus").textContent = ""; toast("Could not check: " + err.message); }
 });
 $("sgraball").addEventListener("click", () => seriesJob(false));
 async function loadReports() {
