@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+IDxzdHlsZT4gLnAgeyBmaWxsOiAjRjdGOUZCIH0gLnUgeyBmaWxsOiAjMEU3QTc0IH0gLmkgeyBmaWxsOiAjMUIyNzMzIH0gLnQgeyBmaWxsOiAjNEE0RkMwIH0gQG1lZGlhIChwcmVmZXJzLWNvbG9yLXNjaGVtZTogZGFyaykgeyAucCB7IGZpbGw6ICMxMzFCMjQgfSAudSB7IGZpbGw6ICMzRkMxQjggfSAuaSB7IGZpbGw6ICNFM0U5RUYgfSAudCB7IGZpbGw6ICM5NzlCRkYgfSB9IDwvc3R5bGU+IDxyZWN0IGNsYXNzPSJwIiB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxMyIvPiA8ZyBmb250LWZhbWlseT0iQXRraW5zb24gSHlwZXJsZWdpYmxlLCBTZWdvZSBVSSwgc3lzdGVtLXVpLCBzYW5zLXNlcmlmIiBmb250LXNpemU9IjM3IiBmb250LXdlaWdodD0iNzAwIiBsZXR0ZXItc3BhY2luZz0iLTAuNiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+IDx0ZXh0IHg9IjMyIiB5PSI0NSI+IDx0c3BhbiBjbGFzcz0idSI+bjwvdHNwYW4+PHRzcGFuIGNsYXNzPSJpIj4yPC90c3Bhbj48dHNwYW4gY2xhc3M9InQiPnM8L3RzcGFuPiA8L3RleHQ+IDwvZz4gPC9zdmc+">
 <title>nzb2seed</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -155,6 +156,8 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .joblist button[aria-current="true"] { background: var(--slate); }
 .joblist .t { font-weight: 700; word-break: break-all; line-height: 1.3; }
 .joblist .s { font-size: .86rem; color: var(--ink-2); }
+.joblist .jretry { margin-top: 6px; }
+.joblist .jretry .btn { display: inline-block; padding: 3px 10px; font-size: .84rem; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--idle); }
 .dot.running { background: var(--torrent); animation: pulse 1.4s ease-in-out infinite; }
 .dot.done { background: var(--ok); }
@@ -270,6 +273,34 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 .alist { display: grid; gap: 0; }
 .alist .arow { padding: 10px 0; border-top: 1px solid var(--rule); display: grid; gap: 4px; }
 .alist .arow:first-child { border-top: 0; }
+/* demand dashboard */
+.dmcards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin: 12px 0 18px; }
+.dmcard { border: 1px solid var(--rule); border-radius: 10px; padding: 14px 16px; background: var(--card); }
+.dmcard .big { font-size: 1.7rem; font-weight: 700; line-height: 1.1; }
+.dmcard .small { color: var(--ink-2); font-size: .88rem; margin-top: 4px; }
+.dmcard.good .big { color: var(--usenet); }
+.dmcard.poor .big { color: var(--torrent); }
+.dmrec { border: 1px solid var(--rule); border-left: 3px solid var(--usenet); border-radius: 10px; padding: 14px 16px; margin-bottom: 18px; }
+.dmrec h3, .dmtable h3 { margin: 0 0 8px; font-size: 1rem; }
+.dmrec p { margin: 0 0 8px; max-width: 80ch; }
+.dmrule { display: flex; gap: 10px; align-items: flex-start; padding: 7px 0; border-top: 1px solid var(--rule); cursor: pointer; }
+.dmrule .why { display: block; color: var(--ink-2); font-size: .88rem; margin-top: 2px; }
+.rulecard { border: 1px solid var(--rule); border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; }
+.rulecard .top { display: flex; gap: 8px; align-items: center; }
+.rulecard .top input[type=text] { flex: 1; }
+.rulecard .conds { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; margin-top: 8px; }
+.rulecard .conds label { display: block; font-size: .82rem; color: var(--ink-2); }
+.rulecard .conds input { width: 100%; }
+.rulecard .says { color: var(--ink-2); font-size: .85rem; margin-top: 6px; }
+.rulecard.off { opacity: .55; }
+.ruleno { font-weight: 700; color: var(--ink-2); min-width: 1.6em; }
+.dmtable { margin-bottom: 22px; }
+.dmtable table { border-collapse: collapse; width: 100%; max-width: 640px; font-size: .92rem; }
+.dmtable th, .dmtable td { text-align: left; padding: 5px 10px; border-bottom: 1px solid var(--rule); }
+.dmtable th { color: var(--ink-2); font-weight: 600; }
+.dmtable td:not(:first-child), .dmtable th:not(:first-child) { text-align: right; }
+.dmtable tr.poor td:nth-child(3) { color: var(--torrent); font-weight: 700; }
+.dmtable tr.good td:nth-child(3) { color: var(--usenet); font-weight: 700; }
 .alist .arow .meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; color: var(--ink-2); font-size: .88rem; }
 .alist .arow .meta > span + span::before, .alist .arow .meta > a::before { content: "·"; margin-right: 14px; color: var(--rule); }
 .alist .st { font-weight: 700; }
@@ -322,6 +353,7 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
     <a href="#seasons">Seasons</a>
     <a href="#assemble">Assemble</a>
     <a href="#auto">Automatic<span class="autodot" id="autodot" title="Automatic builds are off"></span></a>
+    <a href="#demand">Demand</a>
     <a href="#settings">Settings</a>
   </nav>
 </header>
@@ -614,6 +646,19 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
     </div>
   </section>
 
+  <section id="view-demand" class="view hidden">
+    <div class="head"><h2>What your seeding returns</h2><small id="dmsub"></small></div>
+    <p class="status">Measured from your own torrents in qBittorrent - nothing is sent anywhere. The number is <b>upload per GB stored</b>: 1.00 means a torrent has given back as much as it takes up. Only torrents older than the settling time count, because a new one has not had its chance yet.</p>
+    <div class="dmcards" id="dmcards"></div>
+    <div class="dmrec" id="dmchase"></div>
+    <div class="dmrec" id="dmrules"></div>
+    <div class="dmrec" id="dmblock"></div>
+    <div id="dmtables"></div>
+    <div class="actions"><button type="button" class="btn" id="dmreload">Refresh</button>
+      <button type="button" class="btn" id="dmforget" title="Forget the posting times, seeder counts and grab counts asked of Prowlarr. They are asked for again only when a rule needs them.">Forget what trackers said</button>
+      <small class="status" id="dmstatus"></small></div>
+  </section>
+
   <section id="view-settings" class="view hidden">
     <h1>Settings</h1>
     <p class="lede" id="cfgpath"></p>
@@ -725,6 +770,15 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
       </fieldset>
 
       <fieldset>
+        <h2>Only build what pays for its space</h2>
+        <p class="status">Automatic builds can be weighed before they start, against what your own torrents have actually returned. The rules themselves live on the <a href="#demand">Demand</a> tab, where each one is shown with the evidence behind it; these two settings decide how much evidence a rule needs.</p>
+        <div class="grid">
+          <label class="field"><span>Never refuse on fewer than</span><input type="number" min="1" step="1" data-k="demand.min_sample" data-type="int"></label>
+          <label class="field"><span>Ignore torrents younger than (days)</span><input type="number" min="0" step="1" data-k="demand.age_days" data-type="float"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
         <h2>Free space</h2>
         <p class="status">Off unless you set a limit. When the disk builds are written to falls below it, SABnzbd's queue is paused, no new automatic build is started, and a build already running stops before its next big write instead of filling the disk - until there is room again - freed by the sweep below, or by you. Only what nzb2seed paused is started again, and seeding is never touched.</p>
         <div class="grid">
@@ -799,7 +853,7 @@ const age = (d) => { const t = Date.parse(d); if (!t) return ""; const days = Ma
 const norm = (s) => s.trim().toLowerCase().replace(/[\s._]+/g, ".").replace(/\.?-\.?/g, "-").replace(/^\.|\.$/g, "");
 
 /* ================= routing */
-const views = ["build", "jobs", "seasons", "assemble", "auto", "settings"];
+const views = ["build", "jobs", "seasons", "assemble", "auto", "demand", "settings"];
 function route() {
   const v = views.includes(location.hash.slice(1)) ? location.hash.slice(1) : "build";
   for (const name of views) $("view-" + name).classList.toggle("hidden", name !== v);
@@ -810,8 +864,168 @@ function route() {
   if (v === "seasons") loadReports();
   if (v === "settings") loadSettings();
   if (v === "auto") { autoPaint.done = false; loadAuto(); }
+  if (v === "demand") loadDemand();
 }
 window.addEventListener("hashchange", route);
+
+/* ================= demand: what your seeding actually returns */
+function dmCard(big, small, tone) {
+  return h("div", { class: "dmcard" + (tone ? " " + tone : "") },
+    h("div", { class: "big" }, big), h("div", { class: "small" }, small));
+}
+function dmTable(g) {
+  const worst = g.rows.length ? g.rows[0].ratio : 0;
+  return h("div", { class: "dmtable" },
+    h("h3", {}, "By " + g.what),
+    h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, g.what), h("th", {}, "torrents"),
+        h("th", {}, "upload per GB"), h("th", {}, "never uploaded"))),
+      h("tbody", {}, ...g.rows.map(r => h("tr", { class: r.ratio < 0.25 ? "poor" : r.ratio >= 1 ? "good" : "" },
+        h("td", {}, r.where), h("td", {}, String(r.n)),
+        h("td", {}, r.ratio.toFixed(2) + "x"), h("td", {}, r.dead + "%"))))));
+}
+async function loadDemand() {
+  $("dmstatus").textContent = "Reading qBittorrent…";
+  try {
+    const r = await api("/api/demand");
+    if (r.error) { $("dmstatus").textContent = "Could not read qBittorrent: " + r.error; return; }
+    $("dmstatus").textContent = "";
+    $("dmsub").textContent = `${r.torrents} torrents older than ${r.age_days} days`;
+    $("dmcards").replaceChildren(
+      dmCard(r.overall_ratio.toFixed(2) + "x", "uploaded per GB stored, overall",
+             r.overall_ratio >= 1 ? "good" : r.overall_ratio < 0.5 ? "poor" : ""),
+      dmCard(r.uploaded_gb.toLocaleString() + " GB", `uploaded from ${r.stored_gb.toLocaleString()} GB stored`),
+      dmCard(r.dead.toLocaleString(), "have never uploaded a byte", r.dead ? "poor" : ""),
+      dmCard(r.dead_gb.toLocaleString() + " GB", "of disk they hold", r.dead_gb ? "poor" : ""));
+    dmRules = JSON.parse(JSON.stringify(r.rules || []));
+    dmBlock = JSON.parse(JSON.stringify(r.block || []));
+    dmOnly = !!r.only_rules;
+    paintChase(r.chase || [], r.avoid || []);
+    paintRules();
+    $("dmtables").replaceChildren(...r.by.map(dmTable));
+  } catch (err) { $("dmstatus").textContent = ""; toast("Could not load: " + err.message); }
+}
+/* ---- the rule editor: an ordered priority list and a blocklist ---- */
+let dmRules = [], dmBlock = [], dmOnly = false, dmSave = null;
+const LISTS = ["trackers", "types", "groups", "keywords", "not_keywords"];
+const NUMS = { min_gb: "at least (GB)", max_gb: "at most (GB)", max_age_min: "newer than (min)",
+               min_seeders: "seeders, at least", max_seeders: "seeders, at most",
+               min_leechers: "leechers, at least", max_leechers: "leechers, at most",
+               min_grabs: "grabs, at least", max_grabs: "grabs, at most" };
+const LABELS = { trackers: "trackers (any)", types: "types (any)", groups: "groups (any)",
+                 keywords: "name contains (any)", not_keywords: "name must not contain" };
+
+function saysWhat(rule) {
+  const bits = [];
+  for (const k of LISTS) if ((rule[k] || []).length) bits.push(LABELS[k] + ": " + rule[k].join(", "));
+  for (const k in NUMS) if (rule[k]) bits.push(NUMS[k] + " " + rule[k]);
+  return bits.length ? bits.join(" · ") : "matches anything";
+}
+function ruleCard(rule, i, list, onChange) {
+  const card = h("div", { class: "rulecard" + (rule.enabled === false ? " off" : "") });
+  const redraw = () => { onChange(); paintRules(); };
+  const on = h("input", { type: "checkbox", checked: rule.enabled !== false,
+    title: "use this rule", onchange: (e) => { rule.enabled = e.target.checked; redraw(); } });
+  const name = h("input", { type: "text", value: rule.name || "", placeholder: "what this rule is for",
+    oninput: (e) => { rule.name = e.target.value; onChange(); } });
+  const move = (by) => {
+    const j = i + by;
+    if (j < 0 || j >= list.length) return;
+    list.splice(j, 0, list.splice(i, 1)[0]);
+    redraw();
+  };
+  const top = h("div", { class: "top" },
+    list === dmRules ? h("span", { class: "ruleno" }, String(i + 1)) : null, on, name,
+    list === dmRules ? h("button", { type: "button", class: "btn", title: "higher priority",
+      onclick: () => move(-1) }, "\u2191") : null,
+    list === dmRules ? h("button", { type: "button", class: "btn", title: "lower priority",
+      onclick: () => move(1) }, "\u2193") : null,
+    h("button", { type: "button", class: "btn", title: "remove this rule",
+      onclick: () => { list.splice(i, 1); redraw(); } }, "\u00d7"));
+  const conds = h("div", { class: "conds" });
+  for (const k of LISTS) {
+    conds.append(h("label", {}, LABELS[k],
+      h("input", { type: "text", value: (rule[k] || []).join(", "),
+        placeholder: k === "trackers" ? "tracker.example.org" : "",
+        oninput: (e) => { rule[k] = e.target.value.split(",").map(x => x.trim()).filter(Boolean); onChange(); },
+        onblur: () => paintRules() })));
+  }
+  for (const k in NUMS) {
+    conds.append(h("label", {}, NUMS[k],
+      h("input", { type: "number", min: "0", step: "1", value: rule[k] || "",
+        oninput: (e) => { rule[k] = Number(e.target.value) || 0; onChange(); },
+        onblur: () => paintRules() })));
+  }
+  card.append(top, conds, h("div", { class: "says" }, saysWhat(rule)));
+  return card;
+}
+function paintRules() {
+  const dirty = () => { if (dmSave) dmSave.disabled = false; };
+  const only = h("input", { type: "checkbox", checked: dmOnly,
+    onchange: (e) => { dmOnly = e.target.checked; dirty(); } });
+  $("dmrules").replaceChildren(
+    h("h3", {}, "What to build first"),
+    h("p", { class: "status" }, "Checked from the top down: the first rule a release matches decides how far up the queue it goes. A release no rule matches is still built, at the back. "
+      + "Age, seeders, leechers and grabs are what the tracker says, asked through Prowlarr: one search per release, remembered for two hours."),
+    ...dmRules.map((rule, i) => ruleCard(rule, i, dmRules, dirty)),
+    h("div", { class: "actions" },
+      h("button", { type: "button", class: "btn", onclick: () => { dmRules.push({ enabled: true, name: "" }); paintRules(); dirty(); } }, "Add a rule"),
+      h("label", { class: "check" }, only, " Build only what a rule matches"),
+      dmSave = h("button", { type: "button", class: "btn primary", disabled: true, onclick: saveRules }, "Save rules")));
+  $("dmblock").replaceChildren(
+    h("h3", {}, "Never build"),
+    h("p", { class: "status" }, "Checked before anything else: a release matching any of these is not built at all, whatever the rules above say."),
+    ...dmBlock.map((rule, i) => ruleCard(rule, i, dmBlock, dirty)),
+    h("div", { class: "actions" },
+      h("button", { type: "button", class: "btn", onclick: () => { dmBlock.push({ enabled: true, name: "" }); paintRules(); dirty(); } }, "Add a block")));
+}
+function paintChase(chase, avoid) {
+  const add = (rule, list) => { list.push({ enabled: true, ...rule }); paintRules(); if (dmSave) dmSave.disabled = false; };
+  $("dmchase").replaceChildren(
+    h("h3", {}, "Worth chasing"),
+    h("p", { class: "status" }, chase.length
+      ? "Kinds of release that pay back well and rarely sit idle. Add one as a priority rule, then narrow it with a size, an age or a seeder count. These are deliberately not about trackers: the ratio worth building is the one on the trackers you are weakest on, so a tracker rule is yours to write by hand."
+      : "Nothing stands out yet: no group has enough torrents behind it that also returns well."),
+    ...chase.map(x => h("div", { class: "dmrule" },
+      h("span", {},
+        h("b", {}, x.what + ": " + x.value),
+        h("span", { class: "why" }, `${x.n} torrents · returns ${x.ratio.toFixed(2)}x · ${x.dead}% never uploaded`)),
+      h("button", { type: "button", class: "btn", onclick: () => add(x.rule, dmRules) }, "Chase this"))),
+    avoid.length ? h("h3", { style: "margin-top:14px" }, "Worth blocking") : null,
+    ...avoid.slice(0, 8).map(x => h("div", { class: "dmrule" },
+      h("span", {},
+        h("b", {}, x.what + ": " + x.value),
+        h("span", { class: "why" }, `${x.n} torrents · returns ${x.ratio.toFixed(2)}x · ${x.dead}% never uploaded · holds ${x.saves_gb.toLocaleString()} GB`)),
+      h("button", { type: "button", class: "btn", onclick: () => add(blockFor(x), dmBlock) }, "Block this"))));
+}
+function blockFor(x) {
+  const rule = { name: `${x.value} (${x.ratio.toFixed(2)}x)` };
+  if (x.what === "tracker") rule.trackers = [x.value];
+  else if (x.what === "type") rule.types = [x.value];
+  else if (x.what === "group") rule.groups = [x.value];
+  else if (x.what === "tracker+type") { const [tr, ...ty] = x.value.split(" "); rule.trackers = [tr]; rule.types = [ty.join(" ")]; }
+  else if (x.what === "category") rule.categories = [x.value];
+  return rule;
+}
+async function saveRules() {
+  const clean = (list) => list.filter(r => Object.keys(r).some(k => k !== "name" && k !== "enabled"
+    && (Array.isArray(r[k]) ? r[k].length : r[k])) || r.name);
+  try {
+    settings = await api("/api/settings", { settings: { ...settings.settings,
+      demand: { ...settings.settings.demand, rules: clean(dmRules), block: clean(dmBlock), only_rules: dmOnly } } });
+    toast("Rules saved.");
+    loadDemand();
+  } catch (err) { toast("Could not save: " + err.message); }
+}
+$("dmreload").addEventListener("click", loadDemand);
+$("dmforget").addEventListener("click", async () => {
+  try {
+    const r = await api("/api/demand/forget", {});
+    $("dmstatus").textContent = r.removed
+      ? `Forgot ${r.removed} cached lookup(s); they will be asked for again when a rule needs them.`
+      : "Nothing was cached.";
+  } catch (err) { toast("Could not clear: " + err.message); }
+});
 
 /* ================= automatic builds */
 let autoTimer = null;
@@ -1195,12 +1409,29 @@ async function refreshJobs() {
   const running = jobs.filter(j => j.status === "running" || j.status === "waiting").length;
   $("runcount").textContent = running; $("runcount").classList.toggle("hidden", !running);
   if (location.hash !== "#jobs") return;
-  $("joblist").replaceChildren(...(jobs.length ? jobs.map(j => h("button", { "aria-current": String(j.id === current), onclick: () => openJob(j.id) },
+  const BADLY = ["failed", "cancelled", "interrupted"];
+  $("joblist").replaceChildren(...(jobs.length ? jobs.map(j => {
+    const row = h("button", { "aria-current": String(j.id === current), onclick: () => openJob(j.id) },
       h("div", { class: "t" }, h("span", { class: "dot " + j.status }), j.title),
       h("div", { class: "s" }, j.status === "waiting" ? "Waiting for you: pick an NZB"
-        : j.status === "running" ? (j.steps.at(-1) || "Starting") : (j.result || j.status))))
-    : [h("div", { class: "empty" }, "No builds yet. Start one from Build.")]));
+        : j.status === "running" ? (j.steps.at(-1) || "Starting") : (j.result || j.status)));
+    if (BADLY.includes(j.status) && j.can_retry) {
+      row.append(h("div", { class: "jretry" },
+        h("span", { class: "btn", role: "button", tabindex: "0",
+          title: "Run it again, exactly as it was started",
+          onclick: (e) => { e.stopPropagation(); retryJob(j); } }, "Try again")));
+    }
+    return row;
+  }) : [h("div", { class: "empty" }, "No builds yet. Start one from Build.")]));
   if (!current && jobs.length) openJob(jobs[0].id, false);
+}
+async function retryJob(j) {
+  try {
+    const r = await api("/api/jobs/retry", { id: j.id });
+    toast("Started again.");
+    await refreshJobs();
+    if (r && r.id) openJob(r.id);
+  } catch (err) { toast("Could not start it again: " + err.message); }
 }
 function openJob(id, navigate = true) {
   if (current !== id) { current = id; cursor = 0; logSteps = []; $("jlog").replaceChildren(); $("jsteps").replaceChildren(); lastPieces = ""; }

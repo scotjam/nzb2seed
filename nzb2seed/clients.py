@@ -43,6 +43,7 @@ class Release:
     grabs: int | None
     seeders: int | None
     files: int | None
+    leechers: int | None = None    # last, with a default: the others are built positionally
 
     @classmethod
     def from_api(cls, r: dict) -> "Release":
@@ -58,6 +59,7 @@ class Release:
             publish_date=r.get("publishDate") or "",
             grabs=r.get("grabs"),
             seeders=r.get("seeders"),
+            leechers=r.get("leechers"),
             files=r.get("files"),
         )
 

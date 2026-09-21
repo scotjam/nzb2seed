@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<style>
+  .p { fill: #F7F9FB }
+  .u { fill: #0E7A74 }
+  .i { fill: #1B2733 }
+  .t { fill: #4A4FC0 }
+  @media (prefers-color-scheme: dark) {
+    .p { fill: #131B24 }
+    .u { fill: #3FC1B8 }
+    .i { fill: #E3E9EF }
+    .t { fill: #979BFF }
+  }
+</style>
+<rect class="p" width="64" height="64" rx="13"/>
+<g font-family="Atkinson Hyperlegible, Segoe UI, system-ui, sans-serif"
+   font-size="37" font-weight="700" letter-spacing="-0.6" text-anchor="middle">
+  <text x="32" y="45">
+    <tspan class="u">n</tspan><tspan class="i">2</tspan><tspan class="t">s</tspan>
+  </text>
+</g>
+</svg>

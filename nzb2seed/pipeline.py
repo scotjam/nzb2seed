@@ -272,7 +272,14 @@ def unpack_from_archives(d: str, wanted: list, dest: str | None = None) -> bool:
                     break
         if not members:
             if fresh:
-                info(f"{name}: none of the needed files are inside ({len(entries)} file(s) in the archive)")
+                # say what was wanted and what is actually in there: a size that is close
+                # but not equal is the usual sign of a different encode of the same title
+                want = ", ".join(f"{f.name} ({gb(f.length)})" for f in wanted[:3])
+                more = f" and {len(wanted) - 3} more" if len(wanted) > 3 else ""
+                held = ", ".join(f"{os.path.basename(p.replace(chr(92), '/'))} ({gb(s)})"
+                                 for p, s in entries[:3])
+                held_more = f" and {len(entries) - 3} more" if len(entries) > 3 else ""
+                info(f"{name}: does not hold {want}{more}; it holds {held or 'nothing'}{held_more}")
             continue
         info(f"{name} holds {len(members)} needed file(s): " + ", ".join(os.path.basename(m) for m in members[:3])
              + " - unpacking into the download folder")
@@ -414,12 +421,15 @@ def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files:
             return None
         entries = archives.list_contents(max(got, key=os.path.getsize))
         held = archive_holds(files, entries)
+        want = ", ".join(f"{f.name} ({gb(f.length)})" for f in files[:3])
+        inside = ", ".join(f"{os.path.basename(p.replace(chr(92), '/'))} ({gb(s)})"
+                           for p, s in sorted(entries, key=lambda e: -e[1])[:3])
         if held is False:
-            big = max(entries, key=lambda e: e[1])
-            info(f"{rel.title}: its archive holds {big[0]} ({gb(big[1])}), which is not "
-                 f"{files[0].name} ({gb(files[0].length)}) - skipping it, {gb(rel.size)} not downloaded")
+            info(f"{rel.title}: looking for {want}; the archive holds {inside} - "
+                 f"a different release, skipping it, {gb(rel.size)} not downloaded")
         elif held:
-            info(f"{rel.title}: its archive holds the torrent's file - downloading it")
+            info(f"{rel.title}: the archive holds {inside}, which is what the torrent "
+                 f"needs - downloading it")
         return held
     except (Abort, ApiError, OSError, RuntimeError, subprocess.SubprocessError) as e:
         warn(f"could not look inside {rel.title}: {e}")
@@ -437,6 +447,7 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
     """Wait until every job has finished; return {nzo: (status, slot)}."""
     out: dict[str, tuple[str, dict]] = {}
     no_path_since: dict[str, float] = {}
+    said = ""                     # the disk-space reason this job has already been told
     while len(out) < len(nzos):
         check_cancel()
         parts = []
@@ -460,7 +471,23 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
             else:
                 parts.append(status)
         if parts:
-            progress(f"{len(out)}/{len(nzos)} done  " + "  ".join(parts))
+            # a job that cannot move because the disk guard paused the queue looks like a
+            # stalled download; say which it is, in the log as well as the progress line,
+            # because the progress line is not kept
+            held = ""
+            if space.GATE:
+                try:
+                    held = space.GATE() or ""
+                except Exception:
+                    held = ""
+            if held and held != said:
+                warn(f"waiting for disk space - {held}")
+                said = held
+            elif said and not held:
+                info("there is room again - the queue is running")
+                said = ""
+            progress(f"{len(out)}/{len(nzos)} done  " + "  ".join(parts)
+                     + (f"  [waiting for disk space: {held}]" if held else ""))
         if len(out) < len(nzos):
             time.sleep(5)
     end_progress()
