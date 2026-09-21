@@ -284,3 +284,37 @@ def test_a_broken_gate_never_wedges_a_build(monkeypatch):
 def test_no_gate_at_all_means_no_waiting(monkeypatch):
     monkeypatch.setattr(space, "GATE", None)
     space.wait_for_room(sleep=lambda _: pytest.fail("it should not have waited"))
+
+
+# ---------------------------------------------------------------- what a blocked job says
+
+def test_a_job_waiting_on_the_disk_says_the_limit_in_its_log(monkeypatch):
+    """The progress line is not kept, so the reason - which names the limit and how much
+    to free - has to reach the job's log as well."""
+    from nzb2seed import pipeline
+    said = []
+    monkeypatch.setattr(pipeline, "warn", said.append)
+    monkeypatch.setattr(pipeline, "info", said.append)
+    monkeypatch.setattr(pipeline, "progress", lambda *_: None)
+    monkeypatch.setattr(pipeline, "end_progress", lambda: None)
+    monkeypatch.setattr(pipeline.time, "sleep", lambda *_: None)
+    reason = ["529.2 GB free, less than the 550 GB limit; free 20.8 GB more to carry on"]
+    monkeypatch.setattr(space, "GATE", lambda: reason[0])
+
+    class Sab:
+        def __init__(self):
+            self.looks = 0
+
+        def status(self, nzo):
+            self.looks += 1
+            if self.looks > 3:                      # room appears, then it finishes
+                reason[0] = ""
+            if self.looks > 4:
+                return "Completed", {"storage": "/somewhere"}
+            return "Queued:Paused", {"percentage": "86", "timeleft": "0:00:00"}
+
+    pipeline.sab_wait(Sab(), {"nzo1": "Some.Release"})
+    blocked = [x for x in said if "waiting for disk space" in x]
+    assert len(blocked) == 1                        # said once, not every five seconds
+    assert "550 GB limit" in blocked[0] and "free 20.8 GB more" in blocked[0]
+    assert any("there is room again" in x for x in said)
