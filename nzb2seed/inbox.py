@@ -30,6 +30,9 @@ import time
 
 from . import clients
 from . import space
+from . import worth
+from . import rules as rules_mod
+from . import lookup as lookup_mod
 from .clients import ApiError
 from .pipeline import Abort, Options, execute_run, local_release
 from .report import Cancelled, check_cancel, info, step, warn
@@ -176,10 +179,17 @@ class Inbox:
             # (a file younger than a few seconds may still be being written by autobrr)
             if n.lower().endswith(".torrent") and os.path.isfile(p) and time.time() - os.path.getmtime(p) > 5:
                 self.take(p)
-        # torrents waiting for their post whose job is gone (e.g. after a restart)
-        for h, it in list(self.state.items.items()):
-            if it.get("status") in ("queued", "waiting") and h not in self.running:
-                self.start(h)
+        # torrents waiting for their post whose job is gone (e.g. after a restart),
+        # highest priority first so a rule near the top of the list really is built first
+        waiting = [(h, it) for h, it in self.state.items.items()
+                   if it.get("status") in ("queued", "waiting") and h not in self.running]
+        waiting.sort(key=lambda x: rules_mod.sort_key(
+            cfg, rules_mod.Release(name=x[1].get("name") or "", size=x[1].get("size") or 0,
+                                   tracker=x[1].get("tracker") or "",
+                                   first_seen=x[1].get("first_seen") or 0),
+            x[1].get("first_seen") or 0))
+        for h, _ in waiting:
+            self.start(h)
 
     def no_room(self, cfg) -> bool:
         """Is the free-space guard holding downloads back? Then nothing new is started -
@@ -213,7 +223,8 @@ class Inbox:
         if it and it.get("status") in ("done", "queued", "waiting", "building"):
             return                              # the same torrent again: already handled
         self.state.update(t.infohash, name=t.name, file=dst, status="queued", first_seen=time.time(),
-                          attempts=0, next_try=0, why="", source=os.path.basename(path))
+                          attempts=0, next_try=0, why="", source=os.path.basename(path),
+                          size=t.total_size, tracker=worth.tracker_of(t.trackers))
         self.start(t.infohash)
 
     def _move(self, path: str, where: str):
@@ -245,6 +256,29 @@ class Inbox:
             data = fh.read()
         t = parse(data)
         step(f"Automatic build of {t.name}")
+        rel = rules_mod.Release(name=t.name, size=t.total_size,
+                                tracker=worth.tracker_of(t.trackers),
+                                first_seen=it.get("first_seen") or time.time())
+        if rules_mod.needs_lookup(self.app.cfg):
+            # only when a rule asks for it: this costs an indexer search
+            known = lookup_mod.find(self.app.prowlarr(), self.app.tracker_cache(), t.name,
+                                    want_counts=rules_mod.wants_counts(self.app.cfg), log=warn)
+            if known:
+                rel.published, rel.seeders = known.published, known.seeders
+                rel.leechers, rel.grabs = known.leechers, known.grabs
+                if known.published:
+                    info(f"the tracker posted it {known.age_min:.0f} minutes ago"
+                         + (f", {known.seeders} seeders" if known.seeders >= 0 else "")
+                         + (f", {known.leechers} leechers" if known.leechers >= 0 else "")
+                         + (f", grabbed {known.grabs} times" if known.grabs >= 0 else ""))
+        call = rules_mod.decide(self.app.cfg, rel)
+        if not call.build:
+            warn(f"not building it: {call.why}")
+            self.state.update(h, status="skipped", why=call.why)
+            self._move(it["file"], DONE)
+            return {"result": f"skipped - {call.why}"}
+        if call.why:
+            info(call.why)
         while True:
             cfg = self.app.cfg
             deadline = it.get("first_seen", time.time()) + cfg.auto_wait_hours * 3600

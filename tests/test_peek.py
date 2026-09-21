@@ -163,3 +163,26 @@ def test_peek_gives_no_verdict_when_sabnzbd_fails(monkeypatch, cfg, tmp_path):
     monkeypatch.setattr(sab, "status", lambda nzo: ("Failed", {"fail_message": "no articles"}))
     rel = type("R", (), {"title": "T", "indexer": "i", "size": 1, "guid": "g"})()
     assert pipeline.peek_archive(cfg, None, sab, rel, nzb("set.part01.rar"), WANT) is None
+
+
+# ---------------------------------------------------------------- saying what was wrong
+
+def test_the_peek_says_what_it_wanted_and_what_was_there(monkeypatch, cfg, tmp_path, capsys):
+    """"none of the needed files are inside" does not tell you whether it was the wrong
+    release or the wrong size - so both sides are named, with their sizes."""
+    said = []
+    monkeypatch.setattr(pipeline, "info", said.append)
+    out, _ = run_peek(monkeypatch, cfg, tmp_path, [("Their.Cut.mkv", 27_940_000_000)])
+    assert out is False
+    line = next(x for x in said if "looking for" in x)
+    assert "The.Film.2019.mkv (24.72 GB)" in line          # what the torrent needs
+    assert "Their.Cut.mkv (26.02 GB)" in line              # what the archive actually holds
+    assert "a different release" in line
+
+
+def test_the_peek_says_what_it_found_when_it_accepts(monkeypatch, cfg, tmp_path):
+    said = []
+    monkeypatch.setattr(pipeline, "info", said.append)
+    out, _ = run_peek(monkeypatch, cfg, tmp_path, [("obf.mkv", 26_540_000_000)])
+    assert out is True
+    assert any("obf.mkv (24.72 GB)" in x and "what the torrent" in x for x in said)

@@ -43,6 +43,11 @@ class Config:
     cleanup: bool = True
     local_verify: bool = False
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
+    demand_rules: list = field(default_factory=list)   # priority rules, best first
+    demand_block: list = field(default_factory=list)   # anything matching is not built
+    demand_only_rules: bool = False   # build only what a priority rule matches
+    demand_min_sample: int = 8        # a rule is never offered on fewer torrents than this
+    demand_age_days: float = 7.0      # a torrent younger than this has not had its chance
     space_min_percent: float = 0      # pause downloading below this much free space (0 = off)
     space_min_gb: float = 0           # ... or below this many GB free (0 = off)
     space_pause_torrents: bool = False  # also stop downloading torrents (can cost H&R grace)
@@ -99,6 +104,11 @@ LAYOUT = [
     ("behaviour", "local_verify", "local_verify"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("behaviour", "peek_archives", "peek_archives"),
+    ("demand", "rules", "demand_rules"),
+    ("demand", "block", "demand_block"),
+    ("demand", "only_rules", "demand_only_rules"),
+    ("demand", "min_sample", "demand_min_sample"),
+    ("demand", "age_days", "demand_age_days"),
     ("space", "min_percent", "space_min_percent"),
     ("space", "min_gb", "space_min_gb"),
     ("space", "pause_torrents", "space_pause_torrents"),
@@ -197,6 +207,8 @@ def _toml(v) -> str:
         return str(v)
     if isinstance(v, str):
         return json.dumps(v)  # JSON string escapes are valid TOML basic-string escapes
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{k} = {_toml(x)}" for k, x in v.items()) + "}"
     if isinstance(v, list):
         return "[" + ", ".join(_toml(x) for x in v) + "]"
     raise TypeError(f"cannot write {type(v).__name__} to TOML")

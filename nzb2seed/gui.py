@@ -31,6 +31,9 @@ from . import series as series_mod
 from . import episodes as episodes_mod
 from . import retention as retention_mod
 from . import space as space_mod
+from . import worth as worth_mod
+from . import rules as rules_mod
+from . import lookup as lookup_mod
 from .torrent import TorrentError, parse as parse_torrent
 from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
                        previous_downloads, search)
@@ -61,6 +64,7 @@ class Job:
         self.lock = threading.Lock()
         self.on_change = on_change or (lambda urgent=False: None)
         self.question: dict | None = None     # {"prompt", "choices"} while waiting for the person
+        self.repeat: dict | None = None       # the request that started it, so it can be run again
         self._answer: int | None = None
         self._answered = threading.Event()
 
@@ -117,11 +121,13 @@ class Job:
         return {"id": self.id, "title": self.title, "kind": self.kind, "status": self.status,
                 "result": self.result, "started": self.started, "ended": self.ended,
                 "progress": self.progress, "question": self.question,
+                "can_retry": bool(self.repeat),
                 "steps": [x["t"] for x in self.lines if x["k"] == "step"]}
 
     def to_dict(self) -> dict:
         with self.lock:
-            return {**self.summary(), "lines": list(self.lines), "pieces": self.pieces}
+            return {**self.summary(), "lines": list(self.lines), "pieces": self.pieces,
+                    "repeat": self.repeat}
 
     @classmethod
     def from_dict(cls, d: dict, on_change) -> "Job":
@@ -130,6 +136,7 @@ class Job:
         job.lines, job.pieces = d.get("lines", []), d.get("pieces", "")
         job.progress, job.started, job.ended = d.get("progress", ""), d.get("started", 0), d.get("ended")
         job.question = None
+        job.repeat = d.get("repeat")
         if job.status in ("running", "waiting"):     # its thread died with the previous GUI process
             job.status, job.result, job.progress = "interrupted", INTERRUPTED, ""
             job.ended = job.ended or time.time()
@@ -258,6 +265,17 @@ class App:
         self.inbox = inbox_mod.Inbox(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
                                                         "inbox.json"))
 
+    def demand_stats(self) -> "worth_mod.Stats":
+        return worth_mod.Stats(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
+                                            "demand.json"))
+
+    def prowlarr(self):
+        return Prowlarr(self.cfg.prowlarr_url, self.cfg.prowlarr_key) if self.cfg.prowlarr_url else None
+
+    def tracker_cache(self) -> "lookup_mod.Cache":
+        return lookup_mod.Cache(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
+                                             "tracker-info.json"))
+
     def guard(self) -> "space_mod.Guard":
         return space_mod.Guard(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
                                             "space.json"))
@@ -290,6 +308,9 @@ class App:
                 except Exception as e:                       # never let it kill its thread
                     print(f"space check failed: {e}", flush=True)
         threading.Thread(target=loop, name="space", daemon=True).start()
+
+    # what the request being served asked for, so a job can be started again later
+    request = threading.local()
 
     def start_retention(self):
         """Hourly sweep that removes builds past their retention age (idle while off)."""
@@ -324,6 +345,7 @@ class App:
     def start_job(self, title: str, kind: str, fn) -> Job:
         with self.lock:
             job = Job(self._next, title, kind, self.store.changed)
+            job.repeat = getattr(self.request, "asked", None)     # what to replay on a retry
             self._next += 1
             self.jobs[job.id] = job
         self.store.changed(urgent=True)
@@ -531,6 +553,23 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._send(200, page, "text/html; charset=utf-8")
             if path == "/api/settings":
                 return self._json(self.settings_payload())
+            if path == "/api/demand":
+                try:
+                    rows = app._qbit().torrents() if app.cfg.qbit_url else []
+                except (ApiError, OSError) as e:
+                    return self._json({"error": str(e), "torrents": 0, "by": [], "stats": {}})
+                out = worth_mod.overview(rows, app.cfg.demand_age_days, app.cfg.demand_min_sample)
+                out.pop("stats", None)
+                flat = [r for g in out["by"] for r in
+                        ({**x, "what": g["what"], "value": x["where"]} for x in g["rows"])]
+                return self._json({**out,
+                                   "chase": rules_mod.propose(flat, app.cfg.demand_min_sample),
+                                   "rules": list(app.cfg.demand_rules or []),
+                                   "block": list(app.cfg.demand_block or []),
+                                   "only_rules": bool(app.cfg.demand_only_rules),
+                                   "avoid": out.pop("rules", []),
+                                   "min_sample": app.cfg.demand_min_sample,
+                                   "age_days": app.cfg.demand_age_days})
             if path == "/api/space":
                 try:
                     out = space_mod.check(app.cfg, app._sab())
@@ -570,9 +609,20 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             if body is None:
                 return
             path = urlsplit(self.path).path
+            if path == "/api/jobs/retry":
+                # replay the request that made the job: the same call, made again
+                job = app.jobs.get(int(body.get("id", -1)) if str(body.get("id", "")).lstrip("-").isdigit() else -1)
+                if not job:
+                    return self._err("no such job", 404)
+                if not job.repeat:
+                    return self._err("this job was not started from a request that can be repeated")
+                path, body = job.repeat.get("path") or "", dict(job.repeat.get("body") or {})
+            app.request.asked = {"path": path, "body": body}
             try:
                 if path == "/api/settings":
                     return self.save_settings(body)
+                if path == "/api/demand/forget":
+                    return self._json({"removed": app.tracker_cache().clear()})
                 if path == "/api/retention/sweep":
                     # the Settings button: preview by default, remove only when asked to.
                     # Both work while retention is still off - seeing what would go is how
