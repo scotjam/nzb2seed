@@ -96,22 +96,27 @@ def test_either_limit_is_enough_to_trip_it(setup):
 
 
 def test_it_says_how_much_has_to_be_freed(setup):
-    """The number you act on: what to delete before anything carries on."""
-    cfg, _ = setup(free_gb=20, total_gb=1000, min_pct=5)
-    assert "free 30.0 GB more to carry on" in space.check(cfg)["why"]      # 5% of 1000 = 50
-    cfg2, _ = setup(free_gb=20, min_gb=50)
-    assert "free 30.0 GB more to carry on" in space.check(cfg2)["why"]
+    """The number you act on is what restarts downloading - which is the limit plus the
+    margin, not the limit. Freeing just enough to reach the limit would restart nothing."""
+    cfg, _ = setup(free_gb=20, total_gb=1000, min_pct=5)            # 5% of 1000 = 50 GB
+    assert "free 35.0 GB more to start downloading again" in space.check(cfg)["why"]
+    cfg2, _ = setup(free_gb=20, min_gb=50)                          # 50 * 1.1 - 20
+    assert "free 35.0 GB more to start downloading again" in space.check(cfg2)["why"]
 
 
-def test_the_amount_to_free_includes_the_margin_once_it_is_holding(setup):
+def test_the_amount_to_free_is_the_same_whether_stopping_or_held(setup):
+    """It is the same disk and the same bar: only the wording of the breach differs."""
     cfg, _ = setup(free_gb=20, min_gb=50)
-    why = space.check(cfg, resuming=True)["why"]
-    assert "free 35.0 GB more to carry on" in why and "1.1x margin" in why  # 50 * 1.1 - 20
+    stopping, held = space.check(cfg)["why"], space.check(cfg, resuming=True)["why"]
+    assert "free 35.0 GB more to start downloading again" in stopping
+    assert "free 35.0 GB more to start downloading again" in held
+    assert "under the 50 GB limit" in stopping                   # what stopped it
+    assert "55.0 GB is needed before downloading starts again" in held   # what restarts it
 
 
 def test_the_worst_of_the_two_limits_decides_how_much_to_free(setup):
     cfg, _ = setup(free_gb=20, total_gb=1000, min_pct=5, min_gb=100)
-    assert "free 80.0 GB more to carry on" in space.check(cfg)["why"]       # 100 GB, not 50
+    assert "free 90.0 GB more" in space.check(cfg)["why"]        # 100 * 1.1 - 20, not the 5%
 
 
 # ---------------------------------------------------------------- pausing and resuming
@@ -229,7 +234,7 @@ def test_defaults_are_off(tmp_path):
 def gate(monkeypatch):
     """Control what the gate says, and count how long a build would wait."""
     state = {"why": "", "slept": 0, "said": []}
-    monkeypatch.setattr(space, "GATE", lambda: state["why"])
+    monkeypatch.setattr(space, "GATE", lambda role="": state["why"])
 
     def sleep(_):
         state["slept"] += 1
@@ -274,7 +279,7 @@ def test_stopping_a_build_works_while_it_waits(gate, monkeypatch):
 
 
 def test_a_broken_gate_never_wedges_a_build(monkeypatch):
-    def boom():
+    def boom(role=""):
         raise RuntimeError("qBittorrent is down")
 
     monkeypatch.setattr(space, "GATE", boom)
@@ -299,7 +304,7 @@ def test_a_job_waiting_on_the_disk_says_the_limit_in_its_log(monkeypatch):
     monkeypatch.setattr(pipeline, "end_progress", lambda: None)
     monkeypatch.setattr(pipeline.time, "sleep", lambda *_: None)
     reason = ["529.2 GB free, less than the 550 GB limit; free 20.8 GB more to carry on"]
-    monkeypatch.setattr(space, "GATE", lambda: reason[0])
+    monkeypatch.setattr(space, "GATE", lambda role="": reason[0])
 
     class Sab:
         def __init__(self):
@@ -318,3 +323,83 @@ def test_a_job_waiting_on_the_disk_says_the_limit_in_its_log(monkeypatch):
     assert len(blocked) == 1                        # said once, not every five seconds
     assert "550 GB limit" in blocked[0] and "free 20.8 GB more" in blocked[0]
     assert any("there is room again" in x for x in said)
+
+
+# ---------------------------------------------------------------- a limit per disk
+
+def two_disks(tmp_path, monkeypatch, out_free, dl_free, **limits):
+    """An output disk and a downloads disk, each with its own free space."""
+    import dataclasses
+    from nzb2seed.config import Config, finalize
+    out, dl = tmp_path / "out", tmp_path / "dl"
+    out.mkdir(exist_ok=True); dl.mkdir(exist_ok=True)
+    cfg = finalize(Config(path=tmp_path / "nzb2seed.toml", output_dir=str(out), **limits))
+    monkeypatch.setattr(space, "_sab_dir", lambda c, s: str(dl))
+    free = {str(out): out_free, str(dl): dl_free}
+    monkeypatch.setattr(space, "free_on", lambda p: (int(free[p] * GB), int(1000 * GB)))
+    return cfg
+
+
+def test_each_disk_is_held_to_its_own_limit(tmp_path, monkeypatch):
+    """Staging empties after every build; the disk that keeps what is seeded only grows."""
+    cfg = two_disks(tmp_path, monkeypatch, out_free=400, dl_free=120,
+                    space_output_min_gb=300, space_downloads_min_gb=200)
+    out = space.check(cfg, FakeSab())
+    assert out["low"] is True
+    by_role = {d["role"]: d for d in out["disks"]}
+    assert by_role["output"]["why"] == ""                       # 400 free, limit 300
+    assert "120.0 GB free, under the 200 GB limit" in by_role["downloads"]["why"]
+    assert "downloads disk" in out["why"]                       # it says which one
+
+
+def test_a_disk_without_its_own_limit_uses_the_general_one(tmp_path, monkeypatch):
+    cfg = two_disks(tmp_path, monkeypatch, out_free=90, dl_free=400,
+                    space_min_gb=100, space_downloads_min_gb=200)
+    by_role = {d["role"]: d for d in space.check(cfg, FakeSab())["disks"]}
+    assert "under the 100 GB limit" in by_role["output"]["why"]  # fell back to the general
+    assert by_role["downloads"]["why"] == ""                     # 400 free, its own limit 200
+
+
+def test_one_disk_over_its_limit_is_enough_to_hold_everything(tmp_path, monkeypatch):
+    cfg = two_disks(tmp_path, monkeypatch, out_free=900, dl_free=50, space_downloads_min_gb=100)
+    assert space.check(cfg, FakeSab())["low"] is True
+
+
+def test_no_limit_anywhere_means_the_guard_is_idle(tmp_path, monkeypatch):
+    cfg = two_disks(tmp_path, monkeypatch, out_free=1, dl_free=1)
+    assert space.limits_set(cfg) is False
+    assert space.check(cfg, FakeSab())["low"] is False
+
+
+def test_a_limit_on_either_disk_switches_the_guard_on(tmp_path, monkeypatch):
+    assert space.limits_set(two_disks(tmp_path, monkeypatch, 500, 500, space_output_min_gb=10))
+    assert space.limits_set(two_disks(tmp_path, monkeypatch, 500, 500, space_downloads_min_percent=5))
+
+
+def test_placing_files_waits_only_on_the_disk_it_writes_to(monkeypatch):
+    """Several builds at once, all sitting on finished downloads, is a deadlock if the step
+    that empties staging is itself held back by staging being full."""
+    asked = []
+
+    def gate(role=""):
+        asked.append(role)
+        return "staging is full" if role == "downloads" else ""
+
+    monkeypatch.setattr(space, "GATE", gate)
+    waited = []
+    space.wait_for_room(step=waited.append, sleep=lambda _: waited.append("slept"),
+                        role="output")
+    assert asked == ["output"] and waited == []        # the output disk has room: carry on
+
+
+def test_a_download_still_waits_on_staging(monkeypatch):
+    calls = {"n": 0}
+
+    def gate(role=""):
+        calls["n"] += 1
+        return "staging is full" if calls["n"] < 3 else ""
+
+    monkeypatch.setattr(space, "GATE", gate)
+    slept = []
+    space.wait_for_room(step=lambda *_: None, sleep=lambda _: slept.append(1), role="downloads")
+    assert len(slept) == 2                             # waited, then went on by itself

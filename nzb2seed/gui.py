@@ -10,6 +10,7 @@ import dataclasses
 import hmac
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -33,9 +34,14 @@ from . import retention as retention_mod
 from . import space as space_mod
 from . import worth as worth_mod
 from . import rules as rules_mod
+from . import events as events_mod
+from . import torrent as torrent_mod
+from . import matching
+from . import pipeline as pipeline_mod
 from . import lookup as lookup_mod
 from .torrent import TorrentError, parse as parse_torrent
-from .pipeline import (Abort, Options, execute_assemble, execute_run, group_selection, pair,
+from .pathmap import map_path
+from .pipeline import (Abort, Incomplete, Options, execute_assemble, execute_run, group_selection, pair,
                        previous_downloads, search)
 
 MAX_BODY = 64 << 20
@@ -44,6 +50,7 @@ MAX_LINES = 20000
 
 # ---------------------------------------------------------------- jobs
 
+RESUMING = "the GUI stopped while this build was running; resuming"
 INTERRUPTED = ("the GUI stopped while this build was running; build it again - files it "
                "already placed are reused and a stopped torrent stays stopped")
 
@@ -64,7 +71,10 @@ class Job:
         self.lock = threading.Lock()
         self.on_change = on_change or (lambda urgent=False: None)
         self.question: dict | None = None     # {"prompt", "choices"} while waiting for the person
+        self.infohash: str = ""               # the torrent it builds, once known
         self.repeat: dict | None = None       # the request that started it, so it can be run again
+        self.extra: dict | None = None        # how far a failed build got (see pipeline.Incomplete)
+        self.retried_as: int | None = None    # the job that tried this one again, if any
         self._answer: int | None = None
         self._answered = threading.Event()
 
@@ -121,13 +131,15 @@ class Job:
         return {"id": self.id, "title": self.title, "kind": self.kind, "status": self.status,
                 "result": self.result, "started": self.started, "ended": self.ended,
                 "progress": self.progress, "question": self.question,
-                "can_retry": bool(self.repeat),
+                "can_retry": bool(self.repeat) and not self.retried_as,
+                "retried_as": self.retried_as, "extra": self.extra,
                 "steps": [x["t"] for x in self.lines if x["k"] == "step"]}
 
     def to_dict(self) -> dict:
         with self.lock:
             return {**self.summary(), "lines": list(self.lines), "pieces": self.pieces,
-                    "repeat": self.repeat}
+                    "repeat": self.repeat, "extra": self.extra, "retried_as": self.retried_as,
+                    "infohash": self.infohash}
 
     @classmethod
     def from_dict(cls, d: dict, on_change) -> "Job":
@@ -137,6 +149,9 @@ class Job:
         job.progress, job.started, job.ended = d.get("progress", ""), d.get("started", 0), d.get("ended")
         job.question = None
         job.repeat = d.get("repeat")
+        job.extra = d.get("extra")
+        job.retried_as = d.get("retried_as")
+        job.infohash = d.get("infohash") or ""
         if job.status in ("running", "waiting"):     # its thread died with the previous GUI process
             job.status, job.result, job.progress = "interrupted", INTERRUPTED, ""
             job.ended = job.ended or time.time()
@@ -151,6 +166,7 @@ class JobStore:
     def __init__(self, path: str, jobs_fn):
         self.path = path
         self.jobs_fn = jobs_fn
+        self.on_change = None                 # told of every change (the pages' live feed)
         self.dirty = threading.Event()
         self.write_lock = threading.Lock()
         threading.Thread(target=self._loop, name="job-store", daemon=True).start()
@@ -166,6 +182,8 @@ class JobStore:
             return []
 
     def changed(self, urgent: bool = False):
+        if self.on_change:
+            self.on_change()
         if urgent:
             try:
                 self.flush()
@@ -219,6 +237,10 @@ class _Sink:
     def cancelled(self):
         return self.job.cancelled()
 
+    def torrent(self, infohash):
+        self.job.infohash = infohash
+        self.job.on_change()
+
 
 class App:
     def __init__(self, config_path: str | None):
@@ -228,14 +250,37 @@ class App:
         episodes_mod.configure_cache(self.cfg.path)
         self.jobs: dict[int, Job] = {}
         self.lock = threading.Lock()
+        self._cleaning = threading.Lock()        # one download clean-up at a time
+        self.events = events_mod.Events()
+        self._clean_now = threading.Event()      # set when a build ends
         self.store = JobStore(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "jobs.json"),
                               lambda: list(self.jobs.values()))
+        self.store.on_change = lambda: self.events.publish("jobs")
         for d in self.store.load():
             job = Job.from_dict(d, self.store.changed)
             self.jobs[job.id] = job
         if self.jobs:
             self.store.flush()           # persist any "interrupted" marks right away
         self._next = max(self.jobs, default=0) + 1
+
+    # Builds queue behind this. Ticking twenty seasons starts twenty builds otherwise, and
+    # each one holds a finished download on the staging disk while it waits its turn to
+    # place files - which fills that disk with work nothing can finish.
+    build_slots = threading.Semaphore(2)
+    build_slots_size = 2
+
+    def build_slot(self):
+        """Resize the queue if the setting changed, and hand out a slot."""
+        want = max(1, int(getattr(self.cfg, "build_parallel", 2) or 2))
+        with self.lock:
+            while self.build_slots_size < want:
+                self.build_slots.release()
+                self.build_slots_size += 1
+            while self.build_slots_size > want:
+                if not self.build_slots.acquire(blocking=False):
+                    break                      # all in use; it shrinks as they finish
+                self.build_slots_size -= 1
+        return self.build_slots
 
     def active_build(self, title: str) -> Job | None:
         """A build of this torrent that has not ended yet (a second one would fight it)."""
@@ -264,6 +309,7 @@ class App:
         """The automatic-build watcher (idle while switched off on the Automatic tab)."""
         self.inbox = inbox_mod.Inbox(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
                                                         "inbox.json"))
+        self.inbox.state.on_save = lambda: self.events.publish("auto")
 
     def demand_stats(self) -> "worth_mod.Stats":
         return worth_mod.Stats(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
@@ -289,11 +335,27 @@ class App:
         The gate a running build waits on is set here too: while the guard is holding
         downloads back, a build stops before its next big write instead of filling the
         disk it is already short of."""
-        def gate() -> str:
+        def gate(role: str = "") -> str:
+            """Why a build waiting to write to ``role``'s disk cannot go on yet ("" = it can).
+            With no role, any full disk holds it."""
             cfg = self.cfg
-            if not space_mod.limits_set(cfg) or not self.guard().holding():
+            held = self.guard()
+            if not space_mod.limits_set(cfg) or not held.holding():
                 return ""
-            return space_mod.check(cfg, self._sab(), resuming=True)["why"] or "the disk is full"
+            sab = self._sab()
+            now = space_mod.check(cfg, sab, resuming=True)
+            if role:
+                mine = [d for d in now["disks"] if d["role"] == role and d["why"]]
+                if not mine:
+                    return ""                       # a different disk is full, not this one
+                return "; ".join(f"{d['path']}: {d['why']}" for d in mine)
+            if not now["low"]:
+                # there is room again: let the queue go now rather than at the next sweep,
+                # which could be five minutes away, and never claim "the disk is full"
+                # about a disk that has room
+                held.run(cfg, sab, self._qbit(), log=lambda t: print(f"[space] {t}", flush=True))
+                return ""
+            return now["why"]
 
         space_mod.GATE = gate
 
@@ -309,8 +371,163 @@ class App:
                     print(f"space check failed: {e}", flush=True)
         threading.Thread(target=loop, name="space", daemon=True).start()
 
+    @staticmethod
+    def tracker_key(name: str) -> str:
+        """"sometracker (API)" and "Sometracker" are the same tracker."""
+        n = (name or "").strip().lower()
+        return n[:-6].strip() if n.endswith("(api)") else n
+
+    def always_adds(self, tracker: str) -> bool:
+        want = self.tracker_key(tracker)
+        return bool(want) and any(self.tracker_key(t) == want
+                                  for t in (self.cfg.nearly_auto_trackers or []))
+
+    def nearly_limit_text(self) -> str:
+        return f"{float(self.cfg.nearly_complete_percent or 5):g}% or {float(self.cfg.nearly_complete_mb or 200):g} MB"
+
+    def short_enough(self, fraction_missing: float, bytes_missing: int | None) -> bool:
+        """Is this little enough to fetch over BitTorrent: less than the percentage AND less
+        than the megabytes - whichever limit comes first. Bytes unknown: the percentage only."""
+        if fraction_missing * 100 >= float(self.cfg.nearly_complete_percent or 5):
+            return False
+        return bytes_missing is None or bytes_missing < float(self.cfg.nearly_complete_mb or 200) * 1024 ** 2
+
+    def nearly_enough(self, extra: dict | None) -> bool:
+        if not extra or extra.get("have") is None:
+            return False
+        if extra.get("seeders") == 0:
+            return False            # nobody to download the rest from: it could never finish
+        return self.short_enough(1 - float(extra["have"]), extra.get("short"))
+
+    def finish_in_client(self, job: "Job", why: str = "", override: bool = False) -> "Job":
+        """Hand a nearly-built torrent to qBittorrent to download the rest - the one place
+        nzb2seed starts a torrent that is not 100% complete, and only because the person
+        chose it, for this build or for its tracker. ``override``: they chose it knowing it
+        is outside the limit (or that no seeders were reported), so the limit is not checked."""
+        x = dict(job.extra or {})
+
+        def run(cfg):
+            qb = self._qbit()
+            if qb is None:
+                raise Abort("no qBittorrent is set up")
+            if why:
+                report.info(why)
+            h = x["infohash"]
+            if not qb.info(h):
+                report.step("Adding it to qBittorrent")
+                with open(x["torrent_path"], "rb") as fh:
+                    qb.add_stopped(fh.read(), os.path.basename(x["torrent_path"]), x["save_path"],
+                                   cfg.qbit_category, ",".join(cfg.qbit_tags))
+                for _ in range(40):
+                    if qb.info(h):
+                        break
+                    time.sleep(0.5)
+                qb.wait_idle(h)
+                report.step("Checking what is already there")
+                qb.recheck(h)
+                qb.wait_idle(h, min_wait=5)
+            frac = (qb.info(h) or {}).get("progress", 0)
+            have = pipeline_mod.exact_pct(frac)
+            rest = pipeline_mod.exact_pct(1 - frac) if frac >= 1 else \
+                f"{math.ceil((1 - frac) * 1000000) / 10000:.4f}%"
+            # the recheck has the last word: data that went bad since the build (or was never
+            # as good as it looked) must not turn "a few KB over BitTorrent" into a download
+            # the tracker counts towards a hit-and-run - so it stays stopped
+            info = qb.info(h) or {}
+            total = info.get("total_size") or info.get("size")
+            short = round(total * (1 - frac)) if total else None
+            if not override and not self.short_enough(1 - frac, short):
+                job.extra = {**(job.extra or {}), "have": frac, "in_client": True, "short": short}
+                self.store.changed(urgent=True)
+                raise Abort(f"qBittorrent's check found only {have} here, so {rest} would have to "
+                            f"be downloaded - at or over your limit of {self.nearly_limit_text()}. Not "
+                            "started: the torrent stays stopped in qBittorrent (nothing deleted)")
+            report.info(f"{have} is already here from Usenet; downloading the other "
+                        f"{rest} over BitTorrent")
+            qb.start(h)
+            job.extra = {**(job.extra or {}), "added": True}
+            self.store.changed(urgent=True)
+            report.info("its Usenet downloads are cleared once the torrent is complete")
+            return {"result": f"in qBittorrent, downloading the last {rest}"}
+
+        return self.start_job(f"Finish in qBittorrent: {job.title}", "client", run)
+
+    # ------------------------------------------------ clearing what builds leave behind
+    def clean_downloads(self, log=print) -> tuple[int, int]:
+        """Clear the Usenet downloads of torrents already complete in qBittorrent, and the
+        check/peek folders killed builds left (see pipeline.clean_seeded_downloads)."""
+        qb, sab = self._qbit(), self._sab()
+        if qb is None or sab is None:
+            return 0, 0
+        with self._cleaning:                     # one clean-up at a time
+            n, freed = pipeline_mod.clean_seeded_downloads(self.cfg, sab, qb, log=log)
+            keep, live, names = self.downloads_in_use()
+            m, also = pipeline_mod.clean_unused_downloads(self.cfg, sab, qb, keep, live, names, log=log)
+            _, more = pipeline_mod.remove_stray_peeks(self.cfg, sab)
+            return n + m, freed + also + more
+
+    def downloads_in_use(self) -> tuple[set[str], set[str], set[str]]:
+        """What still needs Usenet downloads: the torrents being built or queued to be (live),
+        those a job on the list can still be retried for (keep: failed, cancelled or
+        interrupted - not abandoned, and not already tried again), and the releases of both
+        (names, see pipeline.release_key: for old records, which may name another torrent).
+        A job taken off the list needs nothing - even if the Automatic tab could try it again."""
+        keep, live, names = set(), set(), set()
+        name = lambda t: t[len("auto: "):] if t.startswith("auto: ") else t
+        for j in list(self.jobs.values()):
+            h = self.torrent_of(j)
+            if j.status in ("running", "waiting"):
+                if h:
+                    live.add(h)
+                names.add(pipeline_mod.release_key(name(j.title)))
+            elif j.status in ("failed", "cancelled", "interrupted") and not (j.extra or {}).get("abandoned") \
+                    and not j.retried_as:
+                if h:
+                    keep.add(h)
+                names.add(pipeline_mod.release_key(name(j.title)))
+        box = getattr(self, "inbox", None)
+        if box is not None:
+            for h, it in box.state.items.items():
+                if it.get("status") in ("queued", "waiting", "building"):
+                    live.add(h)                  # automatic torrents waiting their turn
+                    names.add(pipeline_mod.release_key(it.get("name") or ""))
+        return keep, live, names
+
+    def start_cleaner(self):
+        """After every build, and hourly: downloads of torrents that are done are cleared."""
+        def loop():
+            while True:
+                try:
+                    self.clean_downloads()
+                except Exception as e:           # never let the cleaner die
+                    print(f"download clean-up: {type(e).__name__}: {e}", flush=True)
+                self._clean_now.wait(3600)
+                self._clean_now.clear()
+        threading.Thread(target=loop, name="cleaner", daemon=True).start()
+
     # what the request being served asked for, so a job can be started again later
     request = threading.local()
+
+    def start_sab_category(self):
+        """Give nzb2seed its own SABnzbd category - its own download folder, +Repair, never
+        +Delete - so its downloads are not mixed in with other apps'. Checked at start-up
+        (in the background, retrying while SABnzbd is not answering); an existing category
+        of that name is left as it is."""
+        def loop():
+            while True:
+                cfg = self.cfg
+                name = (cfg.sab_category or "").strip()
+                if not name or name == "*" or not cfg.sab_url:
+                    return
+                try:
+                    if SABnzbd(cfg.sab_url, cfg.sab_key).ensure_category(name, name):
+                        print(f"created SABnzbd category {name!r}: new downloads go to its own "
+                              f"folder ({name}), +Repair", flush=True)
+                    return
+                except (ApiError, OSError) as e:
+                    print(f"SABnzbd category check: {e} - trying again in a minute", flush=True)
+                    time.sleep(60)
+        threading.Thread(target=loop, name="sab-category", daemon=True).start()
 
     def start_retention(self):
         """Hourly sweep that removes builds past their retention age (idle while off)."""
@@ -346,9 +563,54 @@ class App:
         with self.lock:
             job = Job(self._next, title, kind, self.store.changed)
             job.repeat = getattr(self.request, "asked", None)     # what to replay on a retry
+            again = getattr(self.request, "retrying", None)
+            if again is not None:
+                again.retried_as = job.id                          # that one is tried once
+                self.request.retrying = None
             self._next += 1
             self.jobs[job.id] = job
         self.store.changed(urgent=True)
+        self._launch(job, fn)
+        return job
+
+    def torrent_of(self, job: "Job") -> str:
+        """The infohash of the torrent a job built: recorded by the build, or by a build
+        that stopped nearly complete, or read from the .torrent saved under its name."""
+        h = job.infohash or (job.extra or {}).get("infohash") or ""
+        if h or job.kind not in ("build", "auto"):
+            return h
+        name = job.title[len("auto: "):] if job.title.startswith("auto: ") else job.title
+        safe = re.sub(r'[<>:"/\\|?*]', "_", name)
+        try:
+            with open(os.path.join(self.cfg.torrent_dir, f"{safe}.torrent"), "rb") as fh:
+                return torrent_mod.parse(fh.read()).infohash
+        except (OSError, ValueError, torrent_mod.TorrentError):
+            return ""
+
+    def summary(self, job: "Job") -> dict:
+        """job.summary(), plus what only the app knows: an automatic job is tried again
+        through the Automatic tab's queue, not by replaying a request."""
+        s = job.summary()
+        box = getattr(self, "inbox", None)
+        if job.kind == "auto":
+            s["can_retry"] = bool(box and not job.retried_as and box.retryable_job(job.id))
+        return s
+
+    def resume_job(self, job: "Job", fn) -> "Job":
+        """Carry on a job the last restart interrupted, as the same job: its list entry and
+        log continue, instead of an "interrupted" one left behind next to a new copy."""
+        with self.lock:
+            if job.lines and job.lines[-1].get("t") == INTERRUPTED:
+                job.lines[-1] = {"k": "warn", "t": RESUMING}
+            else:
+                job.lines.append({"k": "warn", "t": RESUMING})
+            job.status, job.result, job.ended, job.progress = "running", "", None, ""
+            job.cancel = threading.Event()
+        self.store.changed(urgent=True)
+        self._launch(job, fn)
+        return job
+
+    def _launch(self, job: "Job", fn):
         cfg = self.cfg
 
         def run():
@@ -360,6 +622,17 @@ class App:
             except report.Cancelled:
                 job.status, job.result = "cancelled", "cancelled"
                 report.warn("cancelled - nothing further was changed; a stopped torrent stays stopped")
+            except Incomplete as e:
+                # nearly there: keep everything, and say how near
+                job.status, job.result, job.extra = "failed", str(e), e.details()
+                report.warn(str(e))
+                if self.nearly_enough(job.extra) and self.always_adds(e.tracker):
+                    miss = math.ceil((1 - e.have) * 1000000) / 10000     # never rounded to 0
+                    report.info(f"{e.tracker} is set to take builds this close, so it goes to "
+                                f"qBittorrent to download the missing {miss:.4f}%")
+                    job.extra = {**job.extra, "auto": True}
+                    self.finish_in_client(job, why=f"{e.tracker} is set to always add builds "
+                                                   f"missing less than {self.nearly_limit_text()}")
             except (Abort, ApiError, ValueError, OSError) as e:
                 job.status, job.result = "failed", str(e)
                 report.warn(str(e))
@@ -370,8 +643,8 @@ class App:
                 job.progress = ""
                 job.ended = time.time()
                 self.store.changed(urgent=True)
+                self._clean_now.set()            # a build ended: clear what is done
         threading.Thread(target=run, name=f"job-{job.id}", daemon=True).start()
-        return job
 
 
 # ---------------------------------------------------------------- HTTP
@@ -474,7 +747,24 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             return login_override
         return app.cfg.gui_username or "", app.cfg.gui_password or ""
 
-    page = resources.files("nzb2seed").joinpath("web/index.html").read_bytes()
+    web = resources.files("nzb2seed").joinpath("web")
+    page = web.joinpath("index.html").read_bytes()
+    # the page's own files: only these kinds, only from these folders, never a path that
+    # climbs out of them
+    kinds = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+             ".svg": "image/svg+xml"}
+
+    def static(path: str) -> tuple[bytes, str] | None:
+        parts = path.strip("/").split("/")
+        if parts[0] not in ("css", "js", "vendor") and path != "/favicon.svg":
+            return None
+        if any(p in ("", ".", "..") or "\\" in p or ":" in p for p in parts):
+            return None
+        ext = os.path.splitext(parts[-1])[1].lower()
+        if ext not in kinds:
+            return None
+        f = web.joinpath(*parts)
+        return (f.read_bytes(), kinds[ext]) if f.is_file() else None
 
     class H(BaseHTTPRequestHandler):
         server_version = "nzb2seed"
@@ -492,6 +782,32 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             self.send_header("X-Frame-Options", "DENY")
             self.end_headers()
             self.wfile.write(body)
+
+        def events(self):
+            """The live feed: an event each time something the page shows changed, named
+            by topic. A comment every 20 seconds keeps the connection open through proxies."""
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            seen = app.events.version
+            try:
+                self.wfile.write(b": connected\n\n")
+                self.wfile.flush()
+                while True:
+                    version, topics = app.events.wait(seen, 20)
+                    if version == seen:
+                        self.wfile.write(b": still here\n\n")
+                    else:
+                        time.sleep(0.3)                  # a burst of changes goes as one
+                        version, topics = app.events.wait(seen, 0)
+                        seen = version
+                        data = json.dumps({"topics": topics})
+                        self.wfile.write(f"event: change\ndata: {data}\n\n".encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+                return                                   # the page went away
 
         def _json(self, obj, code=200):
             self._send(code, json.dumps(obj).encode(), "application/json")
@@ -551,6 +867,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             path = urlsplit(self.path).path
             if path in ("/", "/index.html"):
                 return self._send(200, page, "text/html; charset=utf-8")
+            if path == "/api/events":
+                return self.events()
+            found = static(path)
+            if found:
+                return self._send(200, *found)
             if path == "/api/settings":
                 return self._json(self.settings_payload())
             if path == "/api/demand":
@@ -588,7 +909,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self.season_file(path)
             if path == "/api/jobs":
                 with app.lock:
-                    jobs = [j.summary() for j in sorted(app.jobs.values(), key=lambda j: -j.id)]
+                    jobs = [app.summary(j) for j in sorted(app.jobs.values(), key=lambda j: -j.id)]
                 return self._json(jobs)
             if path.startswith("/api/jobs/"):
                 job = app.jobs.get(int(path.rsplit("/", 1)[1]) if path.rsplit("/", 1)[1].isdigit() else -1)
@@ -598,7 +919,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 since = int(q.split("since=")[1].split("&")[0]) if "since=" in q else 0
                 with job.lock:
                     lines = job.lines[since:]
-                return self._json({**job.summary(), "lines": lines, "next": since + len(lines),
+                return self._json({**app.summary(job), "lines": lines, "next": since + len(lines),
                                    "pieces": job.pieces})
             self._err("not found", 404)
 
@@ -609,15 +930,59 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             if body is None:
                 return
             path = urlsplit(self.path).path
+            if path == "/api/jobs/other_trackers":
+                return self.other_trackers(body)
+            if path == "/api/jobs/add_to_client":
+                return self.add_to_client(body)
+            if path == "/api/jobs/remove":
+                # take finished jobs off the list; one still running (or waiting for an
+                # answer) is never removed. Only the list entry goes - unless its Usenet
+                # downloads are to be deleted too, which only happens where nothing in
+                # qBittorrent depends on them. An automatic torrent keeps its Automatic-tab entry
+                ids = {int(i) for i in body.get("ids") or [] if str(i).lstrip("-").isdigit()}
+                gone = [i for i in ids if i in app.jobs
+                        and app.jobs[i].status in ("done", "failed", "cancelled", "interrupted")]
+                out = {}
+                if body.get("delete_downloads"):
+                    hashes = {h for h in (app.torrent_of(app.jobs[i]) for i in gone) if h}
+                    busy = {app.torrent_of(j) for j in app.jobs.values() if j.status in ("running", "waiting")}
+                    try:
+                        out = pipeline_mod.delete_downloads_of(app.cfg, app._sab(), app._qbit(), hashes - busy)
+                    except (ApiError, Abort, OSError) as e:
+                        return self._err(f"nothing was removed: {e}")
+                with app.lock:
+                    for i in gone:
+                        app.jobs.pop(i, None)
+                app.store.changed(urgent=True)
+                return self._json({"removed": len(gone), "kept": len(ids) - len(gone), **out})
+            if path == "/api/jobs/abandon":
+                return self.abandon(body)
             if path == "/api/jobs/retry":
                 # replay the request that made the job: the same call, made again
                 job = app.jobs.get(int(body.get("id", -1)) if str(body.get("id", "")).lstrip("-").isdigit() else -1)
                 if not job:
                     return self._err("no such job", 404)
+                if job.kind == "auto":
+                    # the Automatic tab's own Try again: back into its queue, as a new job
+                    box = getattr(app, "inbox", None)
+                    h = box.retryable_job(job.id) if box else None
+                    if job.retried_as or not h:
+                        return self._err("it was already tried again, or is still under way", 409)
+                    box.retry(h)
+                    job.retried_as = box.running.get(h) or box.state.items[h].get("job")
+                    app.store.changed(urgent=True)
+                    return self._json({"id": job.retried_as})
                 if not job.repeat:
                     return self._err("this job was not started from a request that can be repeated")
+                if job.retried_as:
+                    # a second press, or a tap that landed before the list caught up
+                    return self._err(f"it was already tried again, as job {job.retried_as}", 409)
                 path, body = job.repeat.get("path") or "", dict(job.repeat.get("body") or {})
+                app.request.retrying = job
+                job.retried_as = -1          # taken at once, so a second press is refused
             app.request.asked = {"path": path, "body": body}
+            if urlsplit(self.path).path != "/api/jobs/retry":
+                app.request.retrying = None
             try:
                 if path == "/api/settings":
                     return self.save_settings(body)
@@ -705,6 +1070,13 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._err(str(e), 502 if isinstance(e, ApiError) else 400)
             except Exception as e:
                 return self._err(f"{type(e).__name__}: {e}", 500)
+            finally:
+                # a retry that did not start a job - refused, or nothing to replay into -
+                # leaves the job free to be tried again rather than locking it
+                again = getattr(app.request, "retrying", None)
+                if again is not None and again.retried_as == -1:
+                    again.retried_as = None
+                app.request.retrying = None
             self._err("not found", 404)
 
         # -- handlers
@@ -813,7 +1185,161 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                        "retry_minutes": ("auto_retry_minutes", float), "start": ("auto_start", bool),
                        "retry_first_minutes": ("auto_retry_first_minutes", float),
                        "parallel": ("auto_parallel", int), "searches_per_hour": ("auto_searches_per_hour", int),
+                       "queue_max": ("auto_queue_max", int), "queue_keep_older": ("auto_queue_keep_older", bool),
                        "autobrr_url": ("autobrr_url", str), "autobrr_key": ("autobrr_key", str)}
+
+        # ------------------------------------------------ a build that nearly made it
+        def _nearly(self, body):
+            try:
+                job = app.jobs.get(int(body.get("id")))
+            except (TypeError, ValueError):
+                job = None
+            if not job or not job.extra:
+                self._err("that build did not stop part-way, so there is nothing to finish", 404)
+                return None
+            return job
+
+        def other_trackers(self, body):
+            """The same release on your other trackers, for a build that stopped nearly
+            complete on one you have not pre-approved: building it from one that is lets the
+            missing bit come over BitTorrent without asking - and the Usenet downloads already
+            made are reused. Prowlarr is asked; no tracker is contacted by nzb2seed."""
+            job = self._nearly(body)
+            if job is None:
+                return
+            x = job.extra
+            name = job.title[len("auto: "):] if job.title.startswith("auto: ") else job.title
+            size = None
+            try:
+                with open(x.get("torrent_path") or "", "rb") as fh:
+                    size = torrent_mod.parse(fh.read()).total_size
+            except (OSError, ValueError, torrent_mod.TorrentError):
+                pass
+            try:
+                torrents, _ = search(app.cfg, name)
+            except (ApiError, OSError) as e:
+                return self._err(f"Prowlarr could not be searched: {e}", 502)
+            own, want = app.tracker_key(x.get("tracker", "")), matching.norm(name)
+            out = [{**dataclasses.asdict(r), "approved": app.always_adds(r.indexer),
+                    "same_size": size is not None and r.size == size}
+                   for r in torrents
+                   if matching.norm(r.title) == want and app.tracker_key(r.indexer) != own]
+            out.sort(key=lambda r: (not r["approved"], not r["same_size"], -(r["seeders"] or 0)))
+            return self._json({"name": name, "size": size, "releases": out})
+
+        def add_to_client(self, body):
+            """Hand a nearly-built torrent to qBittorrent to download the rest. Only ever on
+            the person's say-so: this is the one place nzb2seed starts a torrent that is
+            not 100% complete, because they have chosen to download the missing part."""
+            job = self._nearly(body)
+            if job is None:
+                return
+            x = dict(job.extra)
+            if x.get("abandoned"):
+                return self._err("that build was abandoned and its files deleted")
+            if x.get("added"):
+                return self._err("it is already in qBittorrent")
+            override = bool(body.get("override"))
+            if not override and x.get("seeders") == 0:
+                return self._err("Prowlarr reported no seeders for it, so the missing part could "
+                                 "never come over BitTorrent")
+            if not override and not app.nearly_enough(x):
+                return self._err(f"it is missing more than your limit of {app.nearly_limit_text()} - "
+                                 "use Override to add it anyway")
+            if override and body.get("always"):
+                return self._err("an override is for this build only")
+            if body.get("always") and x.get("tracker"):
+                # from now on, every build from this tracker that stops this close is
+                # handed over without asking
+                cfg = app.cfg
+                if not app.always_adds(x["tracker"]):
+                    trackers = list(cfg.nearly_auto_trackers or []) + [x["tracker"]]
+                    app.cfg = dataclasses.replace(cfg, nearly_auto_trackers=trackers)
+                    config_mod.save(app.cfg)
+            nj = app.finish_in_client(job, why="added by override, outside the limit" if override else "",
+                                      override=override)
+            also = []
+            if body.get("always") and x.get("tracker"):
+                # "always" covers the ones already waiting from that tracker too, not only
+                # builds that stop short from now on
+                for other in list(app.jobs.values()):
+                    ox = other.extra or {}
+                    if (other is not job and other.status in ("failed", "cancelled", "interrupted")
+                            and app.tracker_key(ox.get("tracker", "")) == app.tracker_key(x["tracker"])
+                            and not ox.get("added") and not ox.get("abandoned")
+                            and app.nearly_enough(ox)):
+                        why = f"{x['tracker']} is set to always add builds this close"
+                        also.append(app.finish_in_client(other, why).id)
+            return self._json({"id": nj.id, "also": also})
+
+        def abandon(self, body):
+            """Delete what a failed build left: the files it placed, its downloads, and its
+            torrent if nzb2seed added it and it is not running. Only nzb2seed's own files."""
+            job = self._nearly(body)
+            if job is None:
+                return
+            x = job.extra
+            h = x["infohash"]
+            done, kept = [], []
+            if x.get("added"):
+                return self._err("it was added to qBittorrent, which is using its files - "
+                                 "remove it there if you no longer want it")
+            later = app.jobs.get(job.retried_as or -1)
+            while later is not None and later.retried_as:
+                later = app.jobs.get(later.retried_as)
+            if later is not None and later.status == "done":
+                return self._err(f"it was tried again and job {later.id} built it - its files "
+                                 "are that build's now")
+            qb = app._qbit()
+            there = qb.info(h) if qb else None
+            if there and there.get("progress", 0) >= 1:
+                return self._err("the torrent is complete in qBittorrent - nothing to abandon")
+            if there:
+                if there.get("state") not in ("stoppedDL", "pausedDL", "stoppedUP", "pausedUP",
+                                              "error", "missingFiles"):
+                    return self._err("it is running in qBittorrent - stop or remove it there first, "
+                                     "so a download is not thrown away")
+                qb.remove(h)                          # never with its files: they go below
+                done.append("removed it from qBittorrent")
+            owned = pipeline_mod.owned_record(app.cfg, type("T", (), {"infohash": h})())
+            gone = 0
+            for f in sorted(owned.files):
+                try:
+                    if os.path.isfile(f):
+                        os.remove(f)
+                        gone += 1
+                except OSError:
+                    kept.append(f)
+            for d in sorted(owned.dirs, key=len, reverse=True):
+                try:
+                    if os.path.isdir(d) and not os.listdir(d):
+                        os.rmdir(d)
+                except OSError:
+                    pass
+            try:
+                os.remove(owned.path)
+            except OSError:
+                pass
+            done.append(f"deleted the {gone} file(s) it placed")
+            # its Usenet downloads - unless another build is running, which may be using one
+            busy = [j for j in app.jobs.values() if j.status in ("running", "waiting") and j is not job]
+            if busy:
+                kept.append("its Usenet downloads (other builds are running and may be using them)")
+            else:
+                sab = app._sab()
+                n = 0
+                for j in pipeline_mod.ledger_for(app.cfg).all():
+                    if j.get("torrent") == h and sab is not None:
+                        try:
+                            if pipeline_mod.remove_download(app.cfg, sab, j["nzo"]):
+                                n += 1
+                        except (ApiError, OSError) as e:
+                            kept.append(f"{j.get('title') or j['nzo']} ({e})")
+                done.append(f"deleted {n} Usenet download(s)")
+            job.extra = {**x, "abandoned": True}
+            job.result = "abandoned: " + "; ".join(done) + (f" (kept {', '.join(kept)})" if kept else "")
+            app.store.changed(urgent=True)
+            return self._json({"result": job.result})
 
         def _auto_state(self):
             cfg = app.cfg
@@ -928,6 +1454,8 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             if what == "forget":
                 app.inbox.forget(str(body.get("infohash")))
                 return self._auto_state()
+            if what == "clear":
+                return dict(self._auto_state(), stopped=app.inbox.stop_pending())
             raise ValueError(f"unknown request {what!r}")
 
         def list_folders(self, body):
@@ -1015,8 +1543,19 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             if busy:
                 return self._err(f"{torrent.title} is already being built (job {busy.id})", 409)
             data = uploaded_data(app.cfg, torrent)   # None: download it through Prowlarr
-            job = app.start_job(torrent.title, "build",
-                                lambda cfg: execute_run(cfg, opts, torrent, groups, torrent_data=data))
+            def run(cfg):
+                slots = app.build_slot()
+                if not slots.acquire(blocking=False):
+                    report.step("Waiting for a build slot "
+                                f"({max(1, int(getattr(cfg, 'build_parallel', 2) or 2))} build(s) run at once)")
+                    while not slots.acquire(timeout=5):
+                        report.check_cancel()
+                try:
+                    return execute_run(cfg, opts, torrent, groups, torrent_data=data)
+                finally:
+                    slots.release()
+
+            job = app.start_job(torrent.title, "build", run)
             return self._json({"id": job.id})
 
         def assemble(self, body):
@@ -1097,6 +1636,8 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     app.start_inbox()
     app.start_retention()
     app.start_space_guard()
+    app.start_sab_category()
+    app.start_cleaner()
     override = (username or app.cfg.gui_username or config_mod.DEFAULT_GUI_USER, password) \
         if password is not None else None
     httpd = ThreadingHTTPServer((host, port), make_handler(app, override, allowed))

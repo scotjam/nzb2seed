@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Test-only: runs the classic page and the new app side by side in jsdom (see tests/test_ui.py). Never shipped.",
+  "devDependencies": { "jsdom": "26.1.0" }
+}

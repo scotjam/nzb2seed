@@ -111,6 +111,37 @@ def first_volume(files: list[NzbFile]) -> str | None:
     return numbered[0] if numbered else None
 
 
+PEEK_SEGMENTS = 2   # Usenet articles are ~700 KB each: two is plenty for the headers
+
+
+def trim_head(data: bytes, wanted: str, segments: int = PEEK_SEGMENTS) -> bytes | None:
+    """The NZB with only the first ``segments`` articles of the file named ``wanted``.
+
+    A RAR set names and sizes what it holds in the headers at the very start of its first
+    volume, so reading those means fetching the first article or two - about a megabyte -
+    rather than a whole volume, which on a large release is 500 MB or more. The file
+    SABnzbd writes from them is a truncated volume; the headers are all in it."""
+    root = ET.fromstring(data)
+    ns = root.tag[:root.tag.index("}") + 1] if root.tag.startswith("{") else ""
+    if ns:
+        ET.register_namespace("", ns[1:-1])
+    keep = 0
+    for f in list(root):
+        if f.tag != f"{ns}file":
+            continue
+        if wanted.lower() not in f.get("subject", "").lower():
+            root.remove(f)
+            continue
+        keep += 1
+        for segs in f.iter(f"{ns}segments"):
+            ordered = sorted(list(segs), key=lambda x: int(x.get("number", 0) or 0))
+            for extra in ordered[segments:]:
+                segs.remove(extra)
+    if not keep:
+        return None
+    return b'<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="utf-8")
+
+
 def score(files: list[NzbFile], torrent: Torrent, part: list | None = None) -> Score:
     """How likely this post holds ``part`` of the torrent (default: all of it)."""
     part = part if part is not None else torrent.real_files

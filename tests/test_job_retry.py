@@ -63,3 +63,129 @@ def test_the_replayed_request_is_remembered_again(server):  # noqa: F811
     job.repeat = {"path": "/api/settings", "body": {"settings": settings}}
     call(url + "/api/jobs/retry", *AUTH, body={"id": job.id})
     assert job.repeat["path"] == "/api/settings"        # the original is left as it was
+
+
+BUILD = {"torrent": {"title": "Some.Release.2019.1080p-GRP", "protocol": "torrent",
+                     "indexer": "ATracker", "indexer_id": 1, "size": 1, "guid": "g-1",
+                     "download_url": "", "info_url": "", "publish_date": "", "grabs": 0,
+                     "seeders": 0, "files": 1}, "nzbs": [], "options": {}}
+
+
+def a_failed_build(app, monkeypatch):
+    """A build that failed, whose request replays into a build that holds until told."""
+    import threading
+    from nzb2seed import gui
+    gate = threading.Event()
+    monkeypatch.setattr(gui, "execute_run", lambda *a, **k: gate.wait(5) and {"result": "done"})
+    job = app.start_job("Some.Release.2019.1080p-GRP", "build", lambda cfg: {"result": "done"})
+    job.status = "failed"
+    job.repeat = {"path": "/api/build", "body": BUILD}
+    return job, gate
+
+
+def test_a_job_is_tried_again_only_once(server, monkeypatch):  # noqa: F811
+    """Its Try again goes once pressed, and a second press - or a double tap that lands
+    before the list catches up - is refused rather than starting it twice."""
+    app, url = server
+    job, gate = a_failed_build(app, monkeypatch)
+    try:
+        status, r = call(url + "/api/jobs/retry", *AUTH, body={"id": job.id})
+        assert status == 200 and job.retried_as == r["id"]           # linked to the new job
+        assert call(url + "/api/jobs/retry", *AUTH, body={"id": job.id})[0] == 409
+        row = [x for x in call(url + "/api/jobs", *AUTH)[1] if x["id"] == job.id][0]
+        assert row["can_retry"] is False and row["retried_as"] == r["id"]
+    finally:
+        gate.set()
+
+
+def test_a_retry_that_starts_nothing_leaves_the_job_free(server):  # noqa: F811
+    """If the replay is refused, the job has not been tried again - it keeps its button."""
+    app, url = server
+    job = app.start_job("x", "build", lambda cfg: {"result": "done"})
+    job.status = "failed"
+    job.repeat = {"path": "/api/build", "body": {"torrent": {"title": ""}}}    # refused
+    call(url + "/api/jobs/retry", *AUTH, body={"id": job.id})
+    assert job.retried_as is None
+
+
+def test_the_link_survives_a_restart(tmp_path):
+    from nzb2seed import gui
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    job = app.start_job("x", "build", lambda cfg: {"result": "done"})
+    job.retried_as = 42
+    app.store.flush()
+    assert gui.App(str(cfgfile)).jobs[job.id].retried_as == 42
+
+
+def test_an_ordinary_job_does_not_inherit_a_retry(server):  # noqa: F811
+    """The link is only ever made by the retry request itself."""
+    app, url = server
+    earlier = app.start_job("earlier", "build", lambda cfg: {"result": "done"})
+    app.request.retrying = None
+    app.start_job("unrelated", "build", lambda cfg: {"result": "done"})
+    assert earlier.retried_as is None
+
+
+def test_finished_jobs_can_be_removed_from_the_list(server):  # noqa: F811
+    """Remove from list takes finished jobs off; one still running is never removed."""
+    import threading
+    app, url = server
+    hold = threading.Event()
+    done = app.start_job("a", "build", lambda cfg: {"result": "done"})
+    failed = app.start_job("b", "build", lambda cfg: (_ for _ in ()).throw(ValueError("no")))
+    running = app.start_job("c", "build", lambda cfg: hold.wait(5) and {"result": "done"})
+    try:
+        import time
+        end = time.time() + 5
+        while time.time() < end and (done.status == "running" or failed.status == "running"):
+            time.sleep(0.05)
+        status, r = call(url + "/api/jobs/remove", *AUTH, body={"ids": [done.id, failed.id, running.id]})
+        assert status == 200 and r == {"removed": 2, "kept": 1}
+        ids = [j["id"] for j in call(url + "/api/jobs", *AUTH)[1]]
+        assert done.id not in ids and failed.id not in ids and running.id in ids
+    finally:
+        hold.set()
+
+
+def test_removing_with_downloads_needs_qbittorrent_to_say_what_is_in_use(server):  # noqa: F811
+    """Deleting downloads is refused - and nothing is removed - when qBittorrent cannot be
+    asked which of them a torrent depends on."""
+    import time
+    app, url = server
+    job = app.start_job("Film.2020.1080p-GRP", "build", lambda cfg: {"result": "done"})
+    end = time.time() + 5
+    while time.time() < end and job.status == "running":
+        time.sleep(0.05)
+    job.infohash = "a" * 40
+    app._qbit = lambda: None
+    status, _ = call(url + "/api/jobs/remove", *AUTH, body={"ids": [job.id], "delete_downloads": True})
+    assert status == 400 and job.id in app.jobs
+
+
+def test_what_the_jobs_still_need(server):  # noqa: F811
+    from nzb2seed.pipeline import release_key as pipeline_release_key
+    """A failed job may be tried again, so its downloads are kept; a running one is using
+    them; an abandoned one needs nothing."""
+    import threading
+    import time
+    app, url = server
+    hold = threading.Event()
+    running = app.start_job("a", "build", lambda cfg: hold.wait(5) and {"result": "done"})
+    failed = app.start_job("b", "build", lambda cfg: (_ for _ in ()).throw(ValueError("no")))
+    gone = app.start_job("c", "build", lambda cfg: (_ for _ in ()).throw(ValueError("no")))
+    end = time.time() + 5
+    while time.time() < end and "running" in (failed.status, gone.status):
+        time.sleep(0.05)
+    running.infohash, failed.infohash, gone.infohash = "1" * 40, "2" * 40, "3" * 40
+    gone.extra = {"abandoned": True}
+    try:
+        failed.retried_as = None
+        keep, live, names = app.downloads_in_use()
+        assert keep == {"2" * 40} and "1" * 40 in live and "3" * 40 not in keep | live
+        assert names == {pipeline_release_key("a"), pipeline_release_key("b")}
+        failed.retried_as = 999                            # tried again: it needs nothing now
+        assert "2" * 40 not in app.downloads_in_use()[0]
+    finally:
+        hold.set()

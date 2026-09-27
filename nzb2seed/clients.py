@@ -82,6 +82,15 @@ class Prowlarr:
         n = len(self.s.get(f"{self.url}/api/v1/indexer", timeout=TIMEOUT).json())
         return f"Prowlarr {r.json().get('version', '?')}, {n} indexer(s)"
 
+    def indexer_sites(self) -> list[tuple[str, list[str]]]:
+        """Prowlarr's torrent indexers: (name, [their web addresses]). Asked of Prowlarr only -
+        its own list, nothing reaches a tracker."""
+        r = self.s.get(f"{self.url}/api/v1/indexer", timeout=TIMEOUT)
+        if r.status_code != 200:
+            raise ApiError(f"Prowlarr indexer list: HTTP {r.status_code}")
+        return [(i.get("name") or "", list(i.get("indexerUrls") or []) + ([i["baseUrl"]] if i.get("baseUrl") else []))
+                for i in r.json() if i.get("protocol") == "torrent"]
+
     def search(self, query: str, indexer_ids=None, categories=None, limit: int = 1000) -> list[Release]:
         if SEARCH_GATE:
             SEARCH_GATE()
@@ -185,6 +194,7 @@ class Autobrr:
 
 # ================================================================ SABnzbd
 
+PP_NONE = 0            # download only - for a peek, which has nothing to repair or unpack
 PP_REPAIR = 1          # +Repair
 PP_UNPACK = 2          # +Repair/Unpack      (archives are kept)
 PP_DELETE = 3          # +Repair/Unpack/Delete — never used here
@@ -219,7 +229,8 @@ class SABnzbd:
         return self._call("get_config").get("config", {})
 
     def add_nzb(self, nzb: bytes, name: str, category: str, pp: int, priority: int = 0) -> str:
-        if pp not in (PP_REPAIR, PP_UNPACK):
+        # never +Delete: that throws away the archives a torrent may need
+        if pp not in (PP_NONE, PP_REPAIR, PP_UNPACK):
             raise ValueError("refusing to add an NZB with a post-processing level that deletes archives")
         data = self._call("addfile", method="POST",
                           files={"name": (name + ".nzb", nzb, "application/x-nzb")},
@@ -306,8 +317,20 @@ class SABnzbd:
             return slot.get("status", ""), slot
         return "Unknown", {}
 
-    def delete_history(self, nzo_id: str):
-        self._call("history", name="delete", value=nzo_id, del_files="0")
+    def ensure_category(self, name: str, folder: str, pp: int = PP_REPAIR) -> bool:
+        """Create SABnzbd category ``name`` (its own folder, post-processing ``pp``) if it
+        does not exist. An existing one is left exactly as it is. True when it was made."""
+        cats = self._call("get_config", section="categories").get("config", {}).get("categories", [])
+        if any((c.get("name") or "").lower() == name.lower() for c in cats):
+            return False
+        self._call("set_config", section="categories", keyword=name, name=name, dir=folder,
+                   pp=str(pp), script="None", priority="-100")
+        return True
+
+    def delete_history(self, nzo_id: str, files: bool = False):
+        """Forget a finished job. Its files are kept unless ``files`` - which is only ever
+        asked for about nzb2seed's own peek jobs, whose files are nobody else's."""
+        self._call("history", name="delete", value=nzo_id, del_files="1" if files else "0")
 
 
 # ================================================================ qBittorrent
@@ -361,6 +384,10 @@ class QBittorrent:
         r = self._ok(self._req("GET", "torrents/info", params={"hashes": infohash}), "info")
         lst = r.json()
         return lst[0] if lst else None
+
+    def torrents(self) -> list[dict]:
+        """Every torrent qBittorrent has (hash, progress, content_path, ...)."""
+        return self._ok(self._req("GET", "torrents/info"), "info").json()
 
     def files(self, infohash: str) -> list[dict]:
         return self._ok(self._req("GET", "torrents/files", params={"hash": infohash}), "files").json()

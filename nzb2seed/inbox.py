@@ -20,6 +20,7 @@ picks up where it was. Handled .torrent files move to ``<inbox>/.done`` or ``.fa
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import re
@@ -34,11 +35,12 @@ from . import worth
 from . import rules as rules_mod
 from . import lookup as lookup_mod
 from .clients import ApiError
-from .pipeline import Abort, Options, execute_run, local_release
+from .pipeline import Abort, Incomplete, Options, execute_run, local_release
 from .report import Cancelled, check_cancel, info, step, warn
 from .torrent import TorrentError, parse
 
 POLL_SECONDS = 20
+STALE_HOURS = 24    # a torrent not yet building by then is stopped (it can still be tried again)
 QUEUE, DONE, FAILED = ".queue", ".done", ".failed"
 # a build that ended like this may work later, once the post is on Usenet
 _NOT_YET = re.compile(r"no Usenet post could supply|nothing was downloaded|none found|"
@@ -85,6 +87,7 @@ class State:
     def __init__(self, path: str):
         self.path = path
         self.lock = threading.Lock()
+        self.on_save = None
         try:
             with open(path, encoding="utf-8") as fh:
                 self.items: dict[str, dict] = json.load(fh).get("items", {})
@@ -100,11 +103,33 @@ class State:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"items": self.items}, fh, indent=1)
             os.replace(tmp, self.path)
+        if self.on_save:
+            self.on_save()                     # the Automatic tab follows live
 
     def update(self, h: str, **kw):
         with self.lock:
             self.items.setdefault(h, {}).update(kw)
         self.save()
+
+    def move_on(self, h: str, **kw) -> bool:
+        """update(), unless the torrent was stopped meanwhile (Clear queue, the 24-hour
+        stop, a full queue): then nothing changes and False says the job must end."""
+        with self.lock:
+            it = self.items.setdefault(h, {})
+            if it.get("stopped"):
+                return False
+            it.update(kw)
+        self.save()
+        return True
+
+
+def _ago(seconds: float) -> str:
+    """ "35 days", "5 hours", "40 minutes" """
+    for unit, n in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= n:
+            k = int(seconds // n)
+            return f"{k} {unit}{'s' if k != 1 else ''}"
+    return "moments"
 
 
 def retry_gap(cfg, attempts: int) -> float:
@@ -164,6 +189,7 @@ class Inbox:
 
     def poll(self):
         cfg = self.app.cfg
+        self.stop_stale()                   # first: a full disk must not keep old ones alive
         if not cfg.auto_enabled or not cfg.auto_folder:
             return
         if self.no_room(cfg):
@@ -222,9 +248,24 @@ class Inbox:
         it = self.state.items.get(t.infohash)
         if it and it.get("status") in ("done", "queued", "waiting", "building"):
             return                              # the same torrent again: already handled
+        cap = int(self.app.cfg.auto_queue_max or 0)
+        full = cap > 0 and len(self.pending()) >= cap
+        if full and not self.app.cfg.auto_queue_keep_older:
+            # a fresh release usually pays back best: the oldest waiting ones make room
+            # (stopped, still listed, and can be tried again)
+            for h in sorted(self.pending(), key=lambda h: self.state.items[h].get("first_seen") or 0):
+                if len(self.pending()) < cap:
+                    break
+                self.stop_one(h, "stopped: made room in the queue for a newer torrent")
+            full = len(self.pending()) >= cap
         self.state.update(t.infohash, name=t.name, file=dst, status="queued", first_seen=time.time(),
-                          attempts=0, next_try=0, why="", source=os.path.basename(path),
+                          attempts=0, next_try=0, why="", stopped=False, source=os.path.basename(path),
                           size=t.total_size, tracker=worth.tracker_of(t.trackers))
+        if full:
+            # listed, stopped, and can be tried again - but it does not join the queue
+            self.stop_one(t.infohash, f"not queued: the queue already holds {cap}, the most "
+                                      "allowed at a time, and older ones are kept (Automatic tab)")
+            return
         self.start(t.infohash)
 
     def _move(self, path: str, where: str):
@@ -238,7 +279,12 @@ class Inbox:
     # -------------------------------------------------------------- one torrent
     def start(self, h: str):
         it = self.state.items[h]
-        job = self.app.start_job(f"auto: {it.get('name', h)}", "auto", lambda cfg: self.run(cfg, h))
+        fn = (lambda cfg: self.run(cfg, h))
+        old = self.app.jobs.get(it.get("job") or -1)
+        if old is not None and old.kind == "auto" and old.status == "interrupted":
+            job = self.app.resume_job(old, fn)      # a restart cut it off: the same job goes on
+        else:
+            job = self.app.start_job(f"auto: {it.get('name', h)}", "auto", fn)
         self.running[h] = job.id
         self.state.update(h, job=job.id)
 
@@ -285,18 +331,28 @@ class Inbox:
             wait = it.get("next_try", 0) - time.time()
             if wait > 0:
                 info(f"next try at {time.strftime('%H:%M', time.localtime(it['next_try']))}")
-                self.state.update(h, status="waiting")
+                if not self.state.move_on(h, status="waiting"):
+                    raise Cancelled("stopped")
                 _sleep(wait)
             info("waiting for a free build slot" if self.slot_count > 1 else "waiting for the build slot")
             while not self.slots.acquire(timeout=5):
                 check_cancel()
+            attempts = it.get("attempts", 0) + 1
+            if not self.state.move_on(h, status="building", attempts=attempts):
+                self.slots.release()        # stopped while it waited: never starts building
+                raise Cancelled("stopped")
             try:
-                attempts = it.get("attempts", 0) + 1
-                self.state.update(h, status="building", attempts=attempts)
                 opts = Options(unattended=True, start=cfg.auto_start)
-                out = execute_run(cfg, opts, local_release(t, it["file"]), [], torrent_data=data)
+                tor = local_release(t, it["file"])
+                if rel.seeders is not None and rel.seeders >= 0:
+                    tor = dataclasses.replace(tor, seeders=rel.seeders)
+                out = execute_run(cfg, opts, tor, [], torrent_data=data)
             except Cancelled:
                 self.state.update(h, status="failed", why="cancelled")
+                self._move(it["file"], FAILED)
+                raise
+            except Incomplete as e:
+                self.state.update(h, status="failed", why=str(e))
                 self._move(it["file"], FAILED)
                 raise
             except (Abort, ApiError, OSError, ValueError) as e:
@@ -304,11 +360,19 @@ class Inbox:
                 gap = retry_gap(cfg, attempts)
                 # try again while still inside the window, so the last try lands on the
                 # deadline rather than a gap short of it
-                if _NOT_YET.search(why) and time.time() < deadline:
+                # an old release that is not on Usenet by now will not be in a few
+                # minutes either: the quick retries are for fresh ones on their way
+                age = time.time() - rel.published if rel.published else None
+                old = age is not None and age > max(3600, cfg.auto_wait_hours * 3600)
+                if _NOT_YET.search(why) and old:
+                    warn(f"the tracker posted it {_ago(age)} ago - if it is not on Usenet by "
+                         "now, a few more minutes will not change that; not trying again")
+                elif _NOT_YET.search(why) and time.time() < deadline:
                     nxt = time.time() + gap
                     warn(f"not complete from Usenet yet ({why}) - trying again at "
                          f"{time.strftime('%H:%M', time.localtime(nxt))}")
-                    self.state.update(h, status="waiting", next_try=nxt, why=why)
+                    if not self.state.move_on(h, status="waiting", next_try=nxt, why=why):
+                        raise Cancelled("stopped") from None
                     continue
                 self.state.update(h, status="failed", why=why)
                 self._move(it["file"], FAILED)
@@ -319,10 +383,54 @@ class Inbox:
             self._move(it["file"], DONE)
             return out
 
+    # -------------------------------------------------------------- stopping
+    def pending(self) -> list[str]:
+        """Torrents that have not started building: queued, or waiting for their post."""
+        return [h for h, it in self.state.items.items() if it.get("status") in ("queued", "waiting")]
+
+    def stop_one(self, h: str, why: str) -> bool:
+        """Stop a torrent that is not building yet. It stays in the list, stopped, and can
+        be tried again - nothing is deleted. A build already under way is left alone."""
+        it = self.state.items.get(h)
+        if not it or it.get("status") not in ("queued", "waiting"):
+            return False
+        with self.state.lock:
+            it = self.state.items.get(h)
+            if not it or it.get("status") not in ("queued", "waiting"):
+                return False                # it started building a moment ago: left alone
+            it.update(status="failed", why=why, next_try=0, stopped=True)
+        self.state.save()
+        job = self.app.jobs.get(self.running.get(h) or it.get("job") or -1)
+        if job is not None and h in self.running:
+            job.cancel.set()                # it is only sleeping or waiting for a slot
+        if it.get("file") and os.path.exists(it["file"]):
+            self._move(it["file"], FAILED)  # where Try again looks for it
+        return True
+
+    def stop_pending(self) -> int:
+        """The Clear queue button: stop everything that has not started building."""
+        return sum(self.stop_one(h, "stopped: the queue was cleared") for h in self.pending())
+
+    def stop_stale(self) -> int:
+        """Stop what has waited STALE_HOURS without building - probably too old to be worth
+        it by now, but kept so it can still be tried again."""
+        end = time.time() - STALE_HOURS * 3600
+        return sum(self.stop_one(h, f"stopped: not built within {STALE_HOURS} hours of arriving")
+                   for h in self.pending()
+                   if (self.state.items[h].get("first_seen") or time.time()) < end)
+
     # -------------------------------------------------------------- for the GUI
     def items(self) -> list[dict]:
         out = [dict(v, infohash=h, running=h in self.running) for h, v in self.state.items.items()]
         return sorted(out, key=lambda x: -(x.get("first_seen") or 0))
+
+    def retryable_job(self, job_id: int) -> str | None:
+        """The torrent an automatic job was building, if that job was its last and it ended
+        without a result - so Try again on the Jobs tab can do what it does here."""
+        for h, it in self.state.items.items():
+            if it.get("job") == job_id and it.get("status") == "failed" and h not in self.running:
+                return h
+        return None
 
     def retry(self, h: str):
         it = self.state.items.get(h)
@@ -332,8 +440,12 @@ class Inbox:
         if not os.path.exists(it["file"]) and os.path.exists(failed):
             os.makedirs(os.path.dirname(it["file"]), exist_ok=True)
             shutil.move(failed, it["file"])
-        self.state.update(h, status="queued", first_seen=time.time(), next_try=0, why="")
+        old = self.app.jobs.get(it.get("job") or -1)
+        self.state.update(h, status="queued", first_seen=time.time(), next_try=0, why="", stopped=False)
         self.start(h)
+        if old is not None and old.status != "running" and not old.retried_as:
+            old.retried_as = self.state.items[h].get("job")     # "tried again as job N"
+            self.app.store.changed(urgent=True)
 
     def forget(self, h: str):
         if h in self.running:

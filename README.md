@@ -281,9 +281,20 @@ WantedBy=multi-user.target
 
 ## Tests
 
-`python -m pytest -q` - 80 tests, including a full run against fake
+`python -m pytest -q` - about 470 tests, including a full run against fake
 Prowlarr/SABnzbd/qBittorrent whose recheck really hashes the files, season
 packs with mixed LF/CRLF .nfo files, cross-disk moves, and the ownership rules.
+
+The web interface is checked too. With [Node.js](https://nodejs.org) installed and
+`npm install` run once in `tests/ui` (it fetches jsdom, used only by the tests),
+`tests/test_ui.py` runs every tab of the interface in a browser-like environment next to
+the page it replaced (`tests/ui/baseline`), and requires both to show the same things,
+send the same requests and ask the same questions. Without Node those tests are skipped.
+
+The interface itself is plain ES modules in `nzb2seed/web` - `js/app.js` and one file per
+tab in `js/tabs/` - built with [Preact](https://preactjs.com) and
+[htm](https://github.com/developit/htm), with no build step. It follows the server live
+through `/api/events`.
 
 ## License
 
@@ -298,3 +309,7 @@ nzb2seed ships [pyReScene](https://github.com/srrDB/pyrescene) (MIT licence) in
 `nzb2seed/_vendor/rescene`, used to rebuild original scene RAR volumes from srrDB's `.srr`
 files. Its licence is in `nzb2seed/_vendor/PYRESCENE-COPYING`; the exact source commit is
 in `nzb2seed/_vendor/README.md`.
+
+The web interface ships Preact (MIT licence) and htm (Apache 2.0 licence) as one file,
+`nzb2seed/web/vendor/preact-htm.js`; where it comes from is in
+`nzb2seed/web/vendor/README.md`.

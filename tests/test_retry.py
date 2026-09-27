@@ -157,3 +157,95 @@ def test_success_also_cleans_earlier_downloads_of_the_same_torrent(tmp_path):
                     retry=Retry(cfg, pr, sab, 2, slots), earlier_dirs=earlier)
     assert not (tmp_path / "dl" / "nzoOLD").exists()
     assert (tmp_path / "dl" / "nzoOTHER" / "leftover.part01.rar").exists()
+
+
+# ------------------------------------------------- one hashing pass: qBittorrent's
+
+class HashingQbit:
+    """qBittorrent as far as finish() uses it - and its recheck really hashes the files,
+    so a failing piece shows up exactly where it would."""
+
+    def __init__(self, t, out):
+        self.t, self.out = t, out
+        self.rechecks, self.started, self.state, self.states = 0, False, None, []
+
+    def add_stopped(self, data, name, save_path, cat, tags):
+        self.state = "stoppedDL"
+
+    def info(self, h):
+        if self.state is None:
+            return None
+        ok = sum(1 for st in self.states if st == 2)
+        return {"state": self.state, "save_path": self.out,
+                "progress": ok / len(self.t.pieces) if self.states else 0}
+
+    def wait_idle(self, h, on_tick=None, min_wait=0):
+        return self.info(h)
+
+    def set_location(self, h, loc):
+        self.out = loc
+
+    def recheck(self, h):
+        assert not self.started, "a torrent must never be running while it is repaired"
+        self.rechecks += 1
+        from nzb2seed.torrent import PieceVerifier
+        root = os.path.join(self.out, self.t.name)
+        with PieceVerifier(self.t, lambda f: os.path.join(root, *f.parts[1:])) as pv:
+            self.states = [2 if pv.check(i) else 0 for i in range(len(self.t.pieces))]
+
+    def piece_states(self, h):
+        return self.states
+
+    def files(self, h):
+        return []
+
+    def stop(self, h):
+        self.started = False
+
+    def start(self, h):
+        self.started = True
+
+
+def test_qbittorrents_recheck_is_the_only_full_hash_when_nothing_is_wrong(tmp_path, monkeypatch):
+    t, tfile, cfg, sab, pr, slots, dirs, files = setup(tmp_path, set())
+    out = str(tmp_path / "complete")
+    hashed = []
+    monkeypatch.setattr(pipeline.asm, "verify_all", lambda *a, **k: hashed.append(1) or [])
+    qb = HashingQbit(t, out)
+    result = pipeline.finish(cfg, Options(), t, tfile, dirs, out, qb, None,
+                             retry=Retry(cfg, pr, sab, 2, slots))
+    assert result["progress"] == 1.0
+    assert hashed == []                      # no local pass over every piece first
+    assert qb.rechecks == 1                  # qBittorrent's, once
+
+
+def test_pieces_qbittorrent_finds_bad_are_repaired_then_checked_once_more(tmp_path, monkeypatch):
+    """The picked E02 and E04 are re-muxed copies: same size, different bytes."""
+    t, tfile, cfg, sab, pr, slots, dirs, files = setup(tmp_path, {"pick2", "pick4", "alt20"})
+    out = str(tmp_path / "complete")
+    hashed = []
+    monkeypatch.setattr(pipeline.asm, "verify_all", lambda *a, **k: hashed.append(1) or [])
+    qb = HashingQbit(t, out)
+    result = pipeline.finish(cfg, Options(), t, tfile, dirs, out, qb, None,
+                             retry=Retry(cfg, pr, sab, 2, slots))
+    assert result["progress"] == 1.0
+    assert hashed == []                      # repairs hash only the pieces they touch
+    assert qb.rechecks == 2                  # the first finds them, one more confirms the fix
+    for name, data in files.items():         # byte-exact now
+        with open(os.path.join(out, PACK, name), "rb") as fh:
+            assert fh.read() == data
+    assert sab.added[4:] == ["alt20", "alt21", "alt40"]   # only the suspects re-downloaded
+
+
+def test_a_repair_that_cannot_finish_leaves_it_stopped_and_says_how_far(tmp_path, monkeypatch):
+    t, tfile, cfg, sab, pr, slots, dirs, files = setup(
+        tmp_path, {"pick2", "pick4", "alt20", "alt21", "alt40", "alt41"})     # no good copy anywhere
+    out = str(tmp_path / "complete")
+    monkeypatch.setattr(pipeline, "next_post",
+                        lambda cfg, pr, slot, ask=True: (slot.queue.pop(0) if slot.queue else None))
+    qb = HashingQbit(t, out)
+    with pytest.raises(pipeline.Incomplete) as e:
+        pipeline.finish(cfg, Options(unattended=True), t, tfile, dirs, out, qb, None,
+                        retry=Retry(cfg, pr, sab, 2, slots, True))
+    assert 0 < e.value.have < 1 and e.value.in_client is True
+    assert qb.started is False               # never started with bad data in it

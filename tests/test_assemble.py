@@ -239,3 +239,47 @@ def test_nzb2seed_own_folders_are_still_moved(tmp_path):
     res = asm.assemble(t, [str(job)], str(tmp_path / "out"), log=lambda *_: None)
     assert not res.missing
     assert not any(p.suffix in (".rar", ".mkv") for p in job.rglob("*") if p.is_file())
+
+
+def test_placed_files_are_writable_by_the_folders_group(tmp_path):
+    """qBittorrent runs as its own user: a read-only file nzb2seed placed could not be
+    repaired when a piece fails, nor moved. It gets the folder's group, writable."""
+    import pytest
+    import stat
+    if os.name == "nt":
+        pytest.skip("POSIX permissions")
+    f = tmp_path / "e01.mkv"
+    f.write_bytes(b"x")
+    os.chmod(f, 0o644)
+    asm.shareable(str(f))
+    mode = os.stat(f).st_mode
+    assert mode & stat.S_IWGRP and mode & stat.S_IRGRP and mode & stat.S_IROTH
+    assert os.stat(f).st_gid == os.stat(tmp_path).st_gid
+
+
+def test_sharing_a_file_never_fails_the_build(tmp_path):
+    asm.shareable(str(tmp_path / "gone.mkv"))                  # no such file: quietly nothing
+
+
+def test_files_go_to_the_torrent_clients_user(tmp_path, monkeypatch):
+    """With file_owner set, what nzb2seed places belongs to the torrent client's user."""
+    import pytest
+    if os.name == "nt":
+        pytest.skip("POSIX ownership")
+    chowned = []
+    monkeypatch.setattr(os, "chown", lambda p, u, g: chowned.append((u, g)))
+    monkeypatch.setattr(asm, "OWNER", (1000, 100))
+    f = tmp_path / "e01.mkv"
+    f.write_bytes(b"x")
+    asm.shareable(str(f))
+    assert chowned == [(1000, 100)]
+
+
+def test_an_owner_is_read_as_numbers_or_names():
+    import pytest
+    if os.name == "nt":
+        assert asm.parse_owner("1000:100") is None
+        return
+    assert asm.parse_owner("1000:100") == (1000, 100)
+    assert asm.parse_owner("") is None
+    assert asm.parse_owner("no-such-user-here:x") is None
