@@ -1,6 +1,11 @@
 """Stopping downloads before the disk fills up.
 
-Off unless a limit is set. When the disk nzb2seed downloads to falls below the limit,
+Off unless a limit is set. Two disks are watched, and each can have its own limit: the
+**downloads** disk SABnzbd stages on, which empties again after every build, and the
+**output** disk that keeps what is being seeded, which only ever grows. A disk with no
+limit of its own falls back to the general one.
+
+When either disk falls below its limit,
 downloading is paused - SABnzbd's queue always, qBittorrent's downloads only if you ask
 for that - and it carries on once there is room again, whether the room came from the
 retention sweep or from you deleting something by hand.
@@ -38,13 +43,18 @@ MARGIN = 1.1           # resume a little above the limit, not exactly at it
 WAIT_POLL = 30.0
 
 
-def wait_for_room(step=None, progress=None, sleep=None):
-    """Hold a running build here while the disk is too full.
+def wait_for_room(step=None, progress=None, sleep=None, role: str = "output"):
+    """Hold a running build here while the disk it is about to write to is too full.
 
-    A build that carried on would keep writing - unpacking, copying, hard-linking - into
-    the very disk there is no room on, so every stage that is about to write waits here
-    instead. It is a pause, not a failure: the build goes on by itself once there is room,
-    and stopping the build still works while it waits."""
+    ``role`` matters. A build waiting to *download* is waiting for staging room, and
+    holding it back saves that disk. A build waiting to *place its files* is about to move
+    them off staging and onto the output disk - holding that back saves nothing and frees
+    nothing, and with several builds at once it is a deadlock: every build sits on a
+    finished download, the staging disk stays full, and the one step that would empty it is
+    the step being blocked. So each stage waits on its own disk only.
+
+    It is a pause, not a failure: the build goes on by itself once there is room, and
+    stopping the build still works while it waits."""
     from .report import check_cancel, info
     gate, said = GATE, False
     if gate is None:
@@ -52,7 +62,7 @@ def wait_for_room(step=None, progress=None, sleep=None):
     while True:
         check_cancel()
         try:
-            why = gate()
+            why = gate(role)
         except Exception:               # a broken gate must never wedge a build
             return
         if not why:
@@ -72,13 +82,19 @@ DOWNLOADING = {"downloading", "metaDL", "stalledDL", "queuedDL", "forcedDL", "ch
 _lock = threading.Lock()
 
 
-def watched(cfg: Config, sab: SABnzbd | None = None) -> list[str]:
-    """The folders whose disk has to have room: where builds are put, and where SABnzbd
-    unpacks. Only ones that exist here - a path this machine cannot see says nothing."""
-    out = []
-    for p in (cfg.output_dir, _sab_dir(cfg, sab)):
-        if p and os.path.isdir(p) and p not in out:
-            out.append(p)
+def watched(cfg: Config, sab: SABnzbd | None = None) -> list[tuple[str, str]]:
+    """(folder, which disk it is) for every disk that has to have room.
+
+    The two do different jobs and deserve different limits: the **downloads** disk is
+    staging - it needs enough room for the release being fetched and unpacked, and empties
+    again afterwards - while the **output** disk keeps everything being seeded, and filling
+    it stops the whole thing. Only folders that exist here are watched: a path this machine
+    cannot see says nothing about any disk."""
+    out, seen = [], set()
+    for p, role in ((cfg.output_dir, "output"), (_sab_dir(cfg, sab), "downloads")):
+        if p and os.path.isdir(p) and p not in seen:
+            seen.add(p)
+            out.append((p, role))
     return out
 
 
@@ -97,49 +113,71 @@ def free_on(path: str) -> tuple[int, int]:
     return u.free, u.total
 
 
+def limit_for(cfg: Config, role: str) -> tuple[float, float]:
+    """(GB, percent) for this disk: its own limit, or the general one where it has none."""
+    gb = float(getattr(cfg, f"space_{role}_min_gb", 0) or 0) or float(cfg.space_min_gb or 0)
+    pct = float(getattr(cfg, f"space_{role}_min_percent", 0) or 0) or float(cfg.space_min_percent or 0)
+    return gb, pct
+
+
 def limits_set(cfg: Config) -> bool:
-    return cfg.space_min_percent > 0 or cfg.space_min_gb > 0
+    return any(any(limit_for(cfg, role)) for role in ("output", "downloads"))
 
 
-def shortfall(cfg: Config, free: int, total: int, resuming: bool = False) -> str:
+def shortfall(cfg: Config, free: int, total: int, resuming: bool = False,
+              role: str = "output") -> str:
     """Why this disk is too full, or "" when it has room.
 
     ``resuming`` asks the question the other way round, against a slightly higher bar, so
-    downloads do not start and stop again every few minutes around the limit. The answer
-    ends with how much has to be freed to get going again, which is the number you act on."""
+    downloads do not start and stop again every few minutes around the limit.
+
+    Two numbers are in play and they are not the same: downloading stops at the limit, and
+    starts again only at the limit plus the margin. So the sentence states whichever bar it
+    is testing against, and the amount to free is always measured against the one that gets
+    things moving - telling someone to free 21 GB when 76 GB is what restarts it would be
+    worse than saying nothing."""
     margin = MARGIN if resuming else 1.0
+    min_gb, min_pct = limit_for(cfg, role)
     why, need = [], 0
-    if cfg.space_min_gb > 0:
-        want = cfg.space_min_gb * GB * margin
-        if free < want:
-            why.append(f"{free / GB:.1f} GB free, less than the {cfg.space_min_gb:g} GB limit")
-            need = max(need, want - free)
-    if cfg.space_min_percent > 0 and total:
-        want = total * cfg.space_min_percent * margin / 100
-        if free < want:
-            why.append(f"{free * 100 / total:.1f}% free, less than the "
-                       f"{cfg.space_min_percent:g}% limit")
-            need = max(need, want - free)
+    for limit_bytes, shown_free, unit in (
+            (min_gb * GB if min_gb > 0 else 0, f"{free / GB:.1f} GB free", "gb"),
+            (total * min_pct / 100 if min_pct > 0 and total else 0,
+             f"{free * 100 / total:.1f}% free" if total else "", "pct")):
+        if not limit_bytes or free >= limit_bytes * margin:
+            continue
+        limit = (f"{min_gb:g} GB" if unit == "gb" else f"{min_pct:g}%")
+        if resuming:
+            bar = limit_bytes * MARGIN
+            shown = (f"{bar / GB:.1f} GB" if unit == "gb" else f"{bar * 100 / total:.1f}%")
+            why.append(f"{shown_free}, and {shown} is needed before downloading starts again "
+                       f"(the {limit} limit plus a {MARGIN:g}x margin, so it does not stop "
+                       f"and start around the line)")
+        else:
+            why.append(f"{shown_free}, under the {limit} limit")
+        need = max(need, limit_bytes * MARGIN - free)     # what restarts it, not what stopped it
     if need:
-        why.append(f"free {need / GB:.1f} GB more to carry on"
-                   + (f" (the limit plus a {MARGIN:g}x margin)" if resuming else ""))
+        why.append(f"free {need / GB:.1f} GB more to start downloading again"
+                   + ("" if resuming else f" (the {MARGIN:g}x margin again: it takes more to "
+                                          f"restart than it did to stop)"))
     return "; ".join(why)
 
 
 def check(cfg: Config, sab: SABnzbd | None = None, resuming: bool = False) -> dict:
     """The state of every watched disk, and whether any of them is too full."""
     disks = []
-    for p in watched(cfg, sab):
+    for p, role in watched(cfg, sab):
         try:
             free, total = free_on(p)
         except OSError:
             continue
-        disks.append({"path": p, "free": free, "total": total,
+        gb, pct = limit_for(cfg, role)
+        disks.append({"path": p, "role": role, "free": free, "total": total,
+                      "min_gb": gb, "min_percent": pct,
                       "percent": round(free * 100 / total, 1) if total else 0,
-                      "why": shortfall(cfg, free, total, resuming) if limits_set(cfg) else ""})
+                      "why": shortfall(cfg, free, total, resuming, role) if (gb or pct) else ""})
     low = [d for d in disks if d["why"]]
     return {"limits_set": limits_set(cfg), "disks": disks, "low": bool(low),
-            "why": "; ".join(f"{d['path']}: {d['why']}" for d in low)}
+            "why": "; ".join(f"{d['role']} disk {d['path']}: {d['why']}" for d in low)}
 
 
 class Guard:

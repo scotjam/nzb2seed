@@ -263,3 +263,270 @@ def test_the_cap_is_never_below_the_first_gap(tmp_path):
     cfg = finalize(Config(path=tmp_path / "nzb2seed.toml"))
     odd = dataclasses.replace(cfg, auto_retry_first_minutes=60, auto_retry_minutes=10)
     assert retry_gap(odd, 1) / 60 == 60 and retry_gap(odd, 5) / 60 == 60
+
+
+def waiting_inbox(tmp_path, monkeypatch, names=("Show.S01E01.720p-GRPA",), building=None):
+    """An inbox whose torrents are all waiting for their post (next try an hour off);
+    ``building`` names one that is mid-build instead, held until the event is set."""
+    import dataclasses
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_parallel=2,
+                                  auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+    hold = threading.Event()
+
+    def fake_run(cfg, opts, rel, groups, torrent_data=None):
+        if building and building in rel.title:
+            hold.wait(10)
+            return {"result": "done"}
+        raise Abort("no Usenet post could supply S01E01")
+    monkeypatch.setattr(inbox, "execute_run", fake_run)
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+    app.start_inbox()
+    for n in names:
+        t = box / f"{n}.torrent"
+        t.write_bytes(make_torrent(n, {"a.mkv": n.encode() * 4000}))
+        old = time.time() - 60
+        os.utime(t, (old, old))
+    app.inbox.poll()
+    want = {n: ("building" if n == building else "waiting") for n in names}
+    wait(lambda: {i["name"]: i["status"] for i in app.inbox.items()} == want)
+    return app, box, hold
+
+
+def test_a_torrent_not_built_within_a_day_is_stopped_not_removed(tmp_path, monkeypatch):
+    app, box, hold = waiting_inbox(tmp_path, monkeypatch)
+    try:
+        h = app.inbox.items()[0]["infohash"]
+        app.inbox.state.update(h, first_seen=time.time() - 25 * 3600)
+        app.inbox.poll()
+        it = app.inbox.items()[0]
+        assert it["status"] == "failed" and "24 hours" in it["why"]       # stopped, still listed
+        wait(lambda: h not in app.inbox.running)                          # its idle job ended
+        assert os.listdir(box / ".failed")                                # where Try again looks
+        app.inbox.retry(h)                                                # and it can be
+        assert app.inbox.state.items[h]["status"] in ("queued", "waiting", "building")
+    finally:
+        hold.set()
+        clients.SEARCH_GATE = None
+
+
+def test_a_younger_torrent_is_left_waiting(tmp_path, monkeypatch):
+    app, box, hold = waiting_inbox(tmp_path, monkeypatch)
+    try:
+        h = app.inbox.items()[0]["infohash"]
+        app.inbox.state.update(h, first_seen=time.time() - 23 * 3600)
+        app.inbox.poll()
+        assert app.inbox.items()[0]["status"] == "waiting"
+    finally:
+        hold.set()
+        clients.SEARCH_GATE = None
+
+
+def test_clear_queue_stops_what_waits_and_leaves_builds_alone(server, tmp_path, monkeypatch):  # noqa: F811
+    app, box, hold = waiting_inbox(tmp_path, monkeypatch,
+                                   names=("Show.S01E01.720p-GRPA", "Show.S01E02.720p-GRPA"),
+                                   building="Show.S01E02.720p-GRPA")
+    try:
+        assert app.inbox.stop_pending() == 1
+        st = {i["name"]: i for i in app.inbox.items()}
+        assert st["Show.S01E01.720p-GRPA"]["status"] == "failed"
+        assert "cleared" in st["Show.S01E01.720p-GRPA"]["why"]
+        assert st["Show.S01E02.720p-GRPA"]["status"] == "building"        # carries on
+        hold.set()
+        wait(lambda: {i["name"]: i["status"] for i in app.inbox.items()}["Show.S01E02.720p-GRPA"] == "done")
+    finally:
+        hold.set()
+        clients.SEARCH_GATE = None
+
+
+def full_queue(tmp_path, monkeypatch, keep_older):
+    """Cap 1: the first torrent is queued, then a second arrives an hour later."""
+    import dataclasses
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_queue_max=1,
+                                  auto_queue_keep_older=keep_older, auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+    monkeypatch.setattr(inbox, "execute_run",
+                        lambda *a, **k: (_ for _ in ()).throw(Abort("no Usenet post could supply S01E01")))
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+    app.start_inbox()
+    for i, n in enumerate(("Show.S01E01.720p-GRPA", "Show.S01E02.720p-GRPA")):
+        t = box / f"{n}.torrent"
+        t.write_bytes(make_torrent(n, {"a.mkv": n.encode() * 4000}))
+        old = time.time() - 60
+        os.utime(t, (old, old))
+        app.inbox.poll()
+        if i == 0:
+            wait(lambda: app.inbox.items()[0]["status"] == "waiting")
+            h = app.inbox.items()[0]["infohash"]
+            app.inbox.state.update(h, first_seen=time.time() - 3600)
+    return app, box, {i["name"]: i for i in app.inbox.items()}
+
+
+def test_a_full_queue_makes_room_for_the_new_arrival(tmp_path, monkeypatch):
+    """By default a fresh release wins: the oldest waiting one is stopped for it."""
+    try:
+        app, box, st = full_queue(tmp_path, monkeypatch, keep_older=False)
+        old, new = st["Show.S01E01.720p-GRPA"], st["Show.S01E02.720p-GRPA"]
+        assert old["status"] == "failed" and "made room" in old["why"]
+        assert new["status"] in ("queued", "waiting", "building")
+        assert os.listdir(box / ".failed")                     # there for Try again
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_keeping_older_ones_turns_the_new_arrival_away(tmp_path, monkeypatch):
+    try:
+        app, box, st = full_queue(tmp_path, monkeypatch, keep_older=True)
+        old, new = st["Show.S01E01.720p-GRPA"], st["Show.S01E02.720p-GRPA"]
+        assert old["status"] in ("queued", "waiting", "building")
+        assert new["status"] == "failed" and "not queued" in new["why"]
+        assert os.listdir(box / ".failed")
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_under_the_cap_everything_is_queued(tmp_path, monkeypatch):
+    app, box, hold = waiting_inbox(tmp_path, monkeypatch,
+                                   names=("Show.S01E01.720p-GRPA", "Show.S01E02.720p-GRPA"))
+    hold.set()
+    clients.SEARCH_GATE = None
+
+
+def test_after_a_restart_the_same_job_carries_on(tmp_path, monkeypatch):
+    """A queued automatic build cut off by a restart comes back as the same job - not an
+    "interrupted" entry left behind next to a new one - and its log says it is resuming."""
+    import dataclasses
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    box = tmp_path / "inbox"
+    box.mkdir()
+    monkeypatch.setattr(inbox, "execute_run",
+                        lambda *a, **k: (_ for _ in ()).throw(Abort("no Usenet post could supply S01E01")))
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+
+    def boot():
+        app = gui.App(str(cfgfile))
+        app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
+                                      auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+        app.start_inbox()
+        return app
+    try:
+        app = boot()
+        t = box / "Show.S01E01.720p-GRPA.torrent"
+        t.write_bytes(make_torrent("Show.S01E01.720p-GRPA", {"a.mkv": b"x" * 40000}))
+        old = time.time() - 60
+        os.utime(t, (old, old))
+        app.inbox.poll()
+        wait(lambda: app.inbox.items()[0]["status"] == "waiting")
+        first = app.inbox.items()[0]["job"]
+        app.store.flush()
+        app.inbox.stop.set()
+
+        again = boot()                                  # the restart
+        assert again.jobs[first].status == "interrupted"
+        again.inbox.poll()
+        wait(lambda: again.jobs[first].status == "running")
+        assert again.inbox.items()[0]["job"] == first
+        assert [j.id for j in again.jobs.values() if j.kind == "auto"] == [first]   # no new entry
+        texts = [line["t"] for line in again.jobs[first].lines]
+        assert gui.RESUMING in texts and gui.INTERRUPTED not in texts
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_try_again_on_the_jobs_tab_works_for_automatic_jobs(server, tmp_path, monkeypatch):  # noqa: F811
+    import dataclasses
+    app, url = server
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
+                                  auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+    monkeypatch.setattr(inbox, "execute_run",
+                        lambda *a, **k: (_ for _ in ()).throw(Abort("no Usenet post could supply S01E01")))
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+    app.start_inbox()
+    try:
+        t = box / "Show.S01E01.720p-GRPA.torrent"
+        t.write_bytes(make_torrent("Show.S01E01.720p-GRPA", {"a.mkv": b"x" * 40000}))
+        old = time.time() - 60
+        os.utime(t, (old, old))
+        app.inbox.poll()
+        wait(lambda: app.inbox.items()[0]["status"] == "waiting")
+        h, first = app.inbox.items()[0]["infohash"], app.inbox.items()[0]["job"]
+        app.inbox.state.update(h, first_seen=time.time() - 25 * 3600)
+        app.inbox.poll()                                                   # the 24-hour stop
+        wait(lambda: app.jobs[first].status != "running")
+        row = [j for j in call(url + "/api/jobs", *AUTH)[1] if j["id"] == first][0]
+        assert row["can_retry"] is True
+        status, r = call(url + "/api/jobs/retry", *AUTH, body={"id": first})
+        assert status == 200 and r["id"] != first
+        assert app.inbox.state.items[h]["job"] == r["id"]                  # back in the queue
+        assert app.inbox.state.items[h]["status"] in ("queued", "waiting", "building")
+        assert call(url + "/api/jobs/retry", *AUTH, body={"id": first})[0] == 409
+        row = [j for j in call(url + "/api/jobs", *AUTH)[1] if j["id"] == first][0]
+        assert row["can_retry"] is False and row["retried_as"] == r["id"]
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_an_old_release_missing_from_usenet_is_tried_once(tmp_path, monkeypatch):
+    """Posted to the tracker 35 days ago and not on Usenet: a few more minutes will not
+    change that, so there are no quick retries (each one costs an indexer search)."""
+    import dataclasses
+    from types import SimpleNamespace
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
+                                  auto_retry_minutes=0.001, auto_retry_first_minutes=0.001, auto_wait_hours=1)
+    calls = []
+    monkeypatch.setattr(inbox, "execute_run",
+                        lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(Abort("no Usenet post could supply X")))
+    monkeypatch.setattr(inbox.rules_mod, "needs_lookup", lambda cfg: True)
+    monkeypatch.setattr(inbox.lookup_mod, "find", lambda *a, **k: SimpleNamespace(
+        published=time.time() - 35 * 86400, seeders=11, leechers=0, grabs=5, age_min=35 * 1440))
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+    app.start_inbox()
+    try:
+        t = box / "Film.2003.1080p.BluRay-GRP.torrent"
+        t.write_bytes(make_torrent("Film.2003.1080p.BluRay-GRP", {"a.mkv": b"x" * 40000}))
+        old = time.time() - 60
+        os.utime(t, (old, old))
+        app.inbox.poll()
+        wait(lambda: app.inbox.items()[0]["status"] == "failed")
+        time.sleep(0.3)
+        assert len(calls) == 1                                  # one search, no retries
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_a_stopped_automatic_torrents_downloads_are_kept_only_while_its_job_is_listed(tmp_path, monkeypatch):
+    """Taking the job off the Jobs list - or abandoning it - says you are done with its
+    downloads, whatever the Automatic tab could still try again."""
+    app, box, hold = waiting_inbox(tmp_path, monkeypatch)
+    try:
+        h = app.inbox.items()[0]["infohash"]
+        app.inbox.stop_one(h, "stopped: the queue was cleared")
+        wait(lambda: h not in app.inbox.running)           # its job has wound down
+        job = app.jobs[app.inbox.state.items[h]["job"]]
+        job.infohash = h
+        assert h in app.downloads_in_use()[0]              # its job is listed and could retry
+        job.extra = {"abandoned": True}
+        assert h not in app.downloads_in_use()[0]          # abandoned: done with
+        job.extra = None
+        app.jobs.clear()                                   # its job taken off the list
+        keep, live, _ = app.downloads_in_use()
+        assert h not in keep | live                        # done with, though the tab can retry
+    finally:
+        hold.set()
+        clients.SEARCH_GATE = None

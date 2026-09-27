@@ -118,8 +118,12 @@ class FakeSab:
     def status(self, nzo):
         return "Completed", {"storage": self.job}
 
-    def delete_history(self, nzo):
+    def delete_history(self, nzo, files=False):
         self.history_deleted.append(nzo)
+        self.history_files = files
+
+    def queue_do(self, action, nzo, value2=None):
+        self.queue_actions = getattr(self, "queue_actions", []) + [(action, nzo)]
 
 
 @pytest.fixture
@@ -143,7 +147,7 @@ def test_peek_rejects_another_encode(monkeypatch, cfg, tmp_path):
     trimmed, name, pp = sab.added[0]
     assert b"set.part01.rar" in trimmed and b"set.part02.rar" not in trimmed   # one volume only
     assert name.startswith(pipeline.PEEK_PREFIX)
-    assert pp == pipeline.PP_REPAIR                                            # never unpack/delete
+    assert pp == pipeline.PP_NONE           # nothing to repair or unpack - and never delete
 
 
 def test_peek_accepts_the_right_release(monkeypatch, cfg, tmp_path):
@@ -156,6 +160,7 @@ def test_peek_cleans_up_after_itself(monkeypatch, cfg, tmp_path):
     assert out is False
     assert not os.path.isdir(sab.job)          # the volume is not left on the disk
     assert sab.history_deleted == ["nzo1"]     # and not left in SABnzbd's history
+    assert sab.history_files is True           # nor its files, wherever SABnzbd put them
 
 
 def test_peek_gives_no_verdict_when_sabnzbd_fails(monkeypatch, cfg, tmp_path):
@@ -186,3 +191,141 @@ def test_the_peek_says_what_it_found_when_it_accepts(monkeypatch, cfg, tmp_path)
     out, _ = run_peek(monkeypatch, cfg, tmp_path, [("obf.mkv", 26_540_000_000)])
     assert out is True
     assert any("obf.mkv (24.72 GB)" in x and "what the torrent" in x for x in said)
+
+
+# ---------------------------------------------------------------- only the start of it
+
+def nzb_with_segments(name, n):
+    segs = "".join(f'<segment bytes="716800" number="{i}">{name}.{i}@x</segment>'
+                   for i in range(n, 0, -1))                      # out of order on purpose
+    return (f'<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb">'
+            f'<file subject="&quot;{name}&quot; yEnc"><segments>{segs}</segments></file>'
+            f'<file subject="&quot;set.part02.rar&quot; yEnc"><segments>'
+            f'<segment bytes="716800" number="1">b.1@x</segment></segments></file></nzb>').encode()
+
+
+def test_a_peek_fetches_the_first_articles_not_the_whole_volume():
+    """RAR headers are at the very start of the first volume: two articles, about a
+    megabyte, instead of a whole 500 MB volume."""
+    trimmed = nzbinfo.trim_head(nzb_with_segments("set.part01.rar", 700), "set.part01.rar")
+    assert b"set.part02.rar" not in trimmed                       # only the first volume
+    assert trimmed.count(b"<segment ") == 2                       # only its first articles
+    assert b'number="1"' in trimmed and b'number="2"' in trimmed  # the right two, not any two
+    assert b'number="700"' not in trimmed
+
+
+def test_trimming_the_head_of_a_file_that_is_not_there():
+    assert nzbinfo.trim_head(nzb_with_segments("set.part01.rar", 5), "other.rar") is None
+
+
+def test_the_peek_asks_for_the_head_only(monkeypatch, cfg, tmp_path):
+    out, sab = run_peek(monkeypatch, cfg, tmp_path, [("obf.mkv", 26_540_000_000)])
+    trimmed, _, _ = sab.added[0]
+    assert trimmed.count(b"<segment ") <= nzbinfo.PEEK_SEGMENTS
+
+
+# ---------------------------------------------------------------- no post-processing
+
+def test_a_peek_sabnzbd_calls_failed_is_still_read(monkeypatch, cfg, tmp_path):
+    """A lone volume can never pass a repair, so SABnzbd may call it "failed" with the
+    volume sitting there complete. Throwing that away wasted the whole download."""
+    sab = FakeSab(str(tmp_path), [])
+    sab.add_nzb(b"", "warmup", "", 0)                      # makes the folder the fake uses
+    monkeypatch.setattr(sab, "status", lambda nzo: ("Failed", {"storage": sab.job,
+                                                               "fail_message": "Post-processing was aborted"}))
+    monkeypatch.setattr(pipeline.archives, "list_contents", lambda f: [("obf.mkv", 26_540_000_000)])
+    rel = type("R", (), {"title": "T", "indexer": "i", "size": 1, "guid": "g"})()
+    assert pipeline.peek_archive(cfg, None, sab, rel, nzb("set.part01.rar"), WANT) is True
+
+
+def test_a_peek_that_downloaded_nothing_gives_no_verdict(monkeypatch, cfg, tmp_path):
+    sab = FakeSab(str(tmp_path), [])
+    monkeypatch.setattr(sab, "status", lambda nzo: ("Failed", {"fail_message": "no articles"}))
+    rel = type("R", (), {"title": "T", "indexer": "i", "size": 1, "guid": "g"})()
+    assert pipeline.peek_archive(cfg, None, sab, rel, nzb("set.part01.rar"), WANT) is None
+
+
+# ---------------------------------------------------------------- sweeping up after peeks
+
+class SweepSab:
+    """A SABnzbd with some peek jobs in its queue and history, and folders on disk."""
+
+    def __init__(self, root, queue, history):
+        self.root, self.queue, self.history = root, queue, history
+        self.deleted, self.forgotten = [], []
+
+    def _call(self, mode, **kw):
+        if mode == "queue":
+            return {"queue": {"slots": self.queue}}
+        return {"history": {"slots": self.history}}
+
+    def queue_do(self, action, nzo, value2=None):
+        self.deleted.append(nzo)
+
+    def delete_history(self, nzo, files=False):
+        self.forgotten.append((nzo, files))
+
+    def incomplete_dir(self):
+        return self.root
+
+    def config(self):
+        return {"misc": {"complete_dir": self.root}}
+
+
+def old(path):
+    t = __import__("time").time() - 3600
+    os.utime(path, (t, t))
+
+
+def test_the_sweep_removes_what_finished_peeks_left(tmp_path, cfg):
+    done = tmp_path / (pipeline.PEEK_PREFIX + "done0001")
+    done.mkdir(); (done / "v.part01.rar").write_bytes(b"x" * 1000); old(done)
+    sab = SweepSab(str(tmp_path), queue=[],
+                   history=[{"name": pipeline.PEEK_PREFIX + "done0001", "nzo_id": "h1",
+                             "completed": 0}])
+    jobs, freed = pipeline.remove_stray_peeks(cfg, sab)
+    assert jobs == 1 and ("h1", True) in sab.forgotten       # history and its files
+    assert not done.exists() and freed == 1000
+
+
+def test_the_sweep_leaves_a_peek_a_build_is_reading(tmp_path, cfg):
+    name = pipeline.PEEK_PREFIX + "reading1"
+    busy = tmp_path / name
+    busy.mkdir(); old(busy)
+    pipeline._peeking.add(name)
+    try:
+        sab = SweepSab(str(tmp_path), queue=[{"filename": name, "status": "Paused", "nzo_id": "q1"}],
+                       history=[{"name": name, "nzo_id": "h1", "completed": 0}])
+        assert pipeline.remove_stray_peeks(cfg, sab) == (0, 0)
+        assert busy.exists() and not sab.deleted and not sab.forgotten
+    finally:
+        pipeline._peeking.discard(name)
+
+
+def test_the_sweep_leaves_a_peek_that_only_just_finished(tmp_path, cfg):
+    """Seconds after finishing, a build in another process may still be reading it."""
+    import time
+    fresh = tmp_path / (pipeline.PEEK_PREFIX + "fresh001")
+    fresh.mkdir()
+    sab = SweepSab(str(tmp_path), queue=[],
+                   history=[{"name": fresh.name, "nzo_id": "h1", "completed": time.time()}])
+    assert pipeline.remove_stray_peeks(cfg, sab) == (0, 0)
+    assert fresh.exists()
+
+
+def test_the_sweep_never_touches_anything_nzb2seed_did_not_name(tmp_path, cfg):
+    theirs = tmp_path / "Some.Release.2019.1080p-GRP"
+    theirs.mkdir(); old(theirs)
+    sab = SweepSab(str(tmp_path),
+                   queue=[{"filename": "Some.Release.2019.1080p-GRP", "status": "Paused", "nzo_id": "q9"}],
+                   history=[{"name": "Some.Release.2019.1080p-GRP", "nzo_id": "h9", "completed": 0}])
+    assert pipeline.remove_stray_peeks(cfg, sab) == (0, 0)
+    assert theirs.exists() and not sab.deleted and not sab.forgotten
+
+
+def test_a_peek_still_downloading_is_left_to_finish(tmp_path, cfg):
+    """Only a peek sitting paused with nobody reading it is abandoned."""
+    sab = SweepSab(str(tmp_path),
+                   queue=[{"filename": pipeline.PEEK_PREFIX + "dl000001", "status": "Downloading",
+                           "nzo_id": "q1"}], history=[])
+    assert pipeline.remove_stray_peeks(cfg, sab) == (0, 0)

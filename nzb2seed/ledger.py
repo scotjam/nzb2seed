@@ -36,7 +36,10 @@ class Ledger:
         with _lock:
             jobs = [j for j in self._load() if j.get("nzo") != nzo]
             job = {"nzo": nzo, "title": title, "guid": guid, "indexer": indexer,
-                   "size": size, "torrent": torrent, "submitted": time.time()}
+                   "size": size, "torrent": torrent, "submitted": time.time(),
+                   # recorded by the build that made it (older records may name a torrent
+                   # another build ran at the same moment - see pipeline._this_build)
+                   "own": True}
             if ids:
                 job["ids"] = ids            # nzbinfo.post_ids: which post this was
             jobs.append(job)

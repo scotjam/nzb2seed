@@ -7,24 +7,29 @@ from __future__ import annotations
 
 import dataclasses
 import itertools
+import json
+import math
 import os
 import re
 import secrets
 import shutil
 import subprocess
+import threading
 import time
+from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 from . import metadata
 from . import assemble as asm
 from . import archives, grab, matching, nzbinfo, space
-from .clients import (PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
+from .clients import (PP_NONE, PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
                       Prowlarr, QBittorrent, Release, SABnzbd)
 from .config import Config
 from .ledger import Ledger
 from .pathmap import map_path
 from .report import ask as report_ask
+from .report import torrent as report_torrent
 from .report import check_cancel, end_progress, info, line, pieces, progress, step, warn
 from .torrent import PieceVerifier, Torrent, parse
 
@@ -33,6 +38,31 @@ STOPPED = {"pausedUP", "pausedDL", "stoppedUP", "stoppedDL", "error", "missingFi
 
 class Abort(Exception):
     pass
+
+
+class Incomplete(Abort):
+    """A build that got most of the way. It says how far, and carries what is needed to
+    finish it by other means - so a torrent that is 97% built from Usenet is not thrown
+    away when many trackers let you download a few percent without it counting towards a
+    hit-and-run. Nothing of it is deleted: the person decides what happens next."""
+
+    def __init__(self, message: str, have: float, infohash: str, torrent_path: str,
+                 save_path: str, in_client: bool, tracker: str = "", short: int | None = None,
+                 seeders: int | None = None):
+        super().__init__(message)
+        # seeders Prowlarr reported for the torrent (None = not known). With none, the
+        # missing part could never come over BitTorrent, so it is not offered
+        self.seeders = seeders if seeders is not None else getattr(_this_build, "seeders", None)
+        self.short = short                      # bytes missing, when known
+        self.have, self.infohash, self.torrent_path = have, infohash, torrent_path
+        self.save_path, self.in_client, self.tracker = save_path, in_client, tracker
+
+    def details(self) -> dict:
+        # unrounded: a few KB short of a season rounds to 1.0, which then reads as 100%
+        return {"have": self.have, "infohash": self.infohash,
+                "torrent_path": self.torrent_path, "save_path": self.save_path,
+                "in_client": self.in_client, "tracker": self.tracker, "short": self.short,
+                "seeders": self.seeders}
 
 
 @dataclass
@@ -52,6 +82,19 @@ class Options:
 
 def gb(n: int) -> str:
     return f"{n / 1024**3:.2f} GB" if n >= 1024**3 else f"{n / 1024**2:.1f} MB"
+
+
+def exact_gb(n: int) -> str:
+    """A shortfall, to four decimals and rounded *up*: "0.0 MB missing" beside a torrent
+    that is not complete reads as though nothing is wrong, so a gap is never shown as 0."""
+    unit, size = ("GB", 1024 ** 3) if n >= 1024 ** 3 else ("MB", 1024 ** 2)
+    return f"{math.ceil(n / size * 10000) / 10000:.4f} {unit}"
+
+
+def exact_pct(fraction: float) -> str:
+    """How complete, to four decimals and rounded *down*: a torrent 30 bytes short of
+    25 GB is 99.9999999% there, and rounding that to "100.0000%" would hide the gap."""
+    return f"{math.floor(fraction * 1000000) / 10000:.4f}%"
 
 
 # ---------------------------------------------------------------- pairing
@@ -170,17 +213,97 @@ def rank_posts(pr: Prowlarr, t: Torrent, group: list[Release]):
     return ranked + [(r, None, None) for r in uniq[MAX_PEEK:]]
 
 
+class Verdicts:
+    """Posts already found not to hold what part of a torrent needs, kept across runs.
+
+    Only verdicts that cannot change are kept: a post whose archive holds a different
+    release, or one that downloaded completely and still lacked the files. Those never
+    improve, so a retry skips them without so much as asking the indexer for the NZB
+    again. What can change is not kept - an NZB that failed to fetch, a timeout, an
+    indexer that was down - so a retry tries those afresh.
+
+    Keyed by the torrent and the part of it (a season, an episode) the post was wanted
+    for: a post that lacks one episode may still be the right thing for another. The same
+    post listed by another indexer is recognised by its name and exact size - a post that
+    had the missing file would be bigger by that file."""
+
+    def __init__(self, path: str):
+        self.path = path
+
+    def _load(self) -> dict:
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                return json.load(fh) or {}
+        except (OSError, ValueError):
+            return {}
+
+    def seen(self, infohash: str, label: str, rel: Release) -> str:
+        """Why this post is no good for this part of this torrent, or "" when unknown."""
+        name = matching.norm(rel.title)
+        for v in self._load().get(infohash, {}).get(label, []):
+            if v.get("guid") and v["guid"] == rel.guid:
+                return v.get("why", "")
+            if name and v.get("name") == name and rel.size and v.get("size") == rel.size:
+                return v.get("why", "")
+        return ""
+
+    def mark(self, infohash: str, label: str, rel: Release, why: str):
+        with _verdict_lock:
+            d = self._load()
+            rows = d.setdefault(infohash, {}).setdefault(label, [])
+            if not any(r.get("guid") == rel.guid for r in rows):
+                rows.append({"guid": rel.guid, "name": matching.norm(rel.title), "size": rel.size,
+                             "title": rel.title, "indexer": rel.indexer, "why": why,
+                             "at": time.time()})
+            tmp = f"{self.path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(d, fh, indent=1)
+            os.replace(tmp, self.path)
+
+    def forget(self, infohash: str) -> int:
+        """Drop what is known about one torrent (e.g. to have everything tried again)."""
+        with _verdict_lock:
+            d = self._load()
+            n = sum(len(v) for v in d.pop(infohash, {}).values())
+            tmp = f"{self.path}.{os.getpid()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(d, fh, indent=1)
+            os.replace(tmp, self.path)
+            return n
+
+
+_verdict_lock = threading.Lock()
+
+
+def verdicts_for(cfg: Config) -> Verdicts:
+    return Verdicts(os.path.join(os.path.dirname(os.path.abspath(cfg.path)), "verdicts.json"))
+
+
 def ledger_for(cfg: Config) -> Ledger:
     return Ledger(os.path.join(os.path.dirname(os.path.abspath(cfg.path)), "sab_jobs.json"))
 
 
-_current_torrent = ""   # infohash of the torrent being built, recorded with each SABnzbd job
+# What the build running in this thread is building. Per thread, since builds run side by
+# side: shared, each build's downloads were recorded under whichever torrent started last.
+#   torrent - its infohash, recorded with each SABnzbd job it submits
+#   tracker - where it came from, for "is a few percent allowed there?"
+#   seeders - how many Prowlarr reported for it
+_this_build = threading.local()
+
+
+def _torrent_now() -> str:
+    return getattr(_this_build, "torrent", "")
+
+
+def _tracker_now() -> str:
+    return getattr(_this_build, "tracker", "")
 
 
 def sab_submit(cfg: Config, pr, sab: SABnzbd, rel: Release, data: bytes | None, pp: int) -> str:
     """Start downloading a post. With a grab.Source, the paused SABnzbd job that fetched
     its NZB is resumed (nzb2seed never downloads an NZB from an indexer itself)."""
-    space.wait_for_room(step, progress)     # a download is the biggest write of all
+    # a download writes to staging, so it is staging that has to have room
+    space.wait_for_room(step, progress, role="downloads")
     nzb = data if data is not None else pr.fetch(rel)
     if b"<nzb" not in nzb[:4096].lower():
         raise ApiError(f"{rel.indexer} did not return an NZB for {rel.title}")
@@ -192,7 +315,7 @@ def sab_submit(cfg: Config, pr, sab: SABnzbd, rel: Release, data: bytes | None, 
         nzo = pr.start(rel, pp)
     else:
         nzo = sab.add_nzb(nzb, rel.title, cfg.sab_category, pp, cfg.sab_priority)
-    ledger_for(cfg).record(nzo, rel.title, rel.guid, rel.indexer, rel.size, _current_torrent, ids)
+    ledger_for(cfg).record(nzo, rel.title, rel.guid, rel.indexer, rel.size, _torrent_now(), ids)
     mode = sab.ensure_pp(nzo, pp)
     info(f"{nzo}  {mode:<16} {rel.title}  ({rel.indexer}, {gb(rel.size)})")
     return nzo
@@ -357,6 +480,10 @@ def reuse(cfg: Config, sab: SABnzbd, rel: Release, ok) -> tuple[str, str | None]
 
 
 PEEK_PREFIX = "nzb2seed-peek-"
+PEEK_QUIET = 600       # seconds a finished peek is left before a sweep may remove it
+
+# the peek jobs this process is reading right now - never swept up from under a build
+_peeking: set[str] = set()
 
 
 def archive_holds(files: list, entries: list[tuple[str, int]]) -> bool | None:
@@ -399,22 +526,34 @@ def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files:
         vol = nzbinfo.first_volume(nzbinfo.parse(nzb))
     except ET.ParseError:
         return None
-    part = nzbinfo.trim(nzb, vol) if vol else None
+    # only the first articles of the first volume: the headers are at its very start
+    part = nzbinfo.trim_head(nzb, vol) if vol else None
     if part is None:
         return None
     name = PEEK_PREFIX + secrets.token_hex(4)
     try:
-        nzo = sab.add_nzb(part, name, cfg.sab_category, PP_REPAIR, cfg.sab_priority)
+        # no post-processing: a volume on its own can never pass a repair, and "failed"
+        # was making the peek throw away a download it had in hand
+        nzo = sab.add_nzb(part, name, cfg.sab_category, PP_NONE, cfg.sab_priority)
     except ApiError as e:
         warn(f"could not look inside {rel.title}: {e}")
         return None
-    info(f"looking inside {rel.title} ({rel.indexer}, {gb(rel.size)}): fetching {vol} only")
+    _peeking.add(name)
+    info(f"looking inside {rel.title} ({rel.indexer}, {gb(rel.size)}): fetching the start "
+         f"of {vol} only (about {nzbinfo.PEEK_SEGMENTS * 0.7:.1f} MB)")
     d = None
     try:
         status, slot = sab_wait(sab, {nzo: f"first volume of {rel.title}"})[nzo]
-        if status not in SAB_DONE:
+        # read what arrived whatever SABnzbd calls the job: with nothing to post-process
+        # it may still say "failed" about a volume that is sitting there complete
+        storage = slot.get("storage") or ""
+        if not storage:
             return None
-        d = job_dir(cfg, slot, name)
+        d = map_path(storage, cfg.sab_to_local)
+        if os.path.isfile(d):
+            d = os.path.dirname(d)
+        if not os.path.isdir(d):
+            return None
         got = [os.path.join(d, f) for f in os.listdir(d)]
         got = [p for p in got if os.path.isfile(p)]
         if not got:
@@ -435,12 +574,322 @@ def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files:
         warn(f"could not look inside {rel.title}: {e}")
         return None
     finally:
+        _peeking.discard(name)
         if d and os.path.isdir(d) and os.path.basename(d).startswith(PEEK_PREFIX):
             shutil.rmtree(d, ignore_errors=True)
+        for how in ("queue", "history"):                   # wherever SABnzbd has it now
+            try:
+                if how == "queue":
+                    sab.queue_do("delete", nzo)
+                else:
+                    sab.delete_history(nzo, files=True)
+            except (ApiError, TypeError):
+                pass
+
+
+def remove_stray_peeks(cfg: Config, sab: SABnzbd) -> tuple[int, int]:
+    """Remove what finished or abandoned peeks left behind: (jobs, bytes freed).
+
+    A peek's verdict is taken the moment it is read, so once it is not being read any
+    more everything of it is spare - whether or not its season has finished. Only what
+    nzb2seed named, only what no build is reading now, and only once it has been quiet
+    for a while: a peek that finished seconds ago may still be being read by a build in
+    another process."""
+    jobs, freed = 0, 0
+    now = time.time()
+    try:
+        queue = sab._call("queue", limit="0").get("queue", {}).get("slots", [])
+        for q in queue:
+            name = str(q.get("filename", ""))
+            # a peek still queued with nobody reading it is one a killed build started
+            if name.startswith(PEEK_PREFIX) and name not in _peeking and \
+                    str(q.get("status", "")) == "Paused":
+                sab.queue_do("delete", q["nzo_id"])
+                jobs += 1
+        hist = sab._call("history", limit="1000").get("history", {}).get("slots", [])
+        for h in hist:
+            name = str(h.get("name", ""))
+            if name.startswith(PEEK_PREFIX) and name not in _peeking \
+                    and now - float(h.get("completed") or 0) > PEEK_QUIET:
+                sab.delete_history(h["nzo_id"], files=True)
+                jobs += 1
+    except ApiError:
+        pass
+    try:                                    # a check still in the queue is being read
+        queued_names = {str(q.get("filename", "")) for q in
+                        sab._call("queue", limit="0").get("queue", {}).get("slots", [])}
+    except ApiError:
+        return jobs, freed                  # cannot tell what is in use: leave the folders
+    roots = []
+    for where in (sab.incomplete_dir(), (sab.config().get("misc") or {}).get("complete_dir")):
+        if where:
+            roots.append(map_path(where, cfg.sab_to_local))
+    for root in roots:
         try:
-            sab.delete_history(nzo)
-        except ApiError:
-            pass
+            names = os.listdir(root)
+        except OSError:
+            continue
+        for n in names:
+            p = os.path.join(root, n)
+            if not n.startswith((PEEK_PREFIX, grab.CHECK_PREFIX)) or n in _peeking \
+                    or n in queued_names or not os.path.isdir(p):
+                continue
+            try:
+                if now - os.path.getmtime(p) < PEEK_QUIET:
+                    continue
+                freed += sum(os.path.getsize(os.path.join(dp, f))
+                             for dp, _, fs in os.walk(p) for f in fs)
+            except OSError:
+                continue
+            shutil.rmtree(p, ignore_errors=True)
+    return jobs, freed
+
+
+def remove_download(cfg: Config, sab: SABnzbd, nzo: str) -> bool:
+    """Delete one of nzb2seed's SABnzbd downloads, files and all. SABnzbd's own del_files
+    only deletes a *failed* job's files, so a finished job's folder is removed here first
+    and its history entry after. A job still queued is deleted from the queue (SABnzbd does
+    remove those files). Never SABnzbd's own complete or incomplete folder."""
+    slot = sab.history_slot(nzo)
+    if slot is None:
+        if sab.queue_slot(nzo) is not None:
+            sab.queue_do("delete", nzo)
+            return True
+        return False
+    where = map_path(slot.get("storage") or slot.get("path") or "", cfg.sab_to_local)
+    if where and os.path.isfile(where):
+        where = os.path.dirname(where)
+    roots = {os.path.normpath(map_path(r, cfg.sab_to_local)) for r in (
+        sab.incomplete_dir(), (sab.config().get("misc") or {}).get("complete_dir")) if r}
+    if where and os.path.isdir(where) and os.path.normpath(where) not in roots:
+        shutil.rmtree(where)
+    sab.delete_history(nzo, files=False)
+    return True
+
+
+def delete_downloads_of(cfg: Config, sab: SABnzbd, qb, hashes: set[str]) -> dict:
+    """Delete the Usenet downloads nzb2seed made for these torrents - part downloads still
+    in SABnzbd's queue and finished ones - as long as nothing depends on them: never a
+    folder a torrent in qBittorrent uses, one a running build has claimed, or one shared
+    with a download of anything else. {"deleted", "bytes", "kept": [why, ...]}.
+    Nothing is deleted when qBittorrent cannot be asked, since then nobody can tell."""
+    if qb is None:
+        raise Abort("qBittorrent is not set up, so it cannot be told which downloads a torrent uses - nothing deleted")
+    torrents = qb.torrents()
+    back = [(b, a) for a, b in (cfg.local_to_qbit or [])]
+    busy = [os.path.normpath(map_path(t["content_path"], back)) for t in torrents if t.get("content_path")]
+    busy += list(claimed())
+
+    def in_use(p: str) -> bool:
+        p = os.path.normpath(p)
+        return any(b == p or b.startswith(p + os.sep) or p.startswith(b + os.sep) for b in busy)
+
+    ours = {e.get("nzo"): e for e in ledger_for(cfg).all()}
+    mine = {z for z, e in ours.items() if e.get("torrent") in hashes}
+    if not mine:
+        return {"deleted": 0, "bytes": 0, "kept": []}
+    slots = sab._call("history", limit="1000000").get("history", {}).get("slots", [])   # 0 means 10
+    folders: dict[str, list[str]] = {}
+    for slot in slots:
+        where = map_path(slot.get("storage") or slot.get("path") or "", cfg.sab_to_local)
+        if where and os.path.isfile(where):
+            where = os.path.dirname(where)
+        if where:
+            folders.setdefault(os.path.normpath(where), []).append(slot.get("nzo_id"))
+    roots = {os.path.normpath(map_path(r, cfg.sab_to_local)) for r in (
+        sab.incomplete_dir(), (sab.config().get("misc") or {}).get("complete_dir")) if r}
+    deleted = freed = 0
+    kept: list[str] = []
+    done_nzos: set[str] = set()
+    for where, nzos in folders.items():
+        if not set(nzos) & mine:
+            continue
+        name = os.path.basename(where)
+        if where in roots or not os.path.isdir(where):
+            continue
+        if not set(nzos) <= mine:
+            kept.append(f"{name}: shared with another download")
+            continue
+        if in_use(where):
+            kept.append(f"{name}: a torrent in qBittorrent (or a running build) uses it")
+            continue
+        try:
+            size = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(where) for f in fs)
+            shutil.rmtree(where)
+            for z in nzos:
+                sab.delete_history(z, files=False)
+            done_nzos.update(nzos)
+            deleted += 1
+            freed += size
+        except (ApiError, OSError) as err:
+            kept.append(f"{name}: {err}")
+    # part downloads still in the queue (SABnzbd deletes their files itself)
+    for z in mine - done_nzos:
+        try:
+            if sab.queue_slot(z) is not None:
+                sab.queue_do("delete", z)
+                deleted += 1
+        except ApiError as err:
+            kept.append(f"{ours[z].get('title') or z}: {err}")
+    return {"deleted": deleted, "bytes": freed, "kept": kept}
+
+
+QUIET = 3600          # a download folder is left alone until nothing has touched it for this long
+_SEASON = re.compile(r"(?<![a-z0-9])s(\d{1,4})(?:e\d{1,4})?(?![0-9])")
+_YEAR = re.compile(r"(?<![0-9])(19|20)\d{2}(?![0-9])")
+
+
+def release_key(name: str) -> str:
+    """What release a name is of, loosely: "show|s1" for any episode, season or
+    pack name of that season, "film|2020" for a film - whatever the group, resolution or
+    punctuation. For matching an old download record to the builds that could use it."""
+    n = re.sub(r"[()\[\]{}]", "", matching.norm(name)).replace("..", ".")
+    m = _SEASON.search(n)
+    if m:
+        show = _YEAR.sub("", n[:m.start()]).strip(".-")
+        return f"{show}|s{int(m.group(1))}"
+    y = _YEAR.search(n)
+    if y and y.start() > 0:
+        return f"{n[:y.start()].strip('.-')}|{y.group(0)}"
+    return ".".join(n.split(".")[:4])
+
+
+def clean_unused_downloads(cfg: Config, sab: SABnzbd, qb, keep: set[str], live: set[str],
+                           names: set[str], log=print, dry_run: bool = False,
+                           now: float | None = None) -> tuple[int, int]:
+    """Delete nzb2seed's Usenet downloads that nothing can use any more: (folders, bytes).
+
+    A folder goes only when every SABnzbd entry pointing at it is nzb2seed's, and none of
+    them is for a torrent in ``live`` (being built, or queued to be) or ``keep`` (a job on
+    the list could still use it: try again, add to the torrent client, build from another
+    tracker); no torrent in qBittorrent uses the folder or holds one of those torrents
+    unfinished; no running build has claimed it; and nothing has touched it for QUIET
+    seconds. Records from before each build filed its own downloads may name the wrong
+    torrent, so for those a download of the same release (same show and season, or film
+    and year - see release_key) as one of those builds, jobs or torrents (``names``) is kept
+    too. Anything SABnzbd is still downloading is never touched."""
+    torrents = qb.torrents() if qb is not None else []
+    if qb is None:
+        return 0, 0                          # cannot tell what qBittorrent uses: nothing goes
+    unfinished = {t["hash"] for t in torrents if (t.get("progress") or 0) < 1}
+    names = set(names) | {release_key(t.get("name") or "") for t in torrents if (t.get("progress") or 0) < 1}
+    back = [(b, a) for a, b in (cfg.local_to_qbit or [])]
+    busy = [os.path.normpath(map_path(t["content_path"], back)) for t in torrents if t.get("content_path")]
+    busy += list(claimed())
+
+    def in_use(p: str) -> bool:
+        p = os.path.normpath(p)
+        return any(b == p or b.startswith(p + os.sep) or p.startswith(b + os.sep) for b in busy)
+
+    ours = {e.get("nzo"): e for e in ledger_for(cfg).all()}
+    try:
+        slots = sab._call("history", limit="1000000").get("history", {}).get("slots", [])   # 0 means 10
+    except ApiError as err:
+        log(f"not clearing downloads: SABnzbd's history could not be read ({err})")
+        return 0, 0
+    roots = {os.path.normpath(map_path(r, cfg.sab_to_local)) for r in (
+        sab.incomplete_dir(), (sab.config().get("misc") or {}).get("complete_dir")) if r}
+    folders: dict[str, list[dict]] = {}
+    for slot in slots:
+        where = map_path(slot.get("storage") or slot.get("path") or "", cfg.sab_to_local)
+        if not where or not os.path.exists(where):
+            continue
+        if os.path.isfile(where):
+            where = os.path.dirname(where)
+        folders.setdefault(os.path.normpath(where), []).append(slot)
+    now = time.time() if now is None else now
+    wanted = keep | live | unfinished
+
+    def needed(e: dict) -> bool:
+        if not e.get("torrent") or e.get("torrent") in wanted:
+            return True                        # no torrent (a season grab's): not ours to judge
+        # an old record may name another build's torrent: one of a release still wanted stays
+        return not e.get("own") and release_key(e.get("title") or "") in names
+
+    n = freed = 0
+    for where, slots_here in folders.items():
+        entries = [ours.get(s.get("nzo_id")) for s in slots_here]
+        if where in roots or not all(entries) or any(needed(e) for e in entries) or in_use(where):
+            continue
+        try:
+            touched = max([os.path.getmtime(where)] + [float(s.get("completed") or 0) for s in slots_here])
+            if now - touched < QUIET:
+                continue                       # something may still be working with it
+            size = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(where) for f in fs)
+            if not dry_run:
+                shutil.rmtree(where)
+                for s in slots_here:
+                    sab.delete_history(s.get("nzo_id"), files=False)
+            n += 1
+            freed += size
+        except (ApiError, OSError) as err:
+            log(f"could not clear {os.path.basename(where)}: {err}")
+    if n:
+        log(f"{'would clear' if dry_run else 'cleared'} {n} Usenet download folder(s) nothing can use any more ({gb(freed)})")
+    return n, freed
+
+
+def clean_seeded_downloads(cfg: Config, sab: SABnzbd, qb, log=print, dry_run: bool = False) -> tuple[int, int]:
+    """Delete nzb2seed's Usenet downloads whose torrent is complete in qBittorrent:
+    (downloads, bytes). No build needs the files of a torrent that is already done; one
+    whose torrent is not complete is kept, as a retry may need it. Never touched: a folder
+    any torrent in qBittorrent is using, and one a running build has claimed (it may be
+    reusing it for another torrent with the same files)."""
+    torrents = qb.torrents() if qb is not None else []
+    if not torrents:
+        return 0, 0                          # cannot see qBittorrent: nothing is known done
+    done = {t["hash"] for t in torrents if (t.get("progress") or 0) >= 1}
+    back = [(b, a) for a, b in (cfg.local_to_qbit or [])]
+    busy = [os.path.normpath(map_path(t["content_path"], back)) for t in torrents if t.get("content_path")]
+    busy += list(claimed())
+
+    def in_use(p: str) -> bool:
+        p = os.path.normpath(p)
+        return any(b == p or b.startswith(p + os.sep) or p.startswith(b + os.sep) for b in busy)
+
+    # every SABnzbd history entry, by the folder it left: a folder is only cleared when every
+    # entry pointing at it is nzb2seed's, for a torrent that is complete - one shared with a
+    # download a retry may still need (or with anything not nzb2seed's) is kept
+    ours = {e.get("nzo"): e.get("torrent") for e in ledger_for(cfg).all()}
+    try:
+        slots = sab._call("history", limit="1000000").get("history", {}).get("slots", [])   # 0 means 10
+    except ApiError as err:
+        log(f"not clearing downloads: SABnzbd's history could not be read ({err})")
+        return 0, 0
+    # SABnzbd's own folders themselves are never cleared, only job folders inside them
+    roots = {os.path.normpath(map_path(r, cfg.sab_to_local)) for r in (
+        sab.incomplete_dir(), (sab.config().get("misc") or {}).get("complete_dir")) if r}
+    folders: dict[str, list[str]] = {}
+    for slot in slots:
+        where = map_path(slot.get("storage") or slot.get("path") or "", cfg.sab_to_local)
+        if not where or not os.path.exists(where):
+            continue
+        if os.path.isfile(where):
+            where = os.path.dirname(where)
+        folders.setdefault(os.path.normpath(where), []).append(slot.get("nzo_id"))
+    n = freed = 0
+    for where, nzos in folders.items():
+        if not all(ours.get(z) in done for z in nzos):
+            continue                         # someone may still need it
+        if where in roots or in_use(where):
+            continue
+        try:
+            size = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(where) for f in fs)
+            if not dry_run:
+                # SABnzbd's del_files only deletes the files of *failed* jobs: a completed
+                # job's folder is removed here, and only then its history entry - so a
+                # folder that could not be removed keeps the entry a later run finds it by
+                shutil.rmtree(where)
+                for z in nzos:
+                    sab.delete_history(z, files=False)
+            n += 1
+            freed += size
+        except (ApiError, OSError) as err:
+            log(f"could not clear {os.path.basename(where)}: {err}")
+    if n:
+        log(f"{'would clear' if dry_run else 'cleared'} {n} Usenet download folder(s) of torrents "
+            f"that are complete in qBittorrent ({gb(freed)})")
+    return n, freed
 
 
 def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
@@ -477,7 +926,7 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
             held = ""
             if space.GATE:
                 try:
-                    held = space.GATE() or ""
+                    held = space.GATE("downloads") or ""     # it is waiting on a download
                 except Exception:
                     held = ""
             if held and held != said:
@@ -494,7 +943,33 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
     return out
 
 
+_claims: dict[int, set[str]] = {}          # thread -> download folders it is using
+_claims_lock = threading.Lock()
+
+
+def claim(d: str) -> str:
+    """Note that the build running in this thread uses download folder ``d`` - it may be
+    an earlier download of another torrent - so the cleanup leaves it alone meanwhile."""
+    with _claims_lock:
+        _claims.setdefault(threading.get_ident(), set()).add(os.path.normpath(d))
+    return d
+
+
+def claimed() -> set[str]:
+    """Folders claimed by builds still running (a finished build's thread is gone, and so
+    are its claims)."""
+    alive = {t.ident for t in threading.enumerate()}
+    with _claims_lock:
+        for k in [k for k in _claims if k not in alive]:
+            del _claims[k]
+        return set().union(*_claims.values()) if _claims else set()
+
+
 def job_dir(cfg: Config, slot: dict, title: str) -> str:
+    return claim(_job_dir(cfg, slot, title))
+
+
+def _job_dir(cfg: Config, slot: dict, title: str) -> str:
     storage = slot.get("storage") or ""
     local = map_path(storage, cfg.sab_to_local)
     if not os.path.exists(local):
@@ -530,6 +1005,12 @@ def group_of(name: str) -> str | None:
     'Show S03 - Heat B' -> None."""
     s = name.strip()
     low = s.lower()
+    # "Show (2022) S02E01 (1080p ATVP WEB-DL H265 ... English - GRPH).mkv": the group closes
+    # the bracketed description at the end
+    # (also with dots for spaces, and a poster's "-xpost" after it)
+    m = re.search(r"[\s._]-[\s._]([A-Za-z0-9]{2,20})\)\s*(?:\.[A-Za-z0-9]{2,4})?(?:-x?(?:post|repo))?\s*$", s, re.I)
+    if m and m.group(1).lower() not in _NOT_GROUP:
+        return m.group(1).lower()
     m_res, m_ep = _RES.search(matching.norm(s)), _EP.search(matching.norm(s))
     # find the anchor in the raw name (norm only swaps separators, so positions line up)
     anchor = 0
@@ -539,8 +1020,9 @@ def group_of(name: str) -> str | None:
             anchor = max(anchor, k + len(m.group(0)) if k >= 0 else 0)
     for dm in re.finditer(r"-", s[anchor:]):
         i = anchor + dm.start()
-        if i == 0 or s[i - 1].isspace() or i + 1 >= len(s) or s[i + 1].isspace():
-            continue                                     # ' - Heat B': a description, not a group
+        if i == 0 or s[i - 1].isspace() or i + 1 >= len(s) or s[i + 1].isspace() or \
+                (s[i - 1] in "._" and s[i + 1] in "._"):
+            continue                                     # ' - Heat B' (or '.-.'): a description, not a group
         tok = re.split(r"[-.\s\[\]()]", s[i + 1:].lower())[0]
         if tok and tok not in _NOT_GROUP:
             return tok
@@ -608,9 +1090,9 @@ def _fits(need: Need, r: Release) -> str | None:
         if len(tokens) == 1 and not re.search(r"s\d{1,4}\.?-\.?s?\d{1,4}", n):
             return "single season"
     if need.res and need.res not in _RES.findall(n):
-        return "other resolution"
+        return "other resolution" if _RES.findall(n) else "no resolution in its name"
     if need.group and group_of(r.title) != need.group:
-        return "other release group"
+        return "other release group" if group_of(r.title) else "no release group in its name"
     if r.size < need.min_size:
         return "smaller than the torrent's file - cannot hold it"
     return None
@@ -651,18 +1133,24 @@ def find_alternatives(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release
 
 def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
                  known: list[Release] = ()) -> Release | None:
-    """Nothing fits automatically: show the search results from the same release group as
-    the torrent's file (other groups can never match it byte for byte) and let the person
-    pick. Nothing from that group left: stop."""
+    """Nothing fits automatically: show the search results and let the person pick - but
+    not one whose name shows another release group or another resolution than the
+    torrent's file: those can never match it byte for byte. A name that shows no group or
+    no resolution (an obfuscated post) is offered, since it may be the one. Nothing left:
+    stop."""
     tried_guids = {r.guid for r in tried}
-    results = [r for r in usenet_results(cfg, pr, need, known)
-               if r.guid not in tried_guids and (not need.group or group_of(r.title) == need.group)]
+
+    def could_be(r: Release) -> bool:
+        group, res = group_of(r.title), _RES.findall(matching.norm(r.title))
+        return (not need.group or not group or group == need.group) and             (not need.res or not res or need.res in res)
+    results = [r for r in usenet_results(cfg, pr, need, known) if r.guid not in tried_guids and could_be(r)]
     if not results:
-        warn(f"no other {need.group.upper() + ' ' if need.group else ''}posts of {need.label} to choose from")
+        warn(f"no other {need.group.upper() + ' ' if need.group else ''}{need.res + ' ' if need.res else ''}"
+             f"posts of {need.label} to choose from")
         return None
     results.sort(key=lambda r: (r.size < need.min_size, -(r.grabs or 0)))
     choices = [{"title": r.title, "indexer": r.indexer, "size": r.size, "size_text": gb(r.size),
-                "grabs": r.grabs, "note": _fits(need, r) or ""} for r in results]
+                "grabs": r.grabs, "publish_date": r.publish_date, "note": _fits(need, r) or ""} for r in results]
     prompt = (f"No automatic replacement for {need.label}. Pick the {need.group.upper() + ' ' if need.group else ''}"
               f"NZB to download instead - it has to hold {need.target} ({gb(need.min_size)}).")
     idx = report_ask(prompt, choices)
@@ -889,6 +1377,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     partials: list[tuple[str, str]] = []        # (folder, title) of downloads that fell short
     pending: dict[str, tuple[Unit, Release]] = {}
     attempted: set[str] = set()                 # posts tried at any level of this build
+    verdicts = verdicts_for(cfg)                 # ...and posts earlier runs found no good
 
     def resolve(u: Unit, d: str | None, nzo: str | None):
         u.done = True
@@ -927,10 +1416,27 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
 
     def fetch_extras(u: Unit):
         """Files of ``u`` no child covers - a season's own .nfo/.sfv next to its episodes -
-        downloaded on their own: each of ``u``'s posts (same group/resolution) is trimmed
-        to files of those types, so a few KB come down instead of the whole season."""
+        downloaded on their own (see fetch_small)."""
         covered = {f.relpath for c in u.children for f in c.files}
-        extras = [f for f in u.files if f.relpath not in covered and f.relpath not in placed]
+        fetch_small(u, [f for f in u.files if f.relpath not in covered and f.relpath not in placed])
+
+    def still_missing(u: Unit) -> list:
+        """Files of ``u`` that nothing downloaded so far holds."""
+        have = set(asm.find_sources(t, dirs + looked + [d for d, _ in partials]))
+        return [f for f in u.files if f.relpath not in have and f.relpath not in placed]
+
+    def only_small_missing(u: Unit, missing: list) -> bool:
+        """Is what ``u`` still lacks too small to be worth another whole post? Then it comes
+        from trimmed NZBs, or over BitTorrent when the build is handed on nearly complete -
+        never from another download of everything else again."""
+        short = sum(f.length for f in missing)
+        whole = sum(f.length for f in u.files) or 1
+        return 0 < short <= 50 << 20 and short / whole * 100 < float(cfg.nearly_complete_percent or 5)             and short < float(cfg.nearly_complete_mb or 200) * 1024 ** 2
+
+    def fetch_small(u: Unit, extras: list):
+        """Download only ``extras`` - small files such as an .nfo or .sfv: each of ``u``'s
+        posts (same group/resolution) is trimmed to files of those types, so a few KB come
+        down instead of the whole post again."""
         if not extras:
             return
         want = {f.relpath for f in extras}
@@ -964,7 +1470,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             name = f"{t.name}.extras"
             try:
                 nzo = sab.add_nzb(trimmed, name, cfg.sab_category, PP_REPAIR, cfg.sab_priority)
-                ledger_for(cfg).record(nzo, name, rel.guid, rel.indexer, None, _current_torrent)
+                ledger_for(cfg).record(nzo, name, rel.guid, rel.indexer, None, _torrent_now())
                 info(f"{nzo}  {', '.join(exts)} from {rel.title} ({rel.indexer})")
                 status, slot = sab_wait(sab, {nzo: name})[nzo]
                 if status not in SAB_DONE:
@@ -1025,6 +1531,11 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     raise Abort(f"no Usenet post could supply {u.need.label}")
             u.tried.append(rel)
             attempted.add(rel.guid)
+            known = verdicts.seen(t.infohash, u.need.label, rel)
+            if known:
+                info(f"{rel.title} ({rel.indexer}): {known} on an earlier run - skipping it "
+                     "without asking the indexer for it again")
+                continue
             if failed_before(cfg, sab, rel):
                 continue
             again = reuse(cfg, sab, rel, lambda d: satisfied(u, d))
@@ -1052,11 +1563,15 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     return
                 info(f"{why}, and that one " + ("failed in SABnzbd" if state == "failed"
                                                 else f"did not hold all of {u.need.label}") + " - skipping it")
+                if state == "done":
+                    verdicts.mark(t.infohash, u.need.label, rel,
+                                  f"it is the same post as a download that did not hold all of {u.need.label}")
                 _drop(pr, rel)
                 continue
             peek = cfg.peek_archives if opts.peek is None else opts.peek
             if peek and worth_peeking(data, u.files) \
                     and peek_archive(cfg, pr, sab, rel, data, u.files) is False:
+                verdicts.mark(t.infohash, u.need.label, rel, "its archive holds a different release")
                 _drop(pr, rel)
                 continue
             try:
@@ -1082,7 +1597,24 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     continue
                 warn(f"{rel.title} finished but does not hold all of {u.need.label}; "
                      "what it does hold is used if needed")
+                verdicts.mark(t.infohash, u.need.label, rel,
+                              f"it downloaded completely and did not hold all of {u.need.label}")
                 partials.append((d, rel.title))
+                missing = still_missing(u)
+                if only_small_missing(u, missing):
+                    names = ", ".join(f"{f.name} ({gb(f.length)})" for f in missing[:3])
+                    info(f"{u.need.label}: only {names} missing now - not downloading another whole "
+                         "post for that")
+                    fetch_small(u, missing)
+                    # everything downloaded that holds a file of the unit goes forward: the
+                    # build finishes complete, or stops nearly complete with the rest to come
+                    # over BitTorrent if you choose (or your tracker is set to always add)
+                    for x in [d] + looked + [p for p, _ in partials]:
+                        if x not in dirs and os.path.isdir(x) and set(asm.find_sources(t, [x])) & \
+                                {f.relpath for f in u.files}:
+                            dirs.append(x)
+                    resolve(u, None, nzo)
+                    continue
             else:
                 warn(f"SABnzbd could not complete {rel.title}")
             advance(u)
@@ -1483,8 +2015,11 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
         elif now - last[0] > 0.5:
             last[0] = now
             progress(f"copying {name}: {gb(done)} of {gb(total)}")
-    space.wait_for_room(step, progress)     # placing files writes as much again
+    # placing files writes to the output disk - and empties staging afterwards, so it
+    # is never held back by staging being full
+    space.wait_for_room(step, progress, role="output")
     owned = owned_record(cfg, t, opts)
+    asm.OWNER = asm.parse_owner(cfg.file_owner)
     try:
         res = asm.assemble(t, source_dirs, output_dir, dry_run=opts.dry_run, log=line,
                            progress=copying, owned=owned, keep=keep_dirs)
@@ -1509,12 +2044,25 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
                     output_dir, owned, dry_run=True, log=line)
         return {"result": "dry run"}
     if not res.complete:
-        raise Abort("the NZB download(s) do not contain every file of the torrent; not adding it "
-                    "(nothing deleted; try post-processing 'unpack' if the post was packed differently)")
+        total = sum(f.length for f in t.real_files) or 1
+        short = sum(f.length for f in res.missing) + sum(f.length for f, _ in res.wrong_size)
+        have = max(0.0, 1 - short / total)
+        raise Incomplete(
+            f"the NZB download(s) do not contain every file of the torrent: {exact_pct(have)} "
+            f"of it is here and {exact_gb(short)} is missing; not adding it (nothing deleted; try "
+            "post-processing 'unpack' if the post was packed differently)",
+            have, t.infohash, torrent_path, map_path(output_dir, cfg.local_to_qbit),
+            in_client=False, tracker=_tracker_now(), short=short)
     info(f"all {len(t.real_files)} file(s) present with the right size")
 
     retry_on = retry is not None and (cfg.retry_bad_pieces if opts.retry_bad is None else opts.retry_bad)
-    if opts.local_verify or cfg.local_verify or retry_on:
+    # One full hashing pass is enough, and qBittorrent's recheck has to happen anyway - so
+    # nothing is hashed here first unless asked for, or unless there is no qBittorrent to
+    # ask. Failing pieces are repaired after that recheck, with only the pieces of the
+    # replaced files hashed here (see repair_bad_pieces), and qBittorrent checks once more.
+    # In practice SABnzbd's par2 repair means the data arrives sound: this saves a full
+    # read of every build and costs nothing when something does need fixing.
+    if opts.local_verify or cfg.local_verify or (retry_on and qb is None):
         step("Hashing all pieces locally")
 
         def tick(i, n, bad_so_far):
@@ -1600,12 +2148,19 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     tinfo = qb.wait_idle(t.infohash, on_tick=tick, min_wait=5)
     end_progress()
     piece_map(final=True)
+    if tinfo.get("progress", 0) < 1 and retry_on:
+        tinfo = _repair_after_recheck(qb, t, res, owned, retry, source_dirs, tick)
+        piece_map(final=True)
     pct = tinfo.get("progress", 0) * 100
     if tinfo.get("progress", 0) < 1:
         for f in qb.files(t.infohash):
             if f.get("progress", 0) < 1:
-                warn(f"{f.get('progress', 0) * 100:5.1f}%  {f.get('name')}")
-        raise Abort(f"recheck finished at {pct:.1f}%; the torrent stays stopped (no download, no H&R)")
+                warn(f"{exact_pct(f.get('progress', 0)):>9}  {f.get('name')}")
+        raise Incomplete(f"recheck finished at {exact_pct(tinfo.get('progress', 0))}; the torrent "
+                         "stays stopped (no download, no H&R)",
+                         tinfo.get("progress", 0), t.infohash, torrent_path, save_path,
+                         in_client=True, tracker=_tracker_now(),
+                         short=round(sum(f.length for f in t.real_files) * (1 - tinfo.get("progress", 0))))
     info("recheck: 100.0% - complete, built entirely from Usenet")
 
     if opts.start or cfg.start_when_complete:
@@ -1618,7 +2173,64 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     return {"result": f"100.0% ({state})", "progress": 1.0, "infohash": t.infohash}
 
 
+def _repair_after_recheck(qb, t: Torrent, res, owned, retry: "Retry", source_dirs: list[str],
+                          tick) -> dict:
+    """qBittorrent's recheck found failing pieces: replace the files behind them from other
+    posts, then have qBittorrent check again.
+
+    The torrent is stopped the whole time - a stopped torrent never downloads, so swapping
+    a file under it cannot fetch anything over BitTorrent. Choosing a replacement hashes
+    only the pieces it has to (repair_bad_pieces), and qBittorrent's recheck of the whole
+    torrent happens once at the end rather than after every file."""
+    states = qb.piece_states(t.infohash)
+    if len(states) != len(t.pieces):
+        warn(f"qBittorrent reported {len(states)} pieces for a torrent of {len(t.pieces)}; "
+             "not repairing from that")
+        return qb.info(t.infohash) or {}
+    bad = [i for i, st in enumerate(states) if st != 2]
+    for f in asm.files_for_pieces(t, bad):
+        warn(f"bad pieces in {f.relpath}")
+    step(f"Replacing files behind {len(bad)} failing piece(s) with other posts")
+    if not repair_bad_pieces(retry, t, res, bad, owned, source_dirs):
+        warn("pieces still fail after trying the other posts")
+        return qb.info(t.infohash) or {}
+    step("Checking again in qBittorrent")
+    qb.recheck(t.infohash)
+    info_ = qb.wait_idle(t.infohash, on_tick=tick, min_wait=5)
+    end_progress()
+    return info_
+
+
 # ---------------------------------------------------------------- whole runs
+
+def site_of(host: str) -> str:
+    """"tracker.example.org" -> "example.org" (and "x.example.co.uk" -> "example.co.uk")."""
+    parts = [p for p in (host or "").lower().split(".") if p]
+    keep = 3 if len(parts) > 2 and len(parts[-1]) == 2 and parts[-2] in ("co", "com", "org", "net", "ac") else 2
+    return ".".join(parts[-keep:])
+
+
+_sites_cache: dict = {"at": 0.0, "sites": []}
+
+
+def tracker_name(trackers, prowlarr=None) -> str:
+    """The tracker a torrent announces to, by the name Prowlarr gives its indexer (the name
+    the rest of nzb2seed - and your "always add" list - uses), else by its site."""
+    from .worth import tracker_of
+    site = site_of(tracker_of(trackers))
+    if not site:
+        return ""
+    if prowlarr is not None:
+        if time.time() - _sites_cache["at"] > 3600:
+            try:
+                _sites_cache.update(at=time.time(), sites=prowlarr.indexer_sites())
+            except (ApiError, OSError, ValueError, AttributeError):
+                pass
+        for name, urls in _sites_cache["sites"]:
+            if any(site_of(urlsplit(u).hostname or "") == site for u in urls):
+                return name
+    return site
+
 
 def local_release(t: Torrent, path: str) -> Release:
     """A Release standing in for a .torrent file the user already has."""
@@ -1637,12 +2249,23 @@ def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[
     info(f"SABnzbd {sab.version()}")
     if n := grab.remove_stray_checks(sab):
         info(f"removed {n} paused NZB-check job(s) an interrupted build left in SABnzbd")
+    _sweep_peeks(cfg, sab)              # a build starting: what a restart left behind
     metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)   # srrDB, for scene releases
     try:
         return _execute_run(cfg, opts, pr, sab, qb, tor_rel, groups, torrent_data)
     finally:
         pr.close()                      # paused NZB-check jobs of posts not used
+        _sweep_peeks(cfg, sab)          # a build ending: its torrent is complete, or given up on
         metadata.close_session()
+
+
+def _sweep_peeks(cfg: Config, sab: SABnzbd):
+    try:
+        jobs, freed = remove_stray_peeks(cfg, sab)
+    except Exception:                   # housekeeping must never fail a build
+        return
+    if jobs or freed:
+        info(f"removed {jobs} finished peek job(s) and {gb(freed)} they left on disk")
 
 
 def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor_rel: Release,
@@ -1654,8 +2277,14 @@ def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor
         step(f"Downloading .torrent from {tor_rel.indexer}")
         t, path = save_torrent(cfg, pr.fetch(tor_rel))
     show_layout(t)
-    global _current_torrent
-    _current_torrent = t.infohash
+    _this_build.torrent = t.infohash
+    _this_build.tracker = tor_rel.indexer or ""
+    if tor_rel.guid.startswith("file:"):
+        # a .torrent that did not come from a Prowlarr search (automatic builds, uploads):
+        # its "indexer" is only the file's name - the tracker is the one it announces to
+        _this_build.tracker = tracker_name(t.trackers, getattr(pr, "pr", pr)) or _this_build.tracker
+    report_torrent(t.infohash)
+    _this_build.seeders = tor_rel.seeders if (tor_rel.seeders or 0) >= 0 and tor_rel.seeders is not None else None
     existing = qbit_preflight(qb, t) if qb else None
 
     pp = choose_pp(opts, cfg, t)
@@ -1731,8 +2360,7 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
             pr = grab.Source(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), sab)
             grab.remove_stray_checks(sab)
             metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
-            global _current_torrent
-            _current_torrent = t.infohash
+            _this_build.torrent = t.infohash
             pp = choose_pp(opts, cfg, t)
             sab_preflight(sab, pp)
             have = {f.relpath for f in t.real_files} - {f.relpath for f in missing}

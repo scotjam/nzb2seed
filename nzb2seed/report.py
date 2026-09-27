@@ -89,6 +89,13 @@ def line(text: str):
     sink().emit("line", text)
 
 
+def torrent(infohash: str):
+    """The torrent this job builds - so its downloads can be found again later."""
+    fn = getattr(sink(), "torrent", None)
+    if fn:
+        fn(infohash)
+
+
 def progress(text: str):
     """A status line that replaces the previous one."""
     sink().progress(text)
