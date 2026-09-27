@@ -86,3 +86,33 @@ def test_only_a_running_build_blocks_building_again(tmp_path):
     gate.set()
     wait(lambda: job.status == "failed")
     assert app.active_build("Release.Three") is None     # failed: it may be built again
+
+
+def test_only_so_many_builds_run_at_once(tmp_path, monkeypatch):
+    """Ticking twenty seasons must not start twenty builds: each would sit on a finished
+    download while it waited, filling the staging disk with work nothing can finish."""
+    import dataclasses
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    app.cfg = dataclasses.replace(app.cfg, build_parallel=2)
+    slots = app.build_slot()
+    taken = [slots.acquire(blocking=False) for _ in range(4)]
+    assert taken == [True, True, False, False]        # two at a time
+    slots.release(); slots.release()
+
+
+def test_the_number_of_slots_follows_the_setting(tmp_path):
+    import dataclasses
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    app.cfg = dataclasses.replace(app.cfg, build_parallel=3)
+    slots = app.build_slot()
+    assert [slots.acquire(blocking=False) for _ in range(4)] == [True, True, True, False]
+    for _ in range(3):
+        slots.release()
+    app.cfg = dataclasses.replace(app.cfg, build_parallel=1)
+    slots = app.build_slot()
+    assert [slots.acquire(blocking=False) for _ in range(2)] == [True, False]
+    slots.release()

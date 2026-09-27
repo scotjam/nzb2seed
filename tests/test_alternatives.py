@@ -34,6 +34,12 @@ def rel(title, size, guid=None, grabs=0, indexer="idx"):
     ("Show S03 - Heat B", None),                                            # a description
     ("Show.S03.First.World.Championship.WEB-DL", None),
     ("Movie.2021.1080p.Blu-ray.Remux.AVC.DTS-HD.MA.5.1-GRP", "grp"),
+    # the group closing a bracketed description, file or folder
+    ("Show (2022) S02E01 (1080p ATVP WEB-DL H265 SDR DDP Atmos 5.1 English - GRPH).mkv", "grph"),
+    ("Show (2022) S02 (1080p ATVP WEB-DL H265 SDR DDP Atmos 5.1 English - GRPH)", "grph"),
+    ("Show (2022) S02 (Part 1 - Heat B) Extras", None),                     # a description inside
+    # the same as posted on Usenet: dots for spaces, and the poster's -xpost after it
+    ("Show.(2022).S01E01.(1080p.ATVP.WEB-DL.H265.SDR.DDP.Atmos.5.1.English.-.GRPH).mkv-xpost", "grph"),
 ])
 def test_group_of(name, group):
     assert group_of(name) == group
@@ -138,22 +144,24 @@ def test_asks_when_nothing_fits_and_uses_the_pick(tmp_path, monkeypatch):
     t, files = pack_torrent()
     size2 = len(next(v for k, v in files.items() if "s03e02" in k))
     failing = "Show.2016.S03E02.720p.HDTV.x264-GRPA-xRePo"
+    same = rel("Show.2016.S03E02.720p.HDTV.x264-GRPA-xpost", size2 - 50, "same")  # same group and res, too small
     other = rel("Show.2016.S03E02.1080p.HDTV.x264-GRPA", size2 + 50, "other")   # same group, other res
     foreign = rel("Show.2016.S03E02.720p.HDTV.x264-OTHERGRP", size2 + 60, "foreign")
+    hidden = rel("Show.2016.S03E02.HDTV", size2 + 70, "hidden")      # a name showing no group and no res
     asked = []
 
     def fake_ask(prompt, choices):
         asked.append((prompt, choices))
-        return next(i for i, c in enumerate(choices) if c["title"] == other.title)
+        return next(i for i, c in enumerate(choices) if c["title"] == same.title)
     monkeypatch.setattr(pipeline, "report_ask", fake_ask)
     sab = PackSAB(str(tmp_path), files, failing={failing})
     cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
-    dirs, _ = pipeline.usenet_multi(cfg, NZBsOK([other, foreign]), sab, t,
-                                    with_others(files, [rel(failing, size2 + 100)]), 2)
+    pipeline.usenet_multi(cfg, NZBsOK([same, other, foreign, hidden]), sab, t,
+                          with_others(files, [rel(failing, size2 + 100)]), 2)
     assert asked and "S03E02" in asked[0][0] and "GRPA" in asked[0][0]
-    assert [c["title"] for c in asked[0][1]] == [other.title]     # other release groups are not offered
-    assert asked[0][1][0]["note"] == "other resolution"
-    assert other.title in sab.added and len(dirs) == 4
+    # another group or another resolution is not offered; a name that shows neither is
+    assert sorted(c["title"] for c in asked[0][1]) == sorted([same.title, hidden.title])
+    assert same.title in sab.added
 
 
 def test_declining_the_question_stops_the_build(tmp_path, monkeypatch):
@@ -278,3 +286,64 @@ def test_season_nzb_plus_episode_nzb(tmp_path):
     assert sab.added == [groups[0][0].title, groups[1][0].title] and len(dirs) == 2
     from nzb2seed import assemble as asm
     assert set(asm.find_sources(t, dirs)) == {f.relpath for f in t.real_files}
+
+
+# ---------------------------------------------------------------- only a small file short
+
+class VideoOnlySAB:
+    """Every post holds the film's video, under the post's own name - never its .nfo."""
+
+    def __init__(self, root, video):
+        self.root, self.video, self.n, self.jobs, self.added = root, video, 0, {}, []
+
+    def add_nzb(self, nzb, name, cat, pp, prio):
+        self.n += 1
+        nzo = f"nzo{self.n}"
+        self.jobs[nzo] = name
+        self.added.append(name)
+        d = os.path.join(self.root, f"{name}.{self.n}")
+        os.makedirs(d)
+        with open(os.path.join(d, name.replace(" ", ".") + ".mkv"), "wb") as fh:
+            fh.write(self.video)
+        return nzo
+
+    def ensure_pp(self, nzo, pp):
+        return "+Repair/Unpack"
+
+    def status(self, nzo):
+        return "Completed", {"storage": f"/dl/{self.jobs[nzo]}.{nzo[3:]}"}
+
+
+class NoOtherPosts(NZBsOK):
+    def search(self, query, *a):
+        return []
+
+
+def test_a_post_short_only_of_a_small_file_is_not_followed_by_another_whole_post(tmp_path):
+    """A film: the first post held the whole 20.9 GB video and lacked only an 819-byte
+    .nfo - and three more whole posts were downloaded looking for it. Now the first post
+    is used and the build goes on (to stop nearly complete, the .nfo to come over
+    BitTorrent) instead of downloading everything again."""
+    film = "Film 2022 1080p BluRay REMUX-GRP"
+    video = rnd(200_000, 7)
+    t = parse(make_torrent(film, {f"{film}.mkv": video, f"{film}.mkv.nfo": b"n" * 800}))
+    posts = [rel(film.replace(" ", "."), len(video) + 900, f"post{i}", indexer=f"idx{i}") for i in range(3)]
+    sab = VideoOnlySAB(str(tmp_path), video)
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
+    dirs, nzos = pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t,
+                                        posts, 2)
+    assert len(sab.added) == 1                         # not three whole downloads
+    assert len(dirs) == 1 and len(nzos) == 1
+
+
+def test_a_post_short_of_real_content_still_moves_on(tmp_path):
+    """Missing more than a small file (here: a second video) - the next post is tried."""
+    film = "Film 2022 1080p BluRay REMUX-GRP"
+    video = rnd(200_000, 7)
+    t = parse(make_torrent(film, {f"{film}.mkv": video, f"{film}.extra.mkv": rnd(150_000, 8)}))
+    posts = [rel(film.replace(" ", "."), 350_900 + i * 1000, f"post{i}", indexer=f"idx{i}") for i in range(2)]
+    sab = VideoOnlySAB(str(tmp_path), video)
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
+    with pytest.raises(Abort):
+        pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, posts, 2)
+    assert len(sab.added) == 2                         # both posts tried, as before

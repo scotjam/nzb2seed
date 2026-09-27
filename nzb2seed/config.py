@@ -33,6 +33,7 @@ class Config:
     qbit_pass: str = ""
     qbit_category: str = DEFAULT_QBIT_CATEGORY   # what nzb2seed's torrents are filed under
     qbit_tags: list[str] = field(default_factory=list)
+    file_owner: str = ""        # "user:group" the torrent client runs as; placed files go to it
     start_when_complete: bool = False
     sab_to_local: list = field(default_factory=list)
     local_to_qbit: list = field(default_factory=list)
@@ -42,6 +43,12 @@ class Config:
     post_processing: str = "auto"
     cleanup: bool = True
     local_verify: bool = False
+    build_parallel: int = 2           # builds running at once (the rest wait their turn)
+    nearly_complete_mb: float = 200.0     # ...and less than this much (whichever is less)
+    nearly_complete_percent: float = 5.0  # a failed build missing less than this is
+                                          # offered to the torrent client to finish
+    nearly_auto_trackers: list = field(default_factory=list)  # ...and for these trackers
+                                          # it is handed over without asking each time
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
     demand_rules: list = field(default_factory=list)   # priority rules, best first
     demand_block: list = field(default_factory=list)   # anything matching is not built
@@ -50,6 +57,12 @@ class Config:
     demand_age_days: float = 7.0      # a torrent younger than this has not had its chance
     space_min_percent: float = 0      # pause downloading below this much free space (0 = off)
     space_min_gb: float = 0           # ... or below this many GB free (0 = off)
+    # a disk can have its own limit instead: staging empties after every build, while the
+    # disk that keeps what is seeded only grows, so they rarely want the same number
+    space_downloads_min_percent: float = 0
+    space_downloads_min_gb: float = 0
+    space_output_min_percent: float = 0
+    space_output_min_gb: float = 0
     space_pause_torrents: bool = False  # also stop downloading torrents (can cost H&R grace)
     retention_enabled: bool = False   # remove builds again after retention_days (off by default)
     retention_days: int = 30          # how long a build stays in qBittorrent before it goes
@@ -68,6 +81,8 @@ class Config:
     auto_retry_minutes: float = 2.0    # the longest gap between tries of one torrent
     auto_start: bool = True            # start seeding - only ever at a 100.0% recheck
     auto_parallel: int = 1             # builds at once
+    auto_queue_max: int = 10           # torrents queued at once (not counting builds); 0 = no cap
+    auto_queue_keep_older: bool = False  # full queue: turn the newcomer away, not the oldest
     auto_searches_per_hour: int = 40   # Prowlarr searches automatic builds may make per hour
     autobrr_url: str = ""
     autobrr_key: str = ""
@@ -94,6 +109,7 @@ LAYOUT = [
     ("qbittorrent", "password", "qbit_pass"),
     ("qbittorrent", "category", "qbit_category"),
     ("qbittorrent", "tags", "qbit_tags"),
+    ("qbittorrent", "file_owner", "file_owner"),
     ("qbittorrent", "start_when_complete", "start_when_complete"),
     ("paths", "sab_to_local", "sab_to_local"),
     ("paths", "local_to_qbit", "local_to_qbit"),
@@ -102,6 +118,10 @@ LAYOUT = [
     ("behaviour", "post_processing", "post_processing"),
     ("behaviour", "cleanup", "cleanup"),
     ("behaviour", "local_verify", "local_verify"),
+    ("behaviour", "build_parallel", "build_parallel"),
+    ("behaviour", "nearly_complete_percent", "nearly_complete_percent"),
+    ("behaviour", "nearly_complete_mb", "nearly_complete_mb"),
+    ("behaviour", "nearly_auto_trackers", "nearly_auto_trackers"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("behaviour", "peek_archives", "peek_archives"),
     ("demand", "rules", "demand_rules"),
@@ -111,6 +131,10 @@ LAYOUT = [
     ("demand", "age_days", "demand_age_days"),
     ("space", "min_percent", "space_min_percent"),
     ("space", "min_gb", "space_min_gb"),
+    ("space", "downloads_min_percent", "space_downloads_min_percent"),
+    ("space", "downloads_min_gb", "space_downloads_min_gb"),
+    ("space", "output_min_percent", "space_output_min_percent"),
+    ("space", "output_min_gb", "space_output_min_gb"),
     ("space", "pause_torrents", "space_pause_torrents"),
     ("retention", "enabled", "retention_enabled"),
     ("retention", "days", "retention_days"),
@@ -127,6 +151,8 @@ LAYOUT = [
     ("automatic", "retry_first_minutes", "auto_retry_first_minutes"),
     ("automatic", "start", "auto_start"),
     ("automatic", "parallel", "auto_parallel"),
+    ("automatic", "queue_max", "auto_queue_max"),
+    ("automatic", "queue_keep_older", "auto_queue_keep_older"),
     ("automatic", "searches_per_hour", "auto_searches_per_hour"),
     ("autobrr", "url", "autobrr_url"),
     ("autobrr", "api_key", "autobrr_key"),

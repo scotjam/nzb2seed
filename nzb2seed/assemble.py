@@ -18,6 +18,7 @@ import itertools
 import json
 import os
 import shutil
+import stat
 from dataclasses import dataclass, field
 
 from .torrent import PieceVerifier, TFile, Torrent
@@ -99,6 +100,7 @@ class Owned:
             d = parent
         for x in reversed(todo):
             os.makedirs(x, exist_ok=True)
+            shareable(x)                  # the torrent client may need to add to it or move it
             self.dirs.add(x)
 
     def save(self):
@@ -304,6 +306,52 @@ def _copy_across(src: str, dst: str, progress=None, remove_src: bool = True):
         os.remove(src)
 
 
+# who the torrent client runs as (uid, gid), from config file_owner; None = unknown
+OWNER: tuple[int, int] | None = None
+
+
+def parse_owner(text: str) -> tuple[int, int] | None:
+    """ "appuser:users" or "1000:100" -> (uid, gid); None when empty or not on this system."""
+    text = (text or "").strip()
+    if not text or os.name == "nt":
+        return None
+    user, _, group = text.partition(":")
+    try:
+        import grp
+        import pwd
+        uid = int(user) if user.isdigit() else pwd.getpwnam(user).pw_uid
+        if not group:
+            gid = pwd.getpwuid(uid).pw_gid
+        else:
+            gid = int(group) if group.isdigit() else grp.getgrnam(group).gr_gid
+        return uid, gid
+    except (KeyError, ValueError):
+        return None
+
+
+def shareable(path: str):
+    """Hand what nzb2seed placed to the torrent client, as if it had written it itself.
+    nzb2seed may run as root while qBittorrent runs as its own user: a root-owned,
+    read-only file cannot be repaired when a piece fails, nor moved or deleted from
+    qBittorrent. So it goes to the torrent client's user (file_owner) when that is set, and
+    is always writable by its group. Never used on hard links to someone else's file -
+    that would change their original too."""
+    if os.name == "nt":
+        return
+    try:
+        st = os.lstat(path)
+        uid, gid = OWNER or (-1, os.stat(os.path.dirname(path) or ".").st_gid)
+        if (uid != -1 and st.st_uid != uid) or st.st_gid != gid:
+            os.chown(path, uid, gid)
+        want = st.st_mode | stat.S_IRGRP | stat.S_IWGRP | stat.S_IROTH
+        if stat.S_ISDIR(st.st_mode):
+            want |= stat.S_IXGRP | stat.S_IXOTH
+        if want != st.st_mode:
+            os.chmod(path, want)
+    except OSError:
+        pass                              # not ours to change: seeding still works
+
+
 def _move(src: str, dst: str, owned: Owned, progress=None):
     if _key(src) == _key(dst):
         return
@@ -318,6 +366,7 @@ def _move(src: str, dst: str, owned: Owned, progress=None):
         if e.errno != errno.EXDEV:
             raise
         _copy_across(src, dst, progress)
+    shareable(dst)
     owned.forget_file(src)
     owned.add_file(dst)
 
@@ -337,6 +386,7 @@ def _place_copy(src: str, dst: str, owned: Owned, progress=None) -> str:
         os.link(src, dst)
     except OSError:
         _copy_across(src, dst, progress, remove_src=False)
+        shareable(dst)
         how = "copy"
     owned.add_file(dst)
     return how
@@ -505,6 +555,7 @@ def assemble(torrent: Torrent, source_dirs: list[str], output_dir: str,
                 with open(tmp, "wb") as fh:
                     fh.write(pick)
                 os.replace(tmp, dst)
+                shareable(dst)
         res.placed[f.relpath] = dst
 
     # completeness
