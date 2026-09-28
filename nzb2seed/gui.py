@@ -859,7 +859,7 @@ def _opts(d: dict) -> Options:
                    no_qbit=bool(d.get("no_qbit")), start=bool(d.get("start")),
                    dry_run=bool(d.get("dry_run")),
                    retry_bad=None if d.get("retry_bad") is None else bool(d.get("retry_bad")),
-                   fetch_missing=bool(d.get("fetch_missing")))
+                   fetch_missing=bool(d.get("fetch_missing")), whole_posts=bool(d.get("whole_posts")))
 
 
 def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts: set[str]):
@@ -1067,6 +1067,8 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self.other_trackers(body)
             if path == "/api/jobs/add_to_client":
                 return self.add_to_client(body)
+            if path == "/api/jobs/whole_posts":
+                return self.whole_posts(body)
             if path == "/api/jobs/remove":
                 # take finished jobs off the list; one still running (or waiting for an
                 # answer) is never removed. Only the list entry goes - unless its Usenet
@@ -1332,6 +1334,36 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 self._err("that build did not stop part-way, so there is nothing to finish", 404)
                 return None
             return job
+
+        def whole_posts(self, body):
+            """A build that stopped short where only small files were missing - and settled
+            rather than download another whole post, since a whole post is usually hundreds of
+            MB for a file of a few dozen: build it again, trying whole posts for those parts
+            this time. Everything already downloaded is reused; what is still missing after
+            that is offered again, alongside completing it from the tracker."""
+            job = self._nearly(body)
+            if job is None:
+                return
+            x = job.extra
+            if not x.get("settled"):
+                return self._err("no part of it was left without trying every whole post")
+            if x.get("added") or x.get("abandoned"):
+                return self._err("it was already added to qBittorrent or abandoned")
+            if job.retried_as:
+                return self._err(f"it was already tried again, as job {job.retried_as}", 409)
+            rq = job.repeat or {}
+            if rq.get("path") != "/api/build":
+                return self._err("only a build started from the Build tab can be built again this way")
+            again = json.loads(json.dumps(rq.get("body") or {}))
+            again.setdefault("options", {})["whole_posts"] = True
+            title, run = build_job(app, again)
+            busy = app.active_build(title)
+            if busy:
+                return self._err(f"{title} is already being built (job {busy.id})", 409)
+            app.request.asked = {"path": "/api/build", "body": again}
+            app.request.retrying = job                  # this job is the one tried again
+            nj = app.start_job(title, "build", run)
+            return self._json({"id": nj.id})
 
         def other_trackers(self, body):
             """The same release on your other trackers, for a build that stopped nearly

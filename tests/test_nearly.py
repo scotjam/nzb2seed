@@ -429,3 +429,30 @@ def test_an_override_is_started_whatever_the_recheck_finds(server, monkeypatch, 
     done = app.finish_in_client(job, override=True)
     wait(lambda: done.status in ("done", "failed"))
     assert done.status == "done" and qb.started == [H]
+
+
+def test_a_build_that_settled_can_be_built_again_trying_whole_posts(server, monkeypatch):  # noqa: F811
+    import threading
+    app, url = server
+    started = threading.Event()
+    seen = {}
+
+    def run(cfg, opts, t, g, torrent_data=None):
+        seen["opts"] = opts
+        started.set()
+        return {"result": "ok"}
+    monkeypatch.setattr(gui, "execute_run", run)
+    monkeypatch.setattr(gui, "uploaded_data", lambda cfg, t: None)
+    torrent = {"title": "Show.S01.1080p.WEB-GRPA", "protocol": "torrent", "indexer": "TrackerOne", "indexer_id": 1,
+               "size": 10, "guid": "g", "download_url": "http://prowlarr.local/1", "info_url": "", "publish_date": "",
+               "grabs": 0, "seeders": 3, "files": None}
+    job = app.start_job("Show.S01.1080p.WEB-GRPA", "build", lambda cfg: None)
+    job.repeat = {"path": "/api/build", "body": {"torrent": torrent, "nzbs": [], "options": {}}}
+    job.status, job.extra = "failed", {"have": 0.99, "infohash": H, "settled": [{"label": "S01E03", "missing": 5, "post": 9}]}
+    status, r = call(url + "/api/jobs/whole_posts", *AUTH, body={"id": job.id})
+    assert status == 200 and started.wait(5) and seen["opts"].whole_posts is True
+    assert job.retried_as == r["id"]
+    assert call(url + "/api/jobs/whole_posts", *AUTH, body={"id": job.id})[0] == 409     # once
+    other = app.start_job("Film", "build", lambda cfg: None)
+    other.status, other.extra = "failed", {"have": 0.99, "infohash": H}
+    assert call(url + "/api/jobs/whole_posts", *AUTH, body={"id": other.id})[0] == 400   # nothing settled

@@ -2,7 +2,7 @@
 // tells the server and refreshes the list. The list stays on screen throughout.
 import { api } from "../api.js";
 import { jobs, loadSettings, nearlyLimitText, openJobId, jobScreen, refreshJobs, toast } from "../store.js";
-import { gb, missText, trackerName } from "../util.js";
+import { gb, missText, size, trackerName } from "../util.js";
 import { canAdd, canAbandon } from "./jobs-rules.js";
 
 async function each(list, path, done, failed, ok) {
@@ -21,6 +21,28 @@ export async function retryJob(j) {
     await refreshJobs();                       // stay on the list: the new job shows at the top
     toast("Started again.");
   } catch (err) { toast("Could not start it again: " + err.message); }
+}
+
+/* what trying whole posts may cost: one whole post for each part that settled for less */
+export function wholePostsText(x) {
+  const parts = x.settled || [];
+  const miss = parts.reduce((n, p) => n + (p.missing || 0), 0), post = parts.reduce((n, p) => n + (p.post || 0), 0);
+  return { parts: parts.length, miss: size(miss), post: size(post), names: parts.map(p => p.label).join(", ") };
+}
+
+export async function wholePosts(j) {
+  const w = wholePostsText(j.extra || {});
+  if (!confirm(`Try whole posts for ${j.title}?
+
+${w.parts} part(s) stopped with only small files missing `
+      + `(${w.miss} in all: ${w.names}), without downloading another whole post for them. This builds it again, `
+      + `trying whole posts for those parts - about ${w.post} or more of downloads for ${w.miss} of files, `
+      + `which may still not be there. Everything already downloaded is reused.`)) return;
+  try {
+    const r = await api("/api/jobs/whole_posts", { id: j.id });
+    await refreshJobs();
+    toast(`Building it again, trying whole posts - job ${r.id}.`);
+  } catch (err) { toast("Could not start it: " + err.message); }
 }
 
 export async function abandonJob(j) {
