@@ -363,7 +363,7 @@ def episodes_in(d: str, season: int, single: int | None = None) -> dict[int, str
     if single is not None and single not in found and vids:
         found[single] = max(vids, key=os.path.getsize)
     if not vids:
-        for first in archives.rar_sets(d):
+        for first in archives.archive_sets(d):
             try:
                 inside = [(n, s) for n, s in archives.list_contents(first)
                           if os.path.splitext(n)[1].lower() in VIDEO and "sample" not in n.lower()]
@@ -382,7 +382,7 @@ def episodes_in(d: str, season: int, single: int | None = None) -> dict[int, str
 
 def packed_video(d: str, tmp: str) -> str | None:
     """Unpack one episode's video from the first RAR set under ``d`` into ``tmp``."""
-    for first in archives.rar_sets(d):
+    for first in archives.archive_sets(d):
         inside = [(n, s) for n, s in archives.list_contents(first)
                   if os.path.splitext(n)[1].lower() in VIDEO and "sample" not in n.lower()]
         if inside:
