@@ -58,9 +58,11 @@ def srr_file(release: str) -> bytes | None:
     return metadata._get(f"{metadata.SRRDB_DL}/srr/{release}", timeout=60)
 
 
-def rebuild(release: str, details: dict, video: str, out_folder: str) -> tuple[bool, str]:
+def rebuild(release: str, details: dict, video, out_folder: str) -> tuple[bool, str]:
     """Rebuild the scene RAR volumes of ``release`` from srrDB's .srr and the unpacked
-    ``video`` into ``out_folder``. (ok, what happened). Nothing is left behind on failure."""
+    ``video`` into ``out_folder``. (ok, what happened). Nothing is left behind on failure.
+    ``video``: the one file the RARs held, or {its name inside the RARs: local file} for
+    a release whose RARs held several."""
     vols = volumes(details)
     if not vols:
         return False, "the release was not RAR'd"
@@ -79,14 +81,15 @@ def rebuild(release: str, details: dict, video: str, out_folder: str) -> tuple[b
         out = os.path.join(work, "out")
         os.makedirs(src)
         os.makedirs(out)
-        # the video under the name it had inside the RARs (a hard link: no copy, same disk)
-        inner = archived[0]["name"].replace("\\", "/")
-        dst = os.path.join(src, *inner.split("/"))
-        os.makedirs(os.path.dirname(dst), exist_ok=True)
-        try:
-            os.link(video, dst)
-        except OSError:
-            shutil.copy2(video, dst)
+        # each file under the name it had inside the RARs (a hard link: no copy, same disk)
+        given = video if isinstance(video, dict) else {archived[0]["name"]: video}
+        for inner, path in given.items():
+            dst = os.path.join(src, *inner.replace("\\", "/").split("/"))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            try:
+                os.link(path, dst)
+            except OSError:
+                shutil.copy2(path, dst)
         main = _rescene()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")

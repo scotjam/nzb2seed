@@ -371,11 +371,12 @@ def _drop(pr, rel: Release):
 
 
 def unpack_from_archives(d: str, wanted: list, dest: str | None = None) -> bool:
-    """Extract the torrent files in ``wanted`` from RAR sets in download folder ``d`` (into
+    """Extract the torrent files in ``wanted`` from archive sets (RAR, 7z, zip, numbered) in
+    download folder ``d`` (into
     ``d``'s unpack folder, or ``dest``).
     A file is recognised by its exact size (and, for small files, its name too - posters
     often obfuscate the names of big ones). Returns True when anything was unpacked."""
-    sets = archives.rar_sets(d)
+    sets = archives.archive_sets(d)
     if not sets or not wanted:
         return False
     extracted = False
@@ -384,7 +385,8 @@ def unpack_from_archives(d: str, wanted: list, dest: str | None = None) -> bool:
         try:
             entries, fresh = _contents(first)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
-            warn(f"cannot look inside {name}: {e}")
+            if not re.search(r"\.\d{3}$", name):      # numbered pieces may be a plain split file
+                warn(f"cannot look inside {name}: {e}")
             continue
         members = []
         for f in wanted:
@@ -1352,19 +1354,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     def fill(d: str, missing: list) -> bool:
         return packed_release(t) and scenefill.fill(t, d, missing, fetcher)
 
-    inner_sizes: list[int] = []
-
-    def packed_inner() -> tuple[int, ...]:
-        """For a RAR'd release: the sizes of what its scene RARs hold, from srrDB (asked
-        once per build) - a post holding that video can have the RARs rebuilt from it."""
-        if not inner_sizes and packed_release(t):
-            try:
-                det = metadata.srrdb_details(scenefill.release_name(t)) or {}
-            except Exception as e:              # srrDB being unreachable must not stop a build
-                warn(f"srrDB: {e}")
-                det = {}
-            inner_sizes.extend([a["size"] for a in det.get("archived-files", []) if a.get("size")] or [0])
-        return tuple(s for s in inner_sizes if s)
+    def packed_inner(u: "Unit") -> tuple[int, ...]:
+        """For a RAR'd release: the sizes of what the scene RARs of ``u``'s files hold, from
+        srrDB - a post holding that video can have the RARs rebuilt from it."""
+        return scenefill.inner_sizes(t, u.files) if packed_release(t) else ()
 
     def satisfied(u: "Unit", d: str) -> bool:
         """Does ``d`` - together with the folders already looked at - hold the unit? Files
@@ -1572,7 +1565,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             u.tried.append(rel)
             attempted.add(rel.guid)
             known = verdicts.seen(t.infohash, u.need.label, rel)
-            if known and known.startswith("its archive holds a different release") and packed_inner():
+            if known and known.startswith("its archive holds a different release") and packed_inner(u):
                 # judged before the video inside the torrent's scene RARs counted as a match:
                 # look again (the first volume only)
                 info(f"{rel.title} ({rel.indexer}): {known} on an earlier run - looking again, "
@@ -1630,7 +1623,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 continue
             peek = cfg.peek_archives if opts.peek is None else opts.peek
             if peek and worth_peeking(data, u.files) \
-                    and peek_archive(cfg, pr, sab, rel, data, u.files, packed_inner()) is False:
+                    and peek_archive(cfg, pr, sab, rel, data, u.files, packed_inner(u)) is False:
                 verdicts.mark(t.infohash, u.need.label, rel, "its archive holds a different release")
                 _drop(pr, rel)
                 continue
@@ -2376,7 +2369,7 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
     # torrent of its unpacked videos): unpacked onto the output disk, never into your folders
     work = None
     missing = asm.assemble(t, dirs, PROBE_DIR, dry_run=True, log=lambda *_: None).missing
-    if missing and not opts.dry_run and any(archives.rar_sets(d) for d in dirs):
+    if missing and not opts.dry_run and any(archives.archive_sets(d) for d in dirs):
         work = os.path.join(output_dir, f".nzb2seed-unpacked-{t.infohash[:12]}")
         step(f"Unpacking {len(missing)} file(s) the torrent has unpacked from the RAR sets")
         info(f"into {work} (removed afterwards; your folders are not written to)")
