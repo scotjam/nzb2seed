@@ -53,6 +53,18 @@ def parse(data: bytes) -> list[NzbFile]:
     return out
 
 
+def password(data: bytes) -> str | None:
+    """The password an NZB carries for its archives (<head><meta type="password">), if any."""
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return None
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == "meta" and (el.get("type") or "").lower() == "password":
+            return (el.text or "").strip() or None
+    return None
+
+
 def post_ids(data: bytes) -> list[str]:
     """What a post is, independent of the indexer listing it: the Usenet message-ID of the
     first article of every posted file (par2 files left out). The same post on two

@@ -329,3 +329,21 @@ def test_a_peek_still_downloading_is_left_to_finish(tmp_path, cfg):
                    queue=[{"filename": pipeline.PEEK_PREFIX + "dl000001", "status": "Downloading",
                            "nzo_id": "q1"}], history=[])
     assert pipeline.remove_stray_peeks(cfg, sab) == (0, 0)
+
+
+def test_a_repack_of_the_video_inside_the_scene_rars_is_the_same_release():
+    """A torrent of scene RAR volumes: the posts are re-packs holding the video itself -
+    as big as nothing in the torrent, yet exactly what its RARs hold (srrDB knows its size)."""
+    vols = [F("the.film.2019.rar", 100_000_000), F("the.film.2019.r00", 100_000_000),
+            F("Sample/the.film.2019.sample.mkv", 35_000_000)]
+    repack = [("0bfuscated.mkv", 4_691_792_208)]
+    assert pipeline.archive_holds(vols, repack) is False                      # as it was judged
+    assert pipeline.archive_holds(vols, repack, inner=(4_691_792_208,)) is True
+    assert pipeline.archive_holds(vols, [("other.mkv", 4_700_000_000)], inner=(4_691_792_208,)) is False
+
+
+def test_an_nzb_carries_its_archive_password():
+    head = ('<?xml version="1.0"?><nzb xmlns="http://www.newzbin.com/DTD/2003/nzb"><head>'
+            '<meta type="title">x</meta><meta type="password">s3cret</meta></head></nzb>').encode()
+    assert nzbinfo.password(head) == "s3cret"
+    assert nzbinfo.password(nzb("a.rar")) is None and nzbinfo.password(b"not xml") is None

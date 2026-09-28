@@ -23,6 +23,7 @@ import threading
 import time
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from . import archives, nzbinfo
 from .clients import PP_REPAIR, ApiError, Prowlarr, Release, SABnzbd
 from .config import Config
 from .pathmap import map_path
@@ -145,7 +146,16 @@ class Source:
                 self._hold(rel)
                 if self.store:
                     self.store.put(rel, self.data[rel.guid])
+            # an encrypted re-pack: its password comes with the NZB, as SABnzbd reads it
+            archives.remember_password(nzbinfo.password(self.data[rel.guid]))
         return self.data[rel.guid]
+
+    def kept(self, rel: Release) -> bytes | None:
+        """The NZB of a post fetched on an earlier run - never asking the indexer."""
+        data = self.data.get(rel.guid) or (self.store.get(rel) if self.store else None)
+        if data:
+            archives.remember_password(nzbinfo.password(data))
+        return data
 
     def _hold(self, rel: Release):
         """Have SABnzbd fetch the NZB, parked. On failure the message links the release's
