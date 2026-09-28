@@ -86,3 +86,53 @@ def test_rars_without_the_file_are_still_a_miss(tmp_path, monkeypatch):
     monkeypatch.setattr(archives, "list_contents", lambda first: [("other.mkv", 12345)])
     monkeypatch.setattr(archives, "extract", lambda *a: (_ for _ in ()).throw(AssertionError("no")))
     assert not pipeline.supplies(t, str(job), "show.s01e01.720p.hdtv.x264-grp.mkv")
+
+
+class Encrypted:
+    """7-Zip on an archive that opens only with its password: a wrong one half-writes a file."""
+
+    def __init__(self, dest=None):
+        self.tried, self.dest = [], dest
+
+    def __call__(self, cmd, **kw):
+        pw = next(a[2:] for a in cmd if a.startswith("-p"))
+        self.tried.append(pw)
+        ok = pw == "s3cret"
+        if cmd[1] == "x" and self.dest and not ok:
+            with open(os.path.join(self.dest, f"junk-{len(self.tried)}.mkv"), "wb") as fh:
+                fh.write(b"half")
+        out = SLT if ok and cmd[1] == "l" else ""
+        return type("R", (), {"returncode": 0 if ok else 2, "stdout": out,
+                              "stderr": "" if ok else "ERROR: x.part01.rar : Cannot open encrypted archive. Wrong password?"})()
+
+
+def test_an_encrypted_repack_is_opened_with_the_password_its_nzb_carried(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "tool", lambda: ("7z", "7z"))
+    monkeypatch.setattr(archives, "_passwords", [])
+    monkeypatch.setattr(archives, "_works", {})
+    run = Encrypted()
+    monkeypatch.setattr(archives.subprocess, "run", run)
+    first = str(tmp_path / "x.part01.rar")
+    try:
+        archives.list_contents(first)
+        raise AssertionError("opened without its password")
+    except RuntimeError as e:
+        assert "encrypted" in str(e)
+    archives.remember_password("other")
+    archives.remember_password("s3cret")
+    assert archives.list_contents(first)[0][0].startswith("Movie.2020")
+    run.tried.clear()
+    archives.list_contents(first)
+    assert run.tried == ["s3cret"]                       # the one that worked goes first
+
+
+def test_a_wrong_password_leaves_nothing_behind(tmp_path, monkeypatch):
+    monkeypatch.setattr(archives, "tool", lambda: ("7z", "7z"))
+    monkeypatch.setattr(archives, "_passwords", ["s3cret"])
+    monkeypatch.setattr(archives, "_works", {})
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "mine.txt").write_text("kept")               # already there before: never removed
+    monkeypatch.setattr(archives.subprocess, "run", Encrypted(str(dest)))
+    archives.extract(str(tmp_path / "x.part01.rar"), ["Movie.mkv"], str(dest))
+    assert sorted(os.listdir(dest)) == ["mine.txt"]      # the "-" attempt's half-file is gone

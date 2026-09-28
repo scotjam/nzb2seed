@@ -76,22 +76,45 @@ def parse_unrar_lt(text: str) -> list[tuple[str, int]]:
     return out
 
 
+# Passwords carried by the NZBs nzb2seed has read (<meta type="password">) - an encrypted
+# re-pack is opened with these, as SABnzbd would. Tried only after no password at all.
+_passwords: list[str] = []
+_works: dict[str, str] = {}             # first volume -> the password that opened it
+
+
+def remember_password(password: str | None):
+    if password and password not in _passwords:
+        _passwords.append(password)
+        del _passwords[:-200]           # the recent ones are the ones that matter
+
+
+def _candidates(first_volume: str) -> list[str]:
+    known = _works.get(first_volume)
+    rest = [p for p in reversed(_passwords) if p != known]
+    return ([known] if known else []) + ["-"] + rest
+
+
 def list_contents(first_volume: str) -> list[tuple[str, int]]:
     t = tool()
     if t is None:
         raise RuntimeError("no 7-Zip or unrar found to look inside RAR archives")
     kind, exe = t
-    if kind == "7z":
-        r = subprocess.run([exe, "l", "-slt", "-p-", first_volume], capture_output=True, text=True,
-                           errors="replace", timeout=300)
-        entries = parse_7z_slt(r.stdout.split("----------", 1)[-1])
-    else:
-        r = subprocess.run([exe, "lt", "-p-", first_volume], capture_output=True, text=True,
-                           errors="replace", timeout=300)
-        entries = parse_unrar_lt(r.stdout)
-    if r.returncode != 0 and not entries:
-        raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1:] or ["cannot read archive"])
-    return entries
+    first_error = None
+    for pw in _candidates(first_volume):
+        if kind == "7z":
+            r = subprocess.run([exe, "l", "-slt", f"-p{pw}", first_volume], capture_output=True, text=True,
+                               errors="replace", timeout=300)
+            entries = parse_7z_slt(r.stdout.split("----------", 1)[-1])
+        else:
+            r = subprocess.run([exe, "lt", f"-p{pw}", first_volume], capture_output=True, text=True,
+                               errors="replace", timeout=300)
+            entries = parse_unrar_lt(r.stdout)
+        if r.returncode == 0 or entries:
+            if pw != "-":
+                _works[first_volume] = pw
+            return entries
+        first_error = first_error or ((r.stderr or r.stdout).strip().splitlines()[-1:] or ["cannot read archive"])
+    raise RuntimeError(first_error)
 
 
 def extract(first_volume: str, members: list[str], dest: str):
@@ -101,10 +124,26 @@ def extract(first_volume: str, members: list[str], dest: str):
         raise RuntimeError("no 7-Zip or unrar found to unpack RAR archives")
     kind, exe = t
     os.makedirs(dest, exist_ok=True)
-    if kind == "7z":
-        cmd = [exe, "x", "-aos", "-p-", "-y", f"-o{dest}", first_volume, *members]
-    else:
-        cmd = [exe, "x", "-o-", "-p-", "-y", first_volume, *members, dest + os.sep]
-    r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=6 * 3600)
-    if r.returncode != 0:
-        raise RuntimeError(((r.stderr or r.stdout).strip().splitlines() or ["extraction failed"])[-1])
+    first_error = None
+    before = _files_in(dest)
+    for pw in _candidates(first_volume):
+        if kind == "7z":
+            cmd = [exe, "x", "-aos", f"-p{pw}", "-y", f"-o{dest}", first_volume, *members]
+        else:
+            cmd = [exe, "x", "-o-", f"-p{pw}", "-y", first_volume, *members, dest + os.sep]
+        r = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=6 * 3600)
+        if r.returncode == 0:
+            if pw != "-":
+                _works[first_volume] = pw
+            return
+        first_error = first_error or ((r.stderr or r.stdout).strip().splitlines() or ["extraction failed"])[-1]
+        for f in _files_in(dest) - before:      # what a wrong password half-wrote: never kept
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+    raise RuntimeError(first_error)
+
+
+def _files_in(d: str) -> set[str]:
+    return {os.path.join(root, n) for root, _, ns in os.walk(d) for n in ns}
