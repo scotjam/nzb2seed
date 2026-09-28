@@ -377,9 +377,10 @@ def test_the_nearly_complete_limit_not_a_fixed_50_mb_decides_what_is_small():
     assert "50 << 20" not in body and "nearly_complete_mb" in body and "nearly_complete_percent" in body
 
 
-def test_a_small_file_is_fetched_on_its_own_up_to_the_nearly_complete_limit():
-    """A 57 MB sample was refused by a fixed 50 MB cap: your MB limit decides instead."""
+def test_a_missing_file_is_fetched_on_its_own_whatever_its_size():
+    """A 57 MB sample was refused by a fixed 50 MB cap. Everything Usenet can supply is
+    fetched; what is left is weighed against the nearly-complete limit only at the end."""
     import inspect
     src = inspect.getsource(pipeline.plan_and_fetch)
     body = src[src.index("def fetch_small"):src.index("def split(")]
-    assert "50 << 20" not in body and "nearly_complete_mb" in body
+    assert "<< 20" not in body and "nearly_complete_mb" not in body
