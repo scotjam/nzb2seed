@@ -253,3 +253,14 @@ def test_only_a_wait_label_counts_as_refused():
     assert not grab.told_to_wait({"labels": []})
     assert not grab.told_to_wait({"labels": ["DUPLICATE"]})
     assert not grab.told_to_wait({"labels": ["PROPAGATING 5 min"]})
+
+
+def test_a_kept_nzb_gives_its_password_without_asking_the_indexer(tmp_path, monkeypatch):
+    from nzb2seed import archives
+    monkeypatch.setattr(archives, "_passwords", [])
+    src = source(tmp_path)
+    locked = NZB.replace(b"<nzb>", b'<nzb><head><meta type="password">s3cret</meta></head>')
+    src.store.put(rel(), locked)
+    assert src.kept(rel()) == locked and archives._passwords == ["s3cret"]
+    assert src.sab.log == []                             # nothing fetched
+    assert src.kept(rel("other")) is None

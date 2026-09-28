@@ -1591,6 +1591,8 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 continue
             if failed_before(cfg, sab, rel):
                 continue
+            if hasattr(pr, "kept"):
+                pr.kept(rel)                     # an earlier download's archive password, from its NZB
             again = reuse(cfg, sab, rel, lambda d: satisfied(u, d))
             if again and again[1]:
                 resolve(u, again[1], again[0])
