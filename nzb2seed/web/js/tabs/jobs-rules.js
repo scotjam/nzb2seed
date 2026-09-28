@@ -41,7 +41,8 @@ export function canAdd(j, jobs) {
 }
 export function canAbandon(j, jobs) {
   const x = j.extra || {};
-  // never once handed to qBittorrent, or once a retry built it: its files are in use then
-  return BADLY_ENDED.includes(j.status) && !!x.infohash && !x.abandoned && !x.added && !builtLater(j, jobs);
+  // not once a retry built it: its files are that build's then. Handed to qBittorrent is
+  // fine - abandoning leaves qBittorrent and the files it uses alone
+  return BADLY_ENDED.includes(j.status) && !!x.infohash && !x.abandoned && !builtLater(j, jobs);
 }
 export const canRemove = (j) => !isLive(j);

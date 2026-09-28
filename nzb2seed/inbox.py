@@ -36,6 +36,7 @@ from . import rules as rules_mod
 from . import lookup as lookup_mod
 from .clients import ApiError
 from .pipeline import Abort, Incomplete, Options, execute_run, local_release
+from .usenet_odds import odds_for
 from .report import Cancelled, check_cancel, info, step, warn
 from .torrent import TorrentError, parse
 
@@ -209,11 +210,12 @@ class Inbox:
         # highest priority first so a rule near the top of the list really is built first
         waiting = [(h, it) for h, it in self.state.items.items()
                    if it.get("status") in ("queued", "waiting") and h not in self.running]
-        waiting.sort(key=lambda x: rules_mod.sort_key(
+        odds = odds_for(cfg)
+        waiting.sort(key=lambda x: (rules_mod.sort_key(
             cfg, rules_mod.Release(name=x[1].get("name") or "", size=x[1].get("size") or 0,
                                    tracker=x[1].get("tracker") or "",
                                    first_seen=x[1].get("first_seen") or 0),
-            x[1].get("first_seen") or 0))
+            x[1].get("first_seen") or 0)[0], -odds.rate(x[1].get("name") or ""), x[1].get("first_seen") or 0))
         for h, _ in waiting:
             self.start(h)
 
@@ -248,6 +250,16 @@ class Inbox:
         it = self.state.items.get(t.infohash)
         if it and it.get("status") in ("done", "queued", "waiting", "building"):
             return                              # the same torrent again: already handled
+        never = odds_for(self.app.cfg).never(t.name) if self.app.cfg.auto_skip_unposted else None
+        if never:
+            # listed and stopped, so it can still be tried again - but it costs no search,
+            # no build slot, and leaves no "no Usenet post" job behind
+            self.state.update(t.infohash, name=t.name, file=dst, status="failed", first_seen=time.time(),
+                              attempts=0, next_try=0, why=f"not tried: {never}", stopped=True,
+                              source=os.path.basename(path), size=t.total_size,
+                              tracker=worth.tracker_of(t.trackers))
+            self._move(dst, FAILED)
+            return
         cap = int(self.app.cfg.auto_queue_max or 0)
         full = cap > 0 and len(self.pending()) >= cap
         if full and not self.app.cfg.auto_queue_keep_older:

@@ -169,6 +169,16 @@ class Autobrr:
         return [a for a in f.get("actions") or [] if a.get("name") == self.ACTION_NAME
                 and a.get("type") == "WATCH_FOLDER"]
 
+    def exclude_group(self, fid: int, group: str) -> bool:
+        """Add a release group to the filter's "except release groups" - True if it was added
+        (False: it was already there). Only that field of the filter is changed."""
+        f = self.filter(fid)
+        have = [g.strip() for g in (f.get("except_release_groups") or "").split(",") if g.strip()]
+        if group.lower() in (g.lower() for g in have):
+            return False
+        self._call("PATCH", f"filters/{fid}", json={"id": fid, "except_release_groups": ",".join(have + [group])})
+        return True
+
     def add_action(self, fid: int, folder: str) -> dict:
         return self._call("POST", "actions", json={
             "name": self.ACTION_NAME, "type": "WATCH_FOLDER", "enabled": True,

@@ -35,8 +35,29 @@ from . import space as space_mod
 from . import worth as worth_mod
 from . import rules as rules_mod
 from . import events as events_mod
+
+# the build slot this thread's build holds, if any: handed back while it waits for you
+_held = threading.local()
+
+
+def take_slot(slots: threading.Semaphore, why: str = "Waiting for a build slot"):
+    """Queue for a build slot (a build waiting for one can still be cancelled)."""
+    if not slots.acquire(blocking=False):
+        report.step(why)
+        while not slots.acquire(timeout=5):
+            report.check_cancel()
+    _held.slots = slots
+
+
+def give_slot():
+    """Hand back the slot this thread holds (nothing if it holds none)."""
+    slots, _held.slots = getattr(_held, "slots", None), None
+    if slots is not None:
+        slots.release()
+    return slots
 from . import torrent as torrent_mod
 from . import matching
+from . import usenet_odds as odds_mod
 from . import pipeline as pipeline_mod
 from . import lookup as lookup_mod
 from .torrent import TorrentError, parse as parse_torrent
@@ -75,6 +96,7 @@ class Job:
         self.repeat: dict | None = None       # the request that started it, so it can be run again
         self.extra: dict | None = None        # how far a failed build got (see pipeline.Incomplete)
         self.retried_as: int | None = None    # the job that tried this one again, if any
+        self.cut_off = False                  # running when the last restart stopped it
         self._answer: int | None = None
         self._answered = threading.Event()
 
@@ -108,6 +130,7 @@ class Job:
         self.question = {"prompt": prompt, "choices": choices}
         self.status = "waiting"
         self.emit("warn", "waiting for you: " + prompt)
+        slots = give_slot()             # waiting on you, not building: another build can run
         self.on_change(True)
         while not self._answered.wait(1.0):
             if self.cancel.is_set():
@@ -117,6 +140,9 @@ class Job:
         self.on_change(True)
         if self.cancel.is_set():
             raise report.Cancelled("cancelled")
+        if slots is not None and self._answer is not None:
+            # answered: back in the queue for a slot, like any build that has not started
+            take_slot(slots, "Waiting for a build slot to carry on with your pick")
         return self._answer
 
     def answer(self, choice: int | None):
@@ -152,7 +178,8 @@ class Job:
         job.extra = d.get("extra")
         job.retried_as = d.get("retried_as")
         job.infohash = d.get("infohash") or ""
-        if job.status in ("running", "waiting"):     # its thread died with the previous GUI process
+        job.cut_off = job.status in ("running", "waiting")
+        if job.cut_off:                              # its thread died with the previous GUI process
             job.status, job.result, job.progress = "interrupted", INTERRUPTED, ""
             job.ended = job.ended or time.time()
             job.lines.append({"k": "warn", "t": INTERRUPTED})
@@ -282,6 +309,17 @@ class App:
                 self.build_slots_size -= 1
         return self.build_slots
 
+    def nearly_built(self, title: str) -> Job | None:
+        """An earlier build of this release that stopped nearly complete and still has its
+        Usenet downloads (not abandoned) - whichever tracker it came from."""
+        want = matching.norm(title)
+        with self.lock:
+            return next((j for j in self.jobs.values()
+                         if j.kind in ("build", "auto") and (j.extra or {}).get("have") is not None
+                         and not (j.extra or {}).get("abandoned")
+                         and matching.norm(j.title[len("auto: "):] if j.title.startswith("auto: ") else j.title) == want),
+                        None)
+
     def active_build(self, title: str) -> Job | None:
         """A build of this torrent that has not ended yet (a second one would fight it)."""
         with self.lock:
@@ -305,11 +343,44 @@ class App:
                        "filters_were": memo["filters_were"]}, fh)
         return memo
 
+    def _learn(self, job: "Job"):
+        """Was its release on Usenet? Built, or nearly built: yes. "No Usenet post": no."""
+        if job.kind not in ("build", "auto"):
+            return
+        found = job.status == "done" or (job.status == "failed" and (job.extra or {}).get("have") is not None)
+        missing = job.status == "failed" and odds_mod.NOT_ON_USENET.search(job.result or "")
+        if found or missing:
+            try:
+                odds_mod.odds_for(self.cfg).record(job.title, bool(found))
+            except OSError:
+                pass                             # never let the tally break a build
+
+    def seed_odds(self):
+        """The first time: what the jobs and the Automatic tab already show."""
+        outcomes = []
+        for j in list(self.jobs.values()):
+            if j.kind in ("build", "auto"):
+                if j.status == "done" or (j.extra or {}).get("have") is not None:
+                    outcomes.append((j.title, True))
+                elif odds_mod.NOT_ON_USENET.search(j.result or ""):
+                    outcomes.append((j.title, False))
+        box = getattr(self, "inbox", None)
+        for it in (box.state.items.values() if box else []):
+            if it.get("status") == "done":
+                outcomes.append((it.get("name") or "", True))
+            elif odds_mod.NOT_ON_USENET.search(it.get("why") or ""):
+                outcomes.append((it.get("name") or "", False))
+        odds_mod.odds_for(self.cfg).seed(outcomes)
+
     def start_inbox(self):
         """The automatic-build watcher (idle while switched off on the Automatic tab)."""
         self.inbox = inbox_mod.Inbox(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
                                                         "inbox.json"))
         self.inbox.state.on_save = lambda: self.events.publish("auto")
+        try:
+            self.seed_odds()
+        except OSError as e:
+            print(f"could not learn from the history: {e}", flush=True)
 
     def demand_stats(self) -> "worth_mod.Stats":
         return worth_mod.Stats(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
@@ -596,6 +667,31 @@ class App:
             s["can_retry"] = bool(box and not job.retried_as and box.retryable_job(job.id))
         return s
 
+    def resume_builds(self) -> list[int]:
+        """Carry on the Build-tab builds the last restart cut off, each as the same job - as
+        the Automatic tab does with its own. They start again from their request: downloads
+        SABnzbd finished (or is still making) meanwhile, NZBs already fetched and files
+        already placed are all reused. Builds interrupted by an earlier restart are left be."""
+        resumed = []
+        for job in sorted(self.jobs.values(), key=lambda j: j.id):
+            rq = job.repeat or {}
+            if not (getattr(job, "cut_off", False) and job.kind == "build" and job.status == "interrupted"
+                    and rq.get("path") == "/api/build" and not job.retried_as):
+                continue
+            job.cut_off = False
+            try:
+                title, run = build_job(self, dict(rq.get("body") or {}))
+            except (KeyError, TypeError, ValueError, OSError) as e:
+                job.lines.append({"k": "warn", "t": f"could not carry on by itself ({e}) - build it again"})
+                continue
+            if self.active_build(title):
+                continue
+            self.resume_job(job, run)
+            resumed.append(job.id)
+        if resumed:
+            print(f"resumed {len(resumed)} build(s) the restart interrupted", flush=True)
+        return resumed
+
     def resume_job(self, job: "Job", fn) -> "Job":
         """Carry on a job the last restart interrupted, as the same job: its list entry and
         log continue, instead of an "interrupted" one left behind next to a new copy."""
@@ -644,6 +740,7 @@ class App:
                 job.ended = time.time()
                 self.store.changed(urgent=True)
                 self._clean_now.set()            # a build ended: clear what is done
+                self._learn(job)
         threading.Thread(target=run, name=f"job-{job.id}", daemon=True).start()
 
 
@@ -728,6 +825,32 @@ def local_folder(cfg, path: str) -> str:
 def within_roots(cfg, path: str) -> bool:
     real = os.path.realpath(path)
     return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in data_roots(cfg))
+
+
+def build_job(app: "App", body: dict):
+    """A Build-tab build from its request: (title, the function the job runs). Used for
+    the request itself, and to carry on the build after a restart."""
+    torrent = _rel(body["torrent"])
+    groups = group_selection([_rel(n) for n in body.get("nzbs", [])])   # empty: the build finds them
+    opts = _opts(body.get("options", {}))
+    data = uploaded_data(app.cfg, torrent)   # None: download it through Prowlarr
+    # a release that already stopped nearly complete - built again from another tracker,
+    # or tried again: its Usenet downloads are already made, so it is only placing files
+    # and handing the torrent over - not waiting behind a queue of builds that download
+    finishing = bool(body.get("other_tracker")) or app.nearly_built(torrent.title)
+
+    def run(cfg):
+        if finishing:
+            report.info("built from another tracker with the downloads already made: "
+                        "not waiting for a build slot")
+            return execute_run(cfg, opts, torrent, groups, torrent_data=data)
+        take_slot(app.build_slot(), "Waiting for a build slot "
+                  f"({max(1, int(getattr(cfg, 'build_parallel', 2) or 2))} build(s) run at once)")
+        try:
+            return execute_run(cfg, opts, torrent, groups, torrent_data=data)
+        finally:
+            give_slot()          # not held if it was waiting on you when it ended
+    return torrent.title, run
 
 
 def _opts(d: dict) -> Options:
@@ -874,6 +997,14 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._send(200, *found)
             if path == "/api/settings":
                 return self._json(self.settings_payload())
+            if path == "/api/trackers":
+                # the torrent indexers Prowlarr has - to tick the ones nearly complete builds
+                # are always added for. Prowlarr's own list: nothing reaches a tracker
+                try:
+                    names = [n for n, _ in Prowlarr(app.cfg.prowlarr_url, app.cfg.prowlarr_key).indexer_sites() if n]
+                except (ApiError, OSError) as e:
+                    return self._json({"trackers": [], "error": str(e)})
+                return self._json({"trackers": sorted(set(names), key=str.lower)})
             if path == "/api/demand":
                 try:
                     rows = app._qbit().torrents() if app.cfg.qbit_url else []
@@ -888,6 +1019,8 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                    "rules": list(app.cfg.demand_rules or []),
                                    "block": list(app.cfg.demand_block or []),
                                    "only_rules": bool(app.cfg.demand_only_rules),
+                                   "usenet": odds_mod.odds_for(app.cfg).rows(),
+                                   "never_after": odds_mod.MIN_TRIES,
                                    "avoid": out.pop("rules", []),
                                    "min_sample": app.cfg.demand_min_sample,
                                    "age_days": app.cfg.demand_age_days})
@@ -1186,6 +1319,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                        "retry_first_minutes": ("auto_retry_first_minutes", float),
                        "parallel": ("auto_parallel", int), "searches_per_hour": ("auto_searches_per_hour", int),
                        "queue_max": ("auto_queue_max", int), "queue_keep_older": ("auto_queue_keep_older", bool),
+                       "skip_unposted": ("auto_skip_unposted", bool),
                        "autobrr_url": ("autobrr_url", str), "autobrr_key": ("autobrr_key", str)}
 
         # ------------------------------------------------ a build that nearly made it
@@ -1273,17 +1407,15 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             return self._json({"id": nj.id, "also": also})
 
         def abandon(self, body):
-            """Delete what a failed build left: the files it placed, its downloads, and its
-            torrent if nzb2seed added it and it is not running. Only nzb2seed's own files."""
+            """Clear what a failed build left in nzb2seed and SABnzbd: its Usenet downloads, and
+            the files it placed - unless its torrent is in qBittorrent. qBittorrent is never
+            touched: a torrent there stays, with the files it uses; remove it there yourself."""
             job = self._nearly(body)
             if job is None:
                 return
             x = job.extra
             h = x["infohash"]
             done, kept = [], []
-            if x.get("added"):
-                return self._err("it was added to qBittorrent, which is using its files - "
-                                 "remove it there if you no longer want it")
             later = app.jobs.get(job.retried_as or -1)
             while later is not None and later.retried_as:
                 later = app.jobs.get(later.retried_as)
@@ -1292,35 +1424,30 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                  "are that build's now")
             qb = app._qbit()
             there = qb.info(h) if qb else None
-            if there and there.get("progress", 0) >= 1:
-                return self._err("the torrent is complete in qBittorrent - nothing to abandon")
-            if there:
-                if there.get("state") not in ("stoppedDL", "pausedDL", "stoppedUP", "pausedUP",
-                                              "error", "missingFiles"):
-                    return self._err("it is running in qBittorrent - stop or remove it there first, "
-                                     "so a download is not thrown away")
-                qb.remove(h)                          # never with its files: they go below
-                done.append("removed it from qBittorrent")
-            owned = pipeline_mod.owned_record(app.cfg, type("T", (), {"infohash": h})())
-            gone = 0
-            for f in sorted(owned.files):
+            if there or x.get("added"):
+                kept.append("the torrent in qBittorrent and the files it uses (remove it there if you "
+                            "no longer want it)")
+            else:
+                owned = pipeline_mod.owned_record(app.cfg, type("T", (), {"infohash": h})())
+                gone = 0
+                for f in sorted(owned.files):
+                    try:
+                        if os.path.isfile(f):
+                            os.remove(f)
+                            gone += 1
+                    except OSError:
+                        kept.append(f)
+                for d in sorted(owned.dirs, key=len, reverse=True):
+                    try:
+                        if os.path.isdir(d) and not os.listdir(d):
+                            os.rmdir(d)
+                    except OSError:
+                        pass
                 try:
-                    if os.path.isfile(f):
-                        os.remove(f)
-                        gone += 1
-                except OSError:
-                    kept.append(f)
-            for d in sorted(owned.dirs, key=len, reverse=True):
-                try:
-                    if os.path.isdir(d) and not os.listdir(d):
-                        os.rmdir(d)
+                    os.remove(owned.path)
                 except OSError:
                     pass
-            try:
-                os.remove(owned.path)
-            except OSError:
-                pass
-            done.append(f"deleted the {gone} file(s) it placed")
+                done.append(f"deleted the {gone} file(s) it placed")
             # its Usenet downloads - unless another build is running, which may be using one
             busy = [j for j in app.jobs.values() if j.status in ("running", "waiting") and j is not job]
             if busy:
@@ -1358,6 +1485,19 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             cfg = app.cfg
             if what == "state":
                 return self._auto_state()
+            if what == "exclude_group":
+                # the Demand tab's suggestion: stop a group that never reaches Usenet at the
+                # source, in every autobrr filter that feeds nzb2seed - asked for by pressing it
+                group = (body.get("group") or "").strip()
+                if not group or not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", group):
+                    raise ValueError("no release group given")
+                ab = self._autobrr()
+                changed = 0
+                for f in ab.filters():
+                    full = ab.filter(f["id"])
+                    if ab.ours(full, cfg.auto_autobrr_folder) and ab.exclude_group(f["id"], group):
+                        changed += 1
+                return {"group": group, "filters": changed}
             if what == "save":
                 changes = {}
                 for k, (field, typ) in self.AUTO_FIELDS.items():
@@ -1536,26 +1676,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
 
         def build(self, body):
             torrent = _rel(body["torrent"])
-            nzbs = [_rel(n) for n in body.get("nzbs", [])]
-            groups = group_selection(nzbs)     # empty: the build finds the NZBs itself
-            opts = _opts(body.get("options", {}))
             busy = app.active_build(torrent.title)
             if busy:
                 return self._err(f"{torrent.title} is already being built (job {busy.id})", 409)
-            data = uploaded_data(app.cfg, torrent)   # None: download it through Prowlarr
-            def run(cfg):
-                slots = app.build_slot()
-                if not slots.acquire(blocking=False):
-                    report.step("Waiting for a build slot "
-                                f"({max(1, int(getattr(cfg, 'build_parallel', 2) or 2))} build(s) run at once)")
-                    while not slots.acquire(timeout=5):
-                        report.check_cancel()
-                try:
-                    return execute_run(cfg, opts, torrent, groups, torrent_data=data)
-                finally:
-                    slots.release()
-
-            job = app.start_job(torrent.title, "build", run)
+            title, run = build_job(app, body)
+            job = app.start_job(title, "build", run)
             return self._json({"id": job.id})
 
         def assemble(self, body):
@@ -1634,6 +1759,7 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     allowed = own_names(host) | {h.lower() for h in extra_hosts}
     app = App(config_path)
     app.start_inbox()
+    app.resume_builds()
     app.start_retention()
     app.start_space_guard()
     app.start_sab_category()

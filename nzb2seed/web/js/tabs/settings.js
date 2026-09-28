@@ -27,6 +27,7 @@ export function SettingsTab({ active }) {
   const [status, setStatus] = useState({});
   const [tests, setTests] = useState(null);
   const [ret, setRet] = useState(null);
+  const [trackers, setTrackers] = useState(null);  // Prowlarr's torrent indexers: {trackers, error}
 
   const fill = (s) => {
     const f = {};
@@ -37,6 +38,7 @@ export function SettingsTab({ active }) {
   useEffect(() => {
     if (!active) return;
     loadSettings().then(fill).catch(err => toast(err.message));
+    api("/api/trackers").then(setTrackers).catch(err => setTrackers({ trackers: [], error: err.message }));
   }, [active]);
 
   if (!form || !loaded) return html`<h1>Settings</h1>`;
@@ -199,7 +201,9 @@ export function SettingsTab({ active }) {
         <p class="status">A build missing less than this much can be handed to qBittorrent to download the rest - many trackers let you download a few percent without it counting towards a hit-and-run. For the trackers listed below it is done without asking; everywhere else you are asked each time.</p>
         ${grid(N("behaviour.nearly_complete_percent", "Offer it when less than (%) is missing", { min: "0", max: "50", step: "0.5" }),
                N("behaviour.nearly_complete_mb", "…and less than (MB) - whichever is less", { min: "1", step: "1", title: "On a big torrent a percentage is a lot of data: 5% of a 20 GB season is 1 GB. The build has to be under both limits." }),
-               T("behaviour.nearly_auto_trackers", "Always add, for these trackers", { placeholder: "none - you are asked each time", title: "Tracker names as nzb2seed shows them, separated by commas. Remove one to be asked again." }))}
+)}
+        <${Trackers} prowlarr=${trackers} chosen=${form["behaviour.nearly_auto_trackers"] || []}
+          set=${(v) => setForm({ ...form, "behaviour.nearly_auto_trackers": v })} />
       </fieldset>
       <fieldset>
         <h2>Free space</h2>
@@ -250,6 +254,25 @@ const FIELDS = [
   ["space.output_min_gb", "float"], ["space.min_percent", "float"], ["space.min_gb", "float"], ["space.pause_torrents", "bool"],
   ["retention.enabled", "bool"], ["retention.days", "int"],
 ];
+
+/* "SomeTracker (API)" and "sometracker" are the same tracker - as the server has it */
+const trackerKey = (n) => { const k = (n || "").trim().toLowerCase(); return k.endsWith("(api)") ? k.slice(0, -5).trim() : k; };
+
+/* the trackers nearly complete builds are always added for: every torrent indexer in
+   Prowlarr, ticked if it is approved - plus any approved name Prowlarr does not list */
+function Trackers({ prowlarr, chosen, set }) {
+  const known = prowlarr && (prowlarr.trackers || []), err = prowlarr?.error || "";
+  const on = new Set(chosen.map(trackerKey));
+  const listed = new Set((known || []).map(trackerKey));
+  const names = [...(known || []), ...chosen.filter(n => !listed.has(trackerKey(n)))];
+  const flip = (name, yes) => set(yes ? [...chosen, name] : chosen.filter(n => trackerKey(n) !== trackerKey(name)));
+  return html`<div class="field"><span>Always add, for these trackers</span>
+    ${known === null ? html`<small class="status">Asking Prowlarr for its trackers…</small>`
+      : html`<div class="ticks">${names.map(n => html`<label class="check"><input type="checkbox"
+          checked=${on.has(trackerKey(n))} onChange=${(e) => flip(n, e.target.checked)} /> ${n}</label>`)}</div>`}
+    <small class="status">${err ? `Prowlarr's trackers could not be listed (${err}) - only the approved ones are shown. `
+      : ""}Ticked: a build from that tracker that stops this close is added without asking. Unticked: you are asked each time.</small></div>`;
+}
 
 function Maps({ label, rows, set }) {
   const edit = (i, j, v) => set(rows.map((r, k) => k === i ? (j ? [r[0], v] : [v, r[1]]) : r));

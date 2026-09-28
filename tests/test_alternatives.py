@@ -347,3 +347,31 @@ def test_a_post_short_of_real_content_still_moves_on(tmp_path):
     with pytest.raises(Abort):
         pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, posts, 2)
     assert len(sab.added) == 2                         # both posts tried, as before
+
+
+def test_a_retry_uses_what_the_last_run_downloaded_for_a_small_shortfall(tmp_path):
+    """Tried twice, failed twice: the first run's post lacked only a sample, and the second
+    skipped that post ("did not hold all of it on an earlier run") without using its
+    download - so it had nothing at all. The download from before now counts."""
+    film = "Film 2022 1080p BluRay REMUX-GRP"
+    video = rnd(200_000, 7)
+    t = parse(make_torrent(film, {f"{film}.mkv": video, f"Sample/{film}-sample.mkv": rnd(3_000, 9)}))
+    posts = [rel(film.replace(" ", "."), len(video) + 3_100, f"post{i}", indexer=f"idx{i}") for i in range(2)]
+    sab = VideoOnlySAB(str(tmp_path), video)
+    strict = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]],
+                    nearly_complete_percent=0.001)            # the sample is over this limit
+    with pytest.raises(Abort):
+        pipeline.usenet_single(strict, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, posts, 2)
+    before = list(sab.added)
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
+    dirs, nzos = pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, posts, 2)
+    assert sab.added == before                                # nothing downloaded again
+    assert len(dirs) == 1                                     # the first run's download, used
+
+
+def test_the_nearly_complete_limit_not_a_fixed_50_mb_decides_what_is_small():
+    """A sample video is often more than 50 MB: within your limit it comes over BitTorrent."""
+    import inspect
+    src = inspect.getsource(pipeline.plan_and_fetch)
+    body = src[src.index("def only_small_missing"):src.index("def fetch_small")]
+    assert "50 << 20" not in body and "nearly_complete_mb" in body and "nearly_complete_percent" in body

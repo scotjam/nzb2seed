@@ -24,8 +24,9 @@ export async function retryJob(j) {
 }
 
 export async function abandonJob(j) {
-  if (!confirm(`Abandon ${j.title}?\n\nThis deletes the files it placed and its Usenet downloads, `
-      + `and removes it from qBittorrent if it is there and not running. Only nzb2seed's own files are touched.`)) return;
+  if (!confirm(`Abandon ${j.title}?\n\nThis deletes its Usenet downloads, and the files it placed unless `
+      + `its torrent is in qBittorrent. qBittorrent is not touched: a torrent there stays, with its files - `
+      + `remove it there yourself if you no longer want it.`)) return;
   try {
     const r = await api("/api/jobs/abandon", { id: j.id });
     toast(r.result); await refreshJobs();
