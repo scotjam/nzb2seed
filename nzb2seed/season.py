@@ -116,7 +116,7 @@ class Picked:
 
 
 _SHOW_EXTRA = r"(?:(?:19|20)\d\d|us|uk|au|nz|ca)"
-_AND = {"&", "and", "en", "und", "et"}          # 'Tom & Jess' is often posted as 'Tom.En.Jess'
+_AND = {"&", "and", "en", "und", "et"}          # 'Kim & Lou' is often posted as 'Kim.En.Lou'
 MAX_EPISODE_SEARCHES = 12                        # per season, on top of the season search
 MAX_GROUP_SEARCHES = 8                           # "<show> <group>" searches per season
 
@@ -132,7 +132,7 @@ def mentions_show(name: str, show_norm: str) -> bool:
 
 
 def show_names(show_name: str) -> list[str]:
-    """The show's name as releases may spell it: 'Tom & Jess' -> also 'Tom en Jess'."""
+    """The show's name as releases may spell it: 'Kim & Lou' -> also 'Kim en Lou'."""
     out = [show_name]
     if "&" in show_name:
         out += [show_name.replace("&", w) for w in ("en", "and")]
