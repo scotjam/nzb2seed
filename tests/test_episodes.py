@@ -7,14 +7,14 @@ import pytest
 from nzb2seed import episodes, metadata
 
 NULL = chr(92) + "N"                    # IMDb's "no value"
-SHOW = {"id": 7, "name": "Tom & Jess", "premiered": "2020-09-28", "imdb": "tt0000007", "tvdb": 70}
+SHOW = {"id": 7, "name": "Kim & Lou", "premiered": "2020-09-28", "imdb": "tt0000007", "tvdb": 70}
 
-TMDB_SEARCH = ('<a href="/tv/555-tom-jess-winter">x</a><span class="release_date">1 september 2022</span>'
-               '<a href="/tv/111-tom-jess">x</a><span class="release_date">28 september 2020</span>')
-TMDB_SEASONS = '<a href="/tv/111-tom-jess/season/1">Season 1</a>'
+TMDB_SEARCH = ('<a href="/tv/555-kim-lou-winter">x</a><span class="release_date">1 september 2022</span>'
+               '<a href="/tv/111-kim-lou">x</a><span class="release_date">28 september 2020</span>')
+TMDB_SEASONS = '<a href="/tv/111-kim-lou/season/1">Season 1</a>'
 TMDB_S1 = "".join(f'<h3><a class="no_click" data-episode-number="{n}" data-season-number="1" href="#">Ep &amp; {n}</a></h3>'
                   for n in range(1, 6))
-TVDB_DEREF = '<a href="/series/tom-jess">x</a><a href="/series/tom-jess/allseasons">y</a><a href="/series/create">z</a>'
+TVDB_DEREF = '<a href="/series/kim-lou">x</a><a href="/series/kim-lou/allseasons">y</a><a href="/series/create">z</a>'
 TVDB_ALL = "".join(f'<span class="text-muted episode-label">S{s:02d}E{n:02d}</span> <a href="#"> Name {s}.{n} </a>'
                    f'</h4><ul><li>September {n}, 2020</li></ul>' for s, k in ((1, 5), (2, 3)) for n in range(1, k + 1))
 
@@ -22,7 +22,7 @@ TVDB_ALL = "".join(f'<span class="text-muted episode-label">S{s:02d}E{n:02d}</sp
 @pytest.fixture
 def web(tmp_path, monkeypatch):
     pages = {"/search/tv": TMDB_SEARCH, "/tv/111/seasons": TMDB_SEASONS, "/tv/111/season/1": TMDB_S1,
-             "/dereferrer/series/70": TVDB_DEREF, "/series/tom-jess/allseasons/official": TVDB_ALL}
+             "/dereferrer/series/70": TVDB_DEREF, "/series/kim-lou/allseasons/official": TVDB_ALL}
     asked = []
 
     def get_text(url):
