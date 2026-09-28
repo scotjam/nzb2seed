@@ -116,3 +116,93 @@ def test_the_number_of_slots_follows_the_setting(tmp_path):
     slots = app.build_slot()
     assert [slots.acquire(blocking=False) for _ in range(2)] == [True, False]
     slots.release()
+
+
+def test_a_build_waiting_for_the_person_gives_up_its_slot(tmp_path):
+    """Waiting on a pick is not building: another build takes the slot meanwhile, and the
+    answered one queues for a slot again like any build that has not started."""
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    slots = threading.Semaphore(1)                 # one build at a time
+    gate, order = threading.Event(), []
+
+    def asking(cfg):
+        gui.take_slot(slots)
+        try:
+            report.ask("pick one", [{"title": "A"}])
+            order.append("asker carries on")
+        finally:
+            gui.give_slot()
+
+    def other(cfg):
+        gui.take_slot(slots)
+        try:
+            order.append("other builds")
+            gate.wait(10)
+        finally:
+            gui.give_slot()
+    one = app.start_job("One", "build", asking)
+    wait(lambda: one.status == "waiting")
+    two = app.start_job("Two", "build", other)
+    wait(lambda: order == ["other builds"])        # the slot one was not using
+    one.answer(0)
+    time.sleep(0.3)
+    assert order == ["other builds"] and one.status == "running"   # queued behind two
+    assert any("Waiting for a build slot" in l["t"] for l in one.lines)
+    gate.set()
+    wait(lambda: one.status == "done" and two.status == "done")
+    assert order == ["other builds", "asker carries on"]
+    assert slots.acquire(blocking=False) and not slots.acquire(blocking=False)   # none leaked
+
+
+def test_a_build_stopped_while_it_waits_for_the_person_frees_nothing_twice(tmp_path):
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    slots = threading.Semaphore(1)
+
+    def asking(cfg):
+        gui.take_slot(slots)
+        try:
+            return report.ask("pick one", [{"title": "A"}])
+        finally:
+            gui.give_slot()
+    for stop in (lambda j: j.answer(None), lambda j: j.cancel.set()):
+        job = app.start_job("One", "build", asking)
+        wait(lambda: job.status == "waiting")
+        stop(job)
+        wait(lambda: job.status not in ("waiting", "running"))
+    assert slots.acquire(blocking=False) and not slots.acquire(blocking=False)
+
+
+def test_builds_a_restart_cut_off_carry_on_as_the_same_job(tmp_path, monkeypatch):
+    import dataclasses
+    from nzb2seed.clients import Release
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+
+    def request(title):
+        t = dataclasses.asdict(Release(title, "torrent", "TrackerOne", 1, 10, title, "http://p/1", "", "", 0, 3, None))
+        return {"path": "/api/build", "body": {"torrent": t, "nzbs": [], "options": {}}}
+    jobs = [
+        {"id": 1, "title": "Old.Build", "kind": "build", "status": "interrupted", "repeat": request("Old.Build"),
+         "lines": [{"k": "warn", "t": gui.INTERRUPTED}]},                     # an earlier restart: left be
+        {"id": 2, "title": "Cut.Off", "kind": "build", "status": "running", "repeat": request("Cut.Off"),
+         "lines": [{"k": "info", "t": "Downloading"}]},
+        {"id": 3, "title": "Asking", "kind": "build", "status": "waiting", "repeat": request("Asking"), "lines": []},
+        {"id": 4, "title": "Folder", "kind": "assemble", "status": "running", "lines": []},  # not a build
+        {"id": 5, "title": "Done", "kind": "build", "status": "done", "repeat": request("Done"), "lines": []},
+    ]
+    (tmp_path / "jobs.json").write_text(json.dumps({"jobs": jobs}))
+    ran = []
+    monkeypatch.setattr(gui, "execute_run", lambda cfg, opts, t, g, torrent_data=None:
+                        ran.append(t.title) or {"result": "built"})
+    app = gui.App(str(cfgfile))
+    monkeypatch.setattr(app, "build_slot", lambda: threading.Semaphore(5))
+    assert app.resume_builds() == [2, 3]
+    wait(lambda: app.jobs[2].status == "done" and app.jobs[3].status == "done")
+    assert sorted(ran) == ["Asking", "Cut.Off"] and len(app.jobs) == 5          # no new jobs
+    assert gui.RESUMING in [l["t"] for l in app.jobs[2].lines] and app.jobs[2].lines[0]["t"] == "Downloading"
+    assert app.jobs[1].status == "interrupted" and app.jobs[4].status == "interrupted"
+    assert app.resume_builds() == []                                             # once only

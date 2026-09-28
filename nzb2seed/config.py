@@ -82,6 +82,7 @@ class Config:
     auto_start: bool = True            # start seeding - only ever at a 100.0% recheck
     auto_parallel: int = 1             # builds at once
     auto_queue_max: int = 10           # torrents queued at once (not counting builds); 0 = no cap
+    auto_skip_unposted: bool = True    # stop, untried, what its group never had on Usenet
     auto_queue_keep_older: bool = False  # full queue: turn the newcomer away, not the oldest
     auto_searches_per_hour: int = 40   # Prowlarr searches automatic builds may make per hour
     autobrr_url: str = ""
@@ -152,6 +153,7 @@ LAYOUT = [
     ("automatic", "start", "auto_start"),
     ("automatic", "parallel", "auto_parallel"),
     ("automatic", "queue_max", "auto_queue_max"),
+    ("automatic", "skip_unposted", "auto_skip_unposted"),
     ("automatic", "queue_keep_older", "auto_queue_keep_older"),
     ("automatic", "searches_per_hour", "auto_searches_per_hour"),
     ("autobrr", "url", "autobrr_url"),

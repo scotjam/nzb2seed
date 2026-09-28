@@ -1431,7 +1431,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         never from another download of everything else again."""
         short = sum(f.length for f in missing)
         whole = sum(f.length for f in u.files) or 1
-        return 0 < short <= 50 << 20 and short / whole * 100 < float(cfg.nearly_complete_percent or 5)             and short < float(cfg.nearly_complete_mb or 200) * 1024 ** 2
+        # your nearly-complete limit decides (a sample video is often more than a few MB);
+        # fetch_small only trims NZBs for what is small enough, the rest comes over BitTorrent
+        return 0 < short and short / whole * 100 < float(cfg.nearly_complete_percent or 5) \
+            and short < float(cfg.nearly_complete_mb or 200) * 1024 ** 2
 
     def fetch_small(u: Unit, extras: list):
         """Download only ``extras`` - small files such as an .nfo or .sfv: each of ``u``'s
@@ -1518,6 +1521,26 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             return
         advance(u)
 
+    def settle_small(u: Unit, d: str, nzo: str | None) -> bool:
+        """Is all ``u`` lacks now within the nearly-complete limit? Then no other whole post
+        is downloaded for it: what is small is fetched from trimmed NZBs, and the build goes
+        on with what is here - complete, or stopping nearly complete with the rest to come
+        over BitTorrent if you choose (or your tracker is set to always add)."""
+        missing = still_missing(u)
+        if not only_small_missing(u, missing):
+            return False
+        names = ", ".join(f"{f.name} ({gb(f.length)})" for f in missing[:3])
+        info(f"{u.need.label}: only {names} missing now - not downloading another whole "
+             "post for that")
+        fetch_small(u, missing)
+        # everything downloaded that holds a file of the unit goes forward
+        for x in [d] + looked + [p for p, _ in partials]:
+            if x not in dirs and os.path.isdir(x) and set(asm.find_sources(t, [x])) & \
+                    {f.relpath for f in u.files}:
+                dirs.append(x)
+        resolve(u, None, nzo)
+        return True
+
     def advance(u: Unit):
         # every post of this kind from the right group and resolution is tried before splitting
         while True:
@@ -1535,6 +1558,12 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             if known:
                 info(f"{rel.title} ({rel.indexer}): {known} on an earlier run - skipping it "
                      "without asking the indexer for it again")
+                # but what that run downloaded is still here, and counts towards the torrent
+                old = reuse(cfg, sab, rel, lambda d: True)
+                if old and old[1] and all(p != old[1] for p, _ in partials):
+                    partials.append((old[1], rel.title))
+                    if settle_small(u, old[1], old[0]):
+                        return
                 continue
             if failed_before(cfg, sab, rel):
                 continue
@@ -1600,20 +1629,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 verdicts.mark(t.infohash, u.need.label, rel,
                               f"it downloaded completely and did not hold all of {u.need.label}")
                 partials.append((d, rel.title))
-                missing = still_missing(u)
-                if only_small_missing(u, missing):
-                    names = ", ".join(f"{f.name} ({gb(f.length)})" for f in missing[:3])
-                    info(f"{u.need.label}: only {names} missing now - not downloading another whole "
-                         "post for that")
-                    fetch_small(u, missing)
-                    # everything downloaded that holds a file of the unit goes forward: the
-                    # build finishes complete, or stops nearly complete with the rest to come
-                    # over BitTorrent if you choose (or your tracker is set to always add)
-                    for x in [d] + looked + [p for p, _ in partials]:
-                        if x not in dirs and os.path.isdir(x) and set(asm.find_sources(t, [x])) & \
-                                {f.relpath for f in u.files}:
-                            dirs.append(x)
-                    resolve(u, None, nzo)
+                if settle_small(u, d, nzo):
                     continue
             else:
                 warn(f"SABnzbd could not complete {rel.title}")

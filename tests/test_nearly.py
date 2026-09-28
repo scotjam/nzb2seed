@@ -109,26 +109,31 @@ def test_abandoning_deletes_what_the_build_placed(server, tmp_path, monkeypatch)
     assert job.extra["abandoned"] is True and "abandoned" in job.result
 
 
-def test_abandoning_removes_a_stopped_torrent_nzb2seed_added(server, tmp_path, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("state", ["stoppedDL", "downloading", "stoppedUP"])
+def test_abandoning_never_touches_qbittorrent(server, tmp_path, monkeypatch, state):  # noqa: F811
+    """Abandoning clears nzb2seed and SABnzbd only: a torrent in qBittorrent - stopped,
+    downloading the rest, or complete - stays there, and so do the files it uses."""
     app, url = server
-    placed(app, tmp_path)
-    qb = FakeQbit(state="stoppedDL")
+    f, _ = placed(app, tmp_path)
+    qb = FakeQbit(state=state)
     monkeypatch.setattr(app, "_qbit", lambda: qb)
     monkeypatch.setattr(app, "_sab", lambda: None)
     job = failed_part_way(app, in_client=True)
-    assert call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})[0] == 200
-    assert qb.removed == [H]
+    status, r = call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})
+    assert status == 200 and job.extra["abandoned"] is True
+    assert qb.removed == [] and f.exists()
+    assert "qBittorrent" in r["result"]
 
 
-def test_a_torrent_that_is_running_is_never_abandoned(server, tmp_path, monkeypatch):  # noqa: F811
-    """If it is downloading the rest, abandoning would throw that download away."""
+def test_a_build_added_to_qbittorrent_can_be_abandoned_too(server, tmp_path, monkeypatch):  # noqa: F811
     app, url = server
     f, _ = placed(app, tmp_path)
-    qb = FakeQbit(state="downloading")
-    monkeypatch.setattr(app, "_qbit", lambda: qb)
+    monkeypatch.setattr(app, "_qbit", lambda: FakeQbit(state=None))   # gone from qBittorrent's list meanwhile
+    monkeypatch.setattr(app, "_sab", lambda: None)
     job = failed_part_way(app, in_client=True)
-    assert call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})[0] == 400
-    assert f.exists() and qb.removed == []                   # nothing touched
+    job.extra = {**job.extra, "added": True}
+    assert call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})[0] == 200
+    assert f.exists()                                         # it was given to qBittorrent: kept
 
 
 def test_nothing_is_deleted_until_the_person_abandons_it(server, tmp_path):  # noqa: F811
