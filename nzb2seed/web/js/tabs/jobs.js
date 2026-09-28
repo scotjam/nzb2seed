@@ -7,7 +7,7 @@ import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, tr
 import { SortSelect } from "../components/sort.js";
 import { BADLY_ENDED, JOB_KINDS, builtLater, canAbandon, canAdd, canRemove, canRetry, finalOf, isLive, kindOf } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
-import { abandonJob, abandonMany, addMany, addToClient, cancelMany, clearAutoQueue, overrideAdd, removeAndDelete, removeMany, retryJob, retryMany } from "./jobs-actions.js";
+import { abandonJob, abandonMany, addMany, addToClient, cancelMany, clearAutoQueue, overrideAdd, removeAndDelete, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
 export function JobsTab({ active }) {
   const all = useStore(jobs);
@@ -135,6 +135,10 @@ function JobActions({ j, all }) {
         ${x.tracker && html`<${Act} label=${`Always add nearly complete for ${where}`}
           title=${`From now on, every build from ${where} that stops less than ${limit} short goes to qBittorrent to download the rest, without asking. Undo it in Settings.`}
           onPress=${() => addToClient(j, where, true)} />`}`}
+      ${x.settled?.length > 0 && !j.retried_as && html`<${Act}
+        label=${`Try whole posts (${wholePostsText(x).parts} part${x.settled.length === 1 ? "" : "s"}, ${wholePostsText(x).miss} missing)`}
+        title=${`Only small files were missing from ${wholePostsText(x).names}, so no other whole post was downloaded for them. Build it again trying whole posts - about ${wholePostsText(x).post} or more - to see if they hold the rest.`}
+        onPress=${() => wholePosts(j)} />`}
       ${j.retried_as ? html`<small class="status">tried again as job ${j.retried_as}</small>`
         : j.can_retry && (starting ? html`<small class="status">starting again...</small>`
           // the button goes the moment it is pressed, so it cannot be pressed twice

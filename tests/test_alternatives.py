@@ -384,3 +384,29 @@ def test_a_missing_file_is_fetched_on_its_own_whatever_its_size():
     src = inspect.getsource(pipeline.plan_and_fetch)
     body = src[src.index("def fetch_small"):src.index("def split(")]
     assert "<< 20" not in body and "nearly_complete_mb" not in body
+
+
+def test_what_was_settled_for_is_recorded_and_whole_posts_can_be_tried(tmp_path):
+    """A small file missing: normally the build settles after the first post and says so;
+    asked to try whole posts, it downloads the others first - and settles only after."""
+    film = "Film 2022 1080p BluRay REMUX-GRP"
+    video = rnd(200_000, 7)
+    t = parse(make_torrent(film, {f"{film}.mkv": video, f"{film}.mkv.nfo": b"n" * 800}))
+    posts = [rel(film.replace(" ", "."), len(video) + 900 + i, f"post{i}", indexer=f"idx{i}") for i in range(3)]
+    (tmp_path / "a").mkdir()
+    cfg = Config(path=str(tmp_path / "a" / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "a")]])
+    sab = VideoOnlySAB(str(tmp_path / "a"), video)
+    pipeline._this_build.settled = []
+    pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, posts, 2)
+    assert len(sab.added) == 1
+    assert [s["label"] for s in pipeline._this_build.settled] == [film]
+    assert pipeline.Incomplete("x", 0.99, "h", "", "", False).details()["settled"][0]["missing"] == 800
+
+    (tmp_path / "b").mkdir()
+    cfg = Config(path=str(tmp_path / "b" / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "b")]])
+    sab = VideoOnlySAB(str(tmp_path / "b"), video)
+    pipeline._this_build.settled = []
+    dirs, _ = pipeline.usenet_single(cfg, pipeline.Options(unattended=True, whole_posts=True),
+                                     NoOtherPosts(), sab, t, posts, 2)
+    assert len(sab.added) == 3                             # every whole post tried
+    assert dirs and pipeline._this_build.settled == []     # then settled: nothing more to offer
