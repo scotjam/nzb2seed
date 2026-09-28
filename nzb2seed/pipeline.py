@@ -486,16 +486,18 @@ PEEK_QUIET = 600       # seconds a finished peek is left before a sweep may remo
 _peeking: set[str] = set()
 
 
-def archive_holds(files: list, entries: list[tuple[str, int]]) -> bool | None:
+def archive_holds(files: list, entries: list[tuple[str, int]], inner=()) -> bool | None:
     """Judging from the file list inside a RAR set, does it hold ``files`` (torrent files)?
 
-    True when it holds a file of exactly the right size, False when it holds the right name
-    at a different size or a file as large as the one wanted that is not it (a different
-    encode of the same title), None when the listing cannot say."""
+    True when it holds a file of exactly the right size - one of the torrent's, or one of
+    ``inner``: the sizes of what the torrent's own scene RARs hold (from srrDB), since a
+    re-pack of that video is what the scene RARs are rebuilt from. False when it holds the
+    right name at a different size or a file as large as the one wanted that is not it (a
+    different encode of the same title), None when the listing cannot say."""
     if not entries or not files:
         return None
     want_names = {os.path.basename(f.name).lower() for f in files}
-    want_sizes = {f.length for f in files}
+    want_sizes = {f.length for f in files} | set(inner)
     if any(size in want_sizes for _, size in entries):
         return True
     if any(os.path.basename(n).lower() in want_names for n, _ in entries):
@@ -518,7 +520,8 @@ def worth_peeking(nzb: bytes, files: list) -> bool:
     return not any(p.name.lower() in names for p in posted)
 
 
-def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files: list) -> bool | None:
+def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files: list,
+                 inner=()) -> bool | None:
     """Look inside a RAR post before downloading all of it: only its first volume is
     fetched, and the names and sizes in that volume's headers are compared with the torrent's
     files. False means the post holds a different encode - skip it and keep the bytes."""
@@ -559,7 +562,7 @@ def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files:
         if not got:
             return None
         entries = archives.list_contents(max(got, key=os.path.getsize))
-        held = archive_holds(files, entries)
+        held = archive_holds(files, entries, inner)
         want = ", ".join(f"{f.name} ({gb(f.length)})" for f in files[:3])
         inside = ", ".join(f"{os.path.basename(p.replace(chr(92), '/'))} ({gb(s)})"
                            for p, s in sorted(entries, key=lambda e: -e[1])[:3])
@@ -1349,6 +1352,20 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     def fill(d: str, missing: list) -> bool:
         return packed_release(t) and scenefill.fill(t, d, missing, fetcher)
 
+    inner_sizes: list[int] = []
+
+    def packed_inner() -> tuple[int, ...]:
+        """For a RAR'd release: the sizes of what its scene RARs hold, from srrDB (asked
+        once per build) - a post holding that video can have the RARs rebuilt from it."""
+        if not inner_sizes and packed_release(t):
+            try:
+                det = metadata.srrdb_details(scenefill.release_name(t)) or {}
+            except Exception as e:              # srrDB being unreachable must not stop a build
+                warn(f"srrDB: {e}")
+                det = {}
+            inner_sizes.extend([a["size"] for a in det.get("archived-files", []) if a.get("size")] or [0])
+        return tuple(s for s in inner_sizes if s)
+
     def satisfied(u: "Unit", d: str) -> bool:
         """Does ``d`` - together with the folders already looked at - hold the unit? Files
         rebuilt or fetched into one folder are not made again for the next."""
@@ -1555,15 +1572,29 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             u.tried.append(rel)
             attempted.add(rel.guid)
             known = verdicts.seen(t.infohash, u.need.label, rel)
+            if known and known.startswith("its archive holds a different release") and packed_inner():
+                # judged before the video inside the torrent's scene RARs counted as a match:
+                # look again (the first volume only)
+                info(f"{rel.title} ({rel.indexer}): {known} on an earlier run - looking again, "
+                     "now that a re-pack of the scene RARs' video counts")
+                known = None
             if known:
-                info(f"{rel.title} ({rel.indexer}): {known} on an earlier run - skipping it "
-                     "without asking the indexer for it again")
-                # but what that run downloaded is still here, and counts towards the torrent
+                info(f"{rel.title} ({rel.indexer}): {known} on an earlier run - not asking the "
+                     "indexer for it again")
+                # but what that run downloaded is still here: looked at again (an encrypted
+                # re-pack can be opened now, with the password its NZB carried), and it counts
+                # towards the torrent either way
                 old = reuse(cfg, sab, rel, lambda d: True)
-                if old and old[1] and all(p != old[1] for p, _ in partials):
-                    partials.append((old[1], rel.title))
-                    if settle_small(u, old[1], old[0]):
+                if old and old[1]:
+                    if hasattr(pr, "kept"):
+                        pr.kept(rel)             # its archive password, from the NZB kept here
+                    if satisfied(u, old[1]):
+                        resolve(u, old[1], old[0])
                         return
+                    if all(p != old[1] for p, _ in partials):
+                        partials.append((old[1], rel.title))
+                        if settle_small(u, old[1], old[0]):
+                            return
                 continue
             if failed_before(cfg, sab, rel):
                 continue
@@ -1599,7 +1630,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 continue
             peek = cfg.peek_archives if opts.peek is None else opts.peek
             if peek and worth_peeking(data, u.files) \
-                    and peek_archive(cfg, pr, sab, rel, data, u.files) is False:
+                    and peek_archive(cfg, pr, sab, rel, data, u.files, packed_inner()) is False:
                 verdicts.mark(t.infohash, u.need.label, rel, "its archive holds a different release")
                 _drop(pr, rel)
                 continue
