@@ -123,13 +123,13 @@ def test_the_same_named_older_show_and_nameless_resolutions_do_not_win():
 def test_and_spellings_are_one_show(tmp_path):
     from nzb2seed import matching
     from nzb2seed.season import show_names
-    key = matching.norm("Tom & Jess")
-    assert same_show("Tom.En.Jess.S01E14.DUBBED.1080p.WEB.h264-GRPA", key)
-    assert same_show("Tom.and.Jess.S01E14.1080p-GRPA", key)
-    assert not same_show("Tom.En.Jess.Winter.S01E49.DUBBED.1080p.WEB.h264-GRPA", key)   # the spin-off
-    assert show_names("Tom & Jess") == ["Tom & Jess", "Tom en Jess", "Tom and Jess"]
-    (tmp_path / "Tom.En.Jess.S01E14.DUBBED.1080p.WEB.h264-GRPA").mkdir()
-    (tmp_path / "Tom.En.Jess.Winter.S01E49.DUBBED.1080p.WEB.h264-GRPA").mkdir()
+    key = matching.norm("Kim & Lou")
+    assert same_show("Kim.En.Lou.S01E14.DUBBED.1080p.WEB.h264-GRPA", key)
+    assert same_show("Kim.and.Lou.S01E14.1080p-GRPA", key)
+    assert not same_show("Kim.En.Lou.Winter.S01E49.DUBBED.1080p.WEB.h264-GRPA", key)   # the spin-off
+    assert show_names("Kim & Lou") == ["Kim & Lou", "Kim en Lou", "Kim and Lou"]
+    (tmp_path / "Kim.En.Lou.S01E14.DUBBED.1080p.WEB.h264-GRPA").mkdir()
+    (tmp_path / "Kim.En.Lou.Winter.S01E49.DUBBED.1080p.WEB.h264-GRPA").mkdir()
     have, _ = series.library_episodes(str(tmp_path), key, 2020)
     assert have == {1: {14}}
 
