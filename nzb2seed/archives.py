@@ -44,6 +44,27 @@ def rar_sets(d: str) -> list[str]:
     return out
 
 
+_FIRST = re.compile(r"(\.part0*1\.rar|\.7z|\.7z\.0*1|\.zip|\.0*1)$", re.I)
+_LATER = re.compile(r"(\.part0*[2-9]\d*\.rar|\.part0*1\d+\.rar|\.7z\.0*[2-9]\d*|\.0*[2-9]\d*|\.0*1\d+)$", re.I)
+
+
+def archive_sets(d: str) -> list[str]:
+    """First volume of every archive set under ``d`` that 7-Zip or unrar can open: RAR in
+    both volume styles, 7z (single or split), zip, and numbered sets (.001) - a numbered
+    set can also be a plain split file, which listing then tells apart."""
+    out = []
+    for root, _, names in os.walk(d):
+        if UNPACK_DIR in os.path.relpath(root, d).split(os.sep):
+            continue                            # what was unpacked here: not looked at again
+        for n in sorted(names):
+            if _PART.search(n):
+                if int(_PART.search(n).group(1)) == 1:
+                    out.append(os.path.join(root, n))
+            elif _RAR.search(n) or (_FIRST.search(n) and not _LATER.search(n)):
+                out.append(os.path.join(root, n))
+    return out
+
+
 def parse_7z_slt(text: str) -> list[tuple[str, int]]:
     """Entries (path, size) from ``7z l -slt`` output; folders are skipped."""
     out, cur = [], {}
