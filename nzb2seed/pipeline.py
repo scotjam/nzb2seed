@@ -1458,11 +1458,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             return
         exts = sorted({f.ext for f in extras if f.ext})
         names = ", ".join(f.name for f in extras[:3])
-        cap = float(cfg.nearly_complete_mb or 200) * 1024 ** 2     # a sample video is often over 50 MB
-        if not exts or sum(f.length for f in extras) > cap:
-            why = "have no file type to look for" if not exts else \
-                f"are more than your {float(cfg.nearly_complete_mb or 200):g} MB nearly-complete limit"
-            warn(f"{u.need.label}: {names} {why} - not fetched on their own")
+        # no size cap: a trimmed NZB costs only the files asked for, and whatever Usenet cannot
+        # supply is weighed once, at the end, against the nearly-complete limit
+        if not exts:
+            warn(f"{u.need.label}: {names} have no file type to look for - not fetched on their own")
             return
         step(f"Fetching {names} ({u.need.label} itself, not any one episode)")
         cands = [r for r in sorted(usenet_results(cfg, pr, u.need, u.seeded), key=lambda r: -(r.grabs or 0))
