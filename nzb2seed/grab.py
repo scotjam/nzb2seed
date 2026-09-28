@@ -30,6 +30,10 @@ from .report import check_cancel
 
 CHECK_PREFIX = "nzb2seed-check-"
 FETCH_TIMEOUT = 180
+# SABnzbd takes a job out of its queue while it reads the NZB it fetched, and puts it back
+# once read - in neither queue nor history meanwhile. A season's NZB (hundreds of files)
+# takes seconds to read: that is not the job disappearing
+READING_GRACE = 60
 
 # Every paused NZB-check job this process is holding, across all builds. Builds run side
 # by side, and the sweep below deletes check jobs a killed build left behind - without
@@ -151,15 +155,21 @@ class Source:
         self.held[rel.guid] = nzo
         _hold_on(nzo)
         end = time.time() + FETCH_TIMEOUT
+        missing_since = None
         while True:
             check_cancel()
             slot = self.sab.queue_slot(nzo)
             if slot is None:
                 h = self.sab.history_slot(nzo) or {}
+                missing_since = missing_since or time.time()
+                if not h and time.time() - missing_since < READING_GRACE:
+                    time.sleep(1)           # being read: back in the queue in a moment
+                    continue
                 self.held.pop(rel.guid, None)
                 _let_go(nzo)
                 why = h.get("fail_message") or h.get("status") or "it disappeared from the queue"
                 raise ApiError(f"SABnzbd could not get the NZB from {rel.indexer}: {why}{page_of(rel)}")
+            missing_since = None
             if slot.get("status") != "Grabbing":
                 path = self._nzb_path(name)
                 if path:

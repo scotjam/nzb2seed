@@ -15,7 +15,7 @@ function formFrom(st) {
   return { autobrr_url: s.autobrr_url || "", autobrr_key: "", folder: s.folder || "", autobrr_folder: s.autobrr_folder || "",
            wait_hours: s.wait_hours, retry_minutes: s.retry_minutes, retry_first_minutes: s.retry_first_minutes,
            parallel: s.parallel, queue_max: s.queue_max ?? 10, queue_keep_older: !!s.queue_keep_older,
-           searches_per_hour: s.searches_per_hour, start: !!s.start };
+           searches_per_hour: s.searches_per_hour, start: !!s.start, skip_unposted: s.skip_unposted !== false };
 }
 function toSettings(f) {
   return { folder: f.folder.trim(), autobrr_folder: f.autobrr_folder.trim(),
@@ -23,13 +23,13 @@ function toSettings(f) {
     retry_first_minutes: Number(f.retry_first_minutes) || 15,
     parallel: Number(f.parallel) || 1, searches_per_hour: Number(f.searches_per_hour) || 40,
     queue_max: f.queue_max === "" ? 10 : Math.max(0, Math.floor(Number(f.queue_max) || 0)),
-    queue_keep_older: f.queue_keep_older, start: f.start,
+    queue_keep_older: f.queue_keep_older, start: f.start, skip_unposted: f.skip_unposted,
     autobrr_url: f.autobrr_url.trim(), autobrr_key: f.autobrr_key.trim() };
 }
 
 export function AutoTab({ active }) {
   const [state, setState] = useState(null);
-  const [form, setForm] = useState({ ...FIELDS, autobrr_key: "", queue_keep_older: false, start: false });
+  const [form, setForm] = useState({ ...FIELDS, autobrr_key: "", queue_keep_older: false, start: false, skip_unposted: true });
   const [saved, setSaved] = useState("");
   const [abr, setAbr] = useState({ status: "", busy: false, filters: null, applied: "" });
 
@@ -153,6 +153,7 @@ export function AutoTab({ active }) {
           ${num("searches_per_hour", "Prowlarr searches an hour (automatic only)", { min: "1", step: "1" })}
         </div>
         <label class="check" style="margin-top:10px"><input type="checkbox" checked=${form.queue_keep_older} onChange=${set("queue_keep_older")} /> When the queue is full, keep the older queued torrents and stop the new arrival instead</label>
+        <label class="check" style="margin-top:10px"><input type="checkbox" checked=${form.skip_unposted} onChange=${set("skip_unposted")} /> Don't try groups that are never on Usenet: a torrent whose release group and resolution were never found on Usenet in 5 tries is stopped as it arrives, without a search (see Demand → Found on Usenet; it can still be tried again)</label>
         <label class="check" style="margin-top:10px"><input type="checkbox" checked=${form.start} onChange=${set("start")} /> Start seeding when the recheck is exactly 100.0% (below that a torrent always stays stopped)</label>
         <div class="actions" style="margin-top:12px"><button type="button" class="btn primary" onClick=${save}>Save</button>
           <small class="status">${saved}</small></div>

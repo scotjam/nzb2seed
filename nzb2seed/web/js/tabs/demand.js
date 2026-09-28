@@ -3,6 +3,7 @@
 import { html, useEffect, useState } from "../lib.js";
 import { api } from "../api.js";
 import { loadSettings, settings, toast } from "../store.js";
+import { FoundOnUsenet } from "./demand-usenet.js";
 
 const LISTS = ["trackers", "types", "groups", "keywords", "not_keywords"];
 const NUMS = { min_gb: "at least (GB)", max_gb: "at most (GB)", max_age_min: "newer than (min)",
@@ -107,6 +108,7 @@ export function DemandTab({ active }) {
         <${RuleList} list=${block} setList=${change(setBlock)} />
         <div class="actions"><button type="button" class="btn" onClick=${() => add({ name: "" }, block, setBlock)}>Add a block</button></div>
       </div>
+      <${FoundOnUsenet} rows=${r.usenet} never=${r.never_after} />
       <div>${r.by.map(g => html`<div class="dmtable"><h3>By ${g.what}</h3>
         <table><thead><tr><th>${g.what}</th><th>torrents</th><th>upload per GB</th><th>never uploaded</th></tr></thead>
           <tbody>${g.rows.map(x => html`<tr class=${x.ratio < 0.25 ? "poor" : x.ratio >= 1 ? "good" : ""}>

@@ -9,7 +9,16 @@ export const SCENARIOS = {
     await act.go("build");
     await act.type("Search Prowlarr", "Film.2020");
     await act.submit("Search Prowlarr");
-    const out = { summary: act.text(doc.querySelector(".digest")) };
+    const toggle = doc.querySelector(".digest .dtoggle");
+    const arrow = () => toggle.querySelector(".arrow").textContent;
+    const shown = () => doc.querySelectorAll(".digest .ditem").length;
+    const folding = { arrow: arrow(), items: shown() };
+    toggle.click(); await act.settle();
+    Object.assign(folding, { foldedArrow: arrow(), foldedItems: shown(), expanded: toggle.getAttribute("aria-expanded") });
+    toggle.click(); await act.settle();
+    folding.openedAgain = shown();
+    const out = { folding, summary: act.text(doc.querySelector(".digest")),
+                  hover: [...doc.querySelectorAll(".digest .ditem")].map(i => i.title) };
     doc.querySelector(".digest .ditem input").click();                      // tick the first one
     await act.settle();
     out.bar = act.text(doc.querySelector(".buildbar"));
@@ -51,6 +60,20 @@ export const SCENARIOS = {
     out.asked = confirms.at(-1);
     out.sent = calls.slice(n).filter(c => c.path === "/api/jobs/add_to_client").map(c => c.body);
     return out;
+  },
+
+  /* the new page only: the always-added trackers are ticked in Prowlarr's list */
+  async trackers({ act, doc, calls }) {
+    await act.go("settings");
+    const boxes = () => [...doc.querySelectorAll(".ticks label")].map(l => (l.querySelector("input").checked ? "[x] " : "[ ] ") + l.textContent.trim());
+    const listed = boxes();
+    await act.click("TrackerFour", "input[type=checkbox]");
+    await act.click("TrackerThree (API)", "input[type=checkbox]");
+    const after = boxes();
+    const n = calls.length;
+    await act.click("Save settings", "button");
+    const sent = calls.slice(n).filter(c => c.path === "/api/settings");
+    return { listed, after, saved: sent[0]?.body.settings.behaviour.nearly_auto_trackers };
   },
 
   /* the new page only: a number the browser thinks is "off step" never blocks saving */

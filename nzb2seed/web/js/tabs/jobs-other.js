@@ -24,7 +24,7 @@ export function OtherTrackers({ j, Act }) {
   const build = async (r) => {
     const { approved: _a, same_size: _s, ...torrent } = r;
     try {
-      await api("/api/build", { torrent, nzbs: [], options: defaultOptions(settings.get()) });
+      await api("/api/build", { torrent, nzbs: [], options: defaultOptions(settings.get()), other_tracker: j.id });
       await refreshJobs();                           // stay on the list: the new job shows at the top
       toast(`Building it from ${r.indexer} - the Usenet downloads already made are reused.`);
     } catch (err) { toast("Could not start it: " + err.message); }

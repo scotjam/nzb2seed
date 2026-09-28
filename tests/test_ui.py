@@ -30,6 +30,9 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # the differences made on purpose: the new page always names the tracker a nearly complete
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
+    # what is found on Usenet, by group and resolution - and not trying groups never found
+    (re.compile(r" ?Found on Usenet Nothing yet: every build that ends adds to this\. ?"), " "),
+    (re.compile(r" ?\[[x ]\] Don't try groups that are never on Usenet: .*?it can still be tried again\)"), ""),
     # the Build tab opens on a summary by release group; the full list links back to it
     (re.compile(r" ?← Summary by release group"), ""),
     # a build outside the limit (or with no seeders) can be added anyway, by override
@@ -38,6 +41,10 @@ INTENDED = [
     (re.compile(r"Always add nearly complete for (\S+)"), r"Always add >95% for \1"),
     (re.compile(r"(\d)% or \d+ MB"), r"\1%"),
     (re.compile(r" …and less than \(MB\) - whichever is less \[\d*\]"), ""),
+    # the trackers always added for are ticked in a list of Prowlarr's, not typed
+    (re.compile(r"Always add, for these trackers ((?:\[[x ]\] \S+(?: \(API\))? )*)Ticked: .*? you are asked each time\."),
+     lambda m: "Always add, for these trackers [" + ", ".join(
+         re.findall(r"\[x\] (\S+)", m.group(1))) + "]"),
     # the Jobs tab tells you to abandon old jobs so their downloads can be cleared
     (re.compile(r" ?Tip: abandoning old jobs allows nzb2seed to clear old downloads relating to those jobs - "
                 r"be sure to abandon old jobs on your jobs list after you're done with them\. ?"), " "),
@@ -50,6 +57,9 @@ INTENDED = [
      "Automatic tab where they can still be tried again."),
     (re.compile(r"Add to torrent client \([^)]*\): "), "Add to torrent client: "),
     (re.compile(r" \((?:TrackerOne|TrackerTwo|tracker unknown)\): (\S+%)"), r": \1"),
+    # a build already in qBittorrent can be abandoned too (qBittorrent is left alone), so the
+    # sample list's one added build now counts among those still offering Abandon
+    (re.compile(r"\b3 of them still have Add to torrent client or Abandon"), "2 of them still have Add to torrent client or Abandon"),
     # and has a button to remove jobs together with their Usenet downloads
     (re.compile(r" Remove and delete downloads(?: \(\d+\))?"), ""),
     # and offers to look for a nearly complete build on your other trackers
@@ -59,6 +69,19 @@ INTENDED = [
     # and the NZB pick list can be filtered and sorted
     (re.compile(r" \[\] \[Best match\] \d+ NZBs"), ""),
 ]
+
+
+NEW_SETTINGS = {"skip_unposted"}          # settings the new page sends that the classic one had not
+
+
+def without_new_settings(value):
+    """Both pages' output without the settings added since: the classic page carries them
+    along in a full save, and the new page also sends them on its own."""
+    if isinstance(value, list):
+        return [without_new_settings(v) for v in value]
+    if isinstance(value, dict):
+        return {k: without_new_settings(v) for k, v in value.items() if k not in NEW_SETTINGS}
+    return value
 
 
 def as_classic(value):
@@ -107,8 +130,8 @@ def run(ui, scenario, settings_file):
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
 @pytest.mark.parametrize("scenario", SCENARIOS)
 def test_the_new_page_does_what_the_classic_one_did(scenario, settings_file):
-    classic = run("classic", scenario, settings_file)
-    new = as_classic(run("new", scenario, settings_file))
+    classic = without_new_settings(run("classic", scenario, settings_file))
+    new = without_new_settings(as_classic(run("new", scenario, settings_file)))
     assert new["seen"] == classic["seen"]
     assert new["confirms"] == classic["confirms"]
 
@@ -213,3 +236,18 @@ def test_the_torrents_found_are_summarised_by_release_group(settings_file):
     assert "1080p" in summary and "2160p" in summary and "NZBs found" in summary and "20.00 GB" in summary
     assert "Film.2020.1080p.BluRay-GRPA" in seen["bar"]          # ticking it there picks it to build
     assert seen["full"] == 2                                       # and the full list is one tap away
+    # each group folds away under its arrow: down when open, right when folded
+    f = seen["folding"]
+    assert (f["arrow"], f["foldedArrow"], f["expanded"]) == ("▾", "▸", "false")
+    assert f["foldedItems"] == f["items"] - 1 and f["openedAgain"] == f["items"]
+    # hovering over an entry shows the release's full name
+    assert sorted(seen["hover"]) == ["Film.2020.1080p.BluRay-GRPA", "Film.2020.2160p.BluRay-GRPZ"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_the_always_added_trackers_are_ticked_in_prowlarrs_list(settings_file):
+    seen = run("new", "trackers", settings_file)["seen"]
+    # the saved "TrackerThree" is Prowlarr's "TrackerThree (API)": ticked, not listed twice
+    assert seen["listed"] == ["[ ] TrackerFour", "[ ] TrackerOne", "[x] TrackerThree (API)"]
+    assert seen["after"] == ["[x] TrackerFour", "[ ] TrackerOne", "[ ] TrackerThree (API)"]
+    assert seen["saved"] == ["TrackerFour"]

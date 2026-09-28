@@ -79,6 +79,7 @@ export function makeServer(settingsPayload) {
   };
   const answer = (path, body) => {
     if (path === "/api/settings") return settingsPayload;
+    if (path === "/api/trackers") return { trackers: ["TrackerFour", "TrackerOne", "TrackerThree (API)"] };
     if (path === "/api/jobs") return JOBS;
     const m = path.match(/^\/api\/jobs\/(\d+)(\?since=(\d+))?$/);
     if (m) return detail(Number(m[1]), Number(m[3] || 0));

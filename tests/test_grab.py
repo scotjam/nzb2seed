@@ -108,6 +108,33 @@ def test_sabnzbd_failing_to_get_the_nzb_is_reported(tmp_path):
         src.fetch(rel())
 
 
+def test_a_big_nzb_being_read_is_not_a_job_that_disappeared(tmp_path, monkeypatch):
+    """SABnzbd takes the job out of its queue while it reads the NZB it fetched - seconds,
+    for a season's hundreds of files - and it is in no history meanwhile."""
+    monkeypatch.setattr(grab.time, "sleep", lambda s: None)
+    src = source(tmp_path)
+    real, polls = src.sab.queue_slot, []
+
+    def reading(nzo):
+        polls.append(nzo)
+        return None if len(polls) <= 5 else real(nzo)
+    src.sab.queue_slot = reading
+    src.sab.history_slot = lambda nzo: None
+    assert src.fetch(rel()) == NZB and src.sab.jobs == {}      # waited for it, read, let go
+
+
+def test_a_job_gone_for_good_is_still_reported(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(grab.time, "time", lambda: clock[0])
+    monkeypatch.setattr(grab.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    src = source(tmp_path)
+    src.sab.queue_slot = lambda nzo: None
+    src.sab.history_slot = lambda nzo: None
+    with pytest.raises(ApiError, match="disappeared from the queue"):
+        src.fetch(rel())
+    assert clock[0] - 1000 >= grab.READING_GRACE
+
+
 # ------------------------------------------------- builds running side by side
 
 def queue_call(sab):

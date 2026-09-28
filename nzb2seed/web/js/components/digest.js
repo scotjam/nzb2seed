@@ -1,7 +1,7 @@
 // The torrents found, digested: each release group, the resolutions it has, and under each
 // resolution the seasons (or, for a film, the torrents) with their sizes. A season is
 // ticked by tapping it, just as in the full list.
-import { html } from "../lib.js";
+import { html, useState } from "../lib.js";
 import { groupOf, norm, size } from "../util.js";
 
 const RES = /(?<![a-z0-9])(2160|1080|720|576|480)p(?![a-z0-9])/;
@@ -83,6 +83,8 @@ export function sortDigest(groups, how) {
 
 export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full }) {
   const groups = sortDigest(digest(torrents, usenet), how);
+  const [shut, setShut] = useState(() => new Set());        // groups folded away
+  const fold = (key) => setShut(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
   const tv = groups.some(g => g.tv);
   return html`
     <div class="digest">
@@ -93,15 +95,17 @@ export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full
         </select></div>
       ${groups.map(g => html`
         <section class="dgroup" key=${g.key}>
-          <h3>${g.name} <small>${[g.tv ? `${g.seasons.size} season${g.seasons.size === 1 ? "" : "s"}` : null,
+          <h3><button type="button" class="dtoggle" aria-expanded=${String(!shut.has(g.key))}
+              title=${shut.has(g.key) ? `Show ${g.name}'s torrents` : `Hide ${g.name}'s torrents`} onClick=${() => fold(g.key)}>
+            <span class="arrow" aria-hidden="true">${shut.has(g.key) ? "▸" : "▾"}</span>${g.name}</button> <small>${[g.tv ? `${g.seasons.size} season${g.seasons.size === 1 ? "" : "s"}` : null,
             `${g.resolutions.length} resolution${g.resolutions.length === 1 ? "" : "s"}`,
             `${g.count} torrent${g.count === 1 ? "" : "s"}`,
             g.nzb ? `NZBs found for ${g.nzb}` : "no matching NZBs found"].filter(Boolean).join(" · ")}</small></h3>
-          ${g.resolutions.map(r => html`
+          ${!shut.has(g.key) && g.resolutions.map(r => html`
             <div class="dres">
               <h4>${r.res === "other" ? "resolution not in the name" : r.res}</h4>
               ${r.items.map(item => item.torrents.map(t => html`
-                <label class=${"ditem" + (chosen.has(t.guid) ? " on" : "")} key=${t.guid}
+                <label class=${"ditem" + (chosen.has(t.guid) ? " on" : "")} key=${t.guid} title=${t.title}
                   onClick=${(ev) => { if (ev.target.tagName !== "INPUT" && chosen.has(t.guid)) { ev.preventDefault(); edit(t); } }}>
                   <input type="checkbox" checked=${chosen.has(t.guid)} aria-label=${t.title}
                     onChange=${(e) => pick(t, e.target.checked)} />
