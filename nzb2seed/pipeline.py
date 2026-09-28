@@ -56,13 +56,16 @@ class Incomplete(Abort):
         self.short = short                      # bytes missing, when known
         self.have, self.infohash, self.torrent_path = have, infohash, torrent_path
         self.save_path, self.in_client, self.tracker = save_path, in_client, tracker
+        # parts only small files were missing from, left without downloading another whole
+        # post: a whole post may still hold them (a Sample inside an obfuscated RAR set)
+        self.settled = list(getattr(_this_build, "settled", []) or [])
 
     def details(self) -> dict:
         # unrounded: a few KB short of a season rounds to 1.0, which then reads as 100%
         return {"have": self.have, "infohash": self.infohash,
                 "torrent_path": self.torrent_path, "save_path": self.save_path,
                 "in_client": self.in_client, "tracker": self.tracker, "short": self.short,
-                "seeders": self.seeders}
+                "seeders": self.seeders, "settled": self.settled}
 
 
 @dataclass
@@ -78,6 +81,7 @@ class Options:
     fetch_missing: bool = False    # assemble: download what the folders do not have from Usenet
     unattended: bool = False       # automatic builds: never ask the person to pick a post
     peek: bool | None = None       # look inside a RAR post first (None = behaviour.peek_archives)
+    whole_posts: bool = False      # a small file missing: try whole posts for it before settling
 
 
 def gb(n: int) -> str:
@@ -1350,6 +1354,11 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     scenefill.reset()
     fetcher = season_mod.FileFetcher(cfg, pr, sab, set())
     looked: list[str] = []                      # download folders checked for this build
+    # parts settled for with small files still missing, rather than another whole post -
+    # offered at the end as "try whole posts" (kept per build: builds run side by side)
+    settled = getattr(_this_build, "settled", None)
+    if settled is None:
+        settled = _this_build.settled = []
 
     def fill(d: str, missing: list) -> bool:
         return packed_release(t) and scenefill.fill(t, d, missing, fetcher)
@@ -1533,20 +1542,29 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             return
         advance(u)
 
-    def settle_small(u: Unit, d: str, nzo: str | None) -> bool:
+    def settle_small(u: Unit, d: str | None, nzo: str | None, last: bool = False) -> bool:
         """Is all ``u`` lacks now within the nearly-complete limit? Then no other whole post
         is downloaded for it: what is small is fetched from trimmed NZBs, and the build goes
         on with what is here - complete, or stopping nearly complete with the rest to come
-        over BitTorrent if you choose (or your tracker is set to always add)."""
+        over BitTorrent if you choose (or your tracker is set to always add). Asked to try
+        whole posts (``opts.whole_posts``), it settles only when there are none left
+        (``last``)."""
         missing = still_missing(u)
         if not only_small_missing(u, missing):
             return False
+        if opts.whole_posts and not last:
+            return False
         names = ", ".join(f"{f.name} ({gb(f.length)})" for f in missing[:3])
-        info(f"{u.need.label}: only {names} missing now - not downloading another whole "
-             "post for that")
+        info(f"{u.need.label}: only {names} missing now - "
+             + ("no other whole post left to try" if last else "not downloading another whole post for that"))
         fetch_small(u, missing)
+        if still_missing(u) and not last:
+            settled.append({"label": u.need.label, "missing": sum(f.length for f in still_missing(u)),
+                            "post": u.need.min_size})
         # everything downloaded that holds a file of the unit goes forward
         for x in [d] + looked + [p for p, _ in partials]:
+            if x is None:
+                continue
             if x not in dirs and os.path.isdir(x) and set(asm.find_sources(t, [x])) & \
                     {f.relpath for f in u.files}:
                 dirs.append(x)
@@ -1561,6 +1579,8 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 if u.children:
                     split(u)
                     return
+                if opts.whole_posts and settle_small(u, None, None, last=True):
+                    return                   # every whole post tried: what is left is small
                 rel = None if opts.unattended else ask_for_post(cfg, pr, u.need, u.tried, u.seeded)
                 if rel is None:
                     raise Abort(f"no Usenet post could supply {u.need.label}")
@@ -2323,6 +2343,7 @@ def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor
     show_layout(t)
     _this_build.torrent = t.infohash
     _this_build.tracker = tor_rel.indexer or ""
+    _this_build.settled = []
     if tor_rel.guid.startswith("file:"):
         # a .torrent that did not come from a Prowlarr search (automatic builds, uploads):
         # its "indexer" is only the file's name - the tracker is the one it announces to
