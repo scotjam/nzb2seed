@@ -62,6 +62,17 @@ export const SCENARIOS = {
     return out;
   },
 
+  /* the new page only: nzb2seed's automatic builds measured alongside all your torrents */
+  async demandAuto({ act, doc, server }) {
+    server.demand.nzb2seed = { torrents: 9, stored_gb: 300, uploaded_gb: 450, overall_ratio: 1.5, median_ratio: 1.2,
+      dead: 1, dead_gb: 20, cross_seeds: 2, by: [{ what: "group", rows: [{ where: "GRPA", n: 7, ratio: 1.9, dead: 0 }] }] };
+    await act.go("demand");
+    await act.settle();
+    const table = doc.querySelector(".dmtable table");
+    return { page: act.text(act.view()),
+             rows: [...table.querySelectorAll("tbody tr")].map(tr => [...tr.children].map(td => td.textContent.trim())) };
+  },
+
   /* the new page only: a torrent's name (or season) opens its tracker page; only the box ticks */
   async pagelinks({ act, doc, server }) {
     server.torrents[0].info_url = "https://tracker.example/details/1?id=5&passkey=SECRET";

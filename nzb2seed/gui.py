@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import glob
 import hmac
 import ipaddress
 import json
@@ -308,6 +309,27 @@ class App:
                     break                      # all in use; it shrinks as they finish
                 self.build_slots_size -= 1
         return self.build_slots
+
+    def auto_torrent_rows(self, rows: list[dict]) -> list[dict]:
+        """qBittorrent's rows for the torrents the Automatic tab built - as nzb2seed's own
+        records say (and its Automatic tab's list) - plus the cross-seeds of their files
+        (the same name and size), which only exist because the build did."""
+        hashes = set()
+        for p in glob.glob(os.path.join(glob.escape(self.cfg.torrent_dir), "*.owned.json")):
+            try:
+                with open(p, encoding="utf-8") as fh:
+                    if json.load(fh).get("source") == "auto":
+                        hashes.add(os.path.basename(p)[:-len(".owned.json")].lower())
+            except (OSError, ValueError):
+                continue
+        box = getattr(self, "inbox", None)
+        for h, it in (box.state.items.items() if box else []):
+            if it.get("status") == "done":
+                hashes.add(h.lower())
+        mine = [r for r in rows if (r.get("hash") or "").lower() in hashes]
+        same = {(worth_mod._norm(r.get("name") or ""), r.get("size") or 0) for r in mine}
+        return [r for r in rows if (r.get("hash") or "").lower() in hashes
+                or (worth_mod._norm(r.get("name") or ""), r.get("size") or 0) in same]
 
     def nearly_built(self, title: str) -> Job | None:
         """An earlier build of this release that stopped nearly complete and still has its
@@ -1014,6 +1036,15 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     return self._json({"error": str(e), "torrents": 0, "by": [], "stats": {}})
                 out = worth_mod.overview(rows, app.cfg.demand_age_days, app.cfg.demand_min_sample)
                 out.pop("stats", None)
+                # alongside: the same measures for nzb2seed's automatic builds alone (with the
+                # cross-seeds of their files) - every group shown, however small: the count says
+                mine = app.auto_torrent_rows(rows)
+                auto = None
+                if mine:
+                    a = worth_mod.overview(mine, app.cfg.demand_age_days, 1)
+                    auto = {k: a[k] for k in ("torrents", "stored_gb", "uploaded_gb", "overall_ratio",
+                                              "median_ratio", "dead", "dead_gb", "cross_seeds", "by")}
+                    auto["built"] = len(worth_mod.collapse(mine))    # however new
                 flat = [r for g in out["by"] for r in
                         ({**x, "what": g["what"], "value": x["where"]} for x in g["rows"])]
                 return self._json({**out,
@@ -1025,7 +1056,8 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                    "never_after": odds_mod.MIN_TRIES,
                                    "avoid": out.pop("rules", []),
                                    "min_sample": app.cfg.demand_min_sample,
-                                   "age_days": app.cfg.demand_age_days})
+                                   "age_days": app.cfg.demand_age_days,
+                                   "nzb2seed": auto})
             if path == "/api/space":
                 try:
                     out = space_mod.check(app.cfg, app._sab())
