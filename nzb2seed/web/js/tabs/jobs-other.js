@@ -1,7 +1,8 @@
 // "Look on other trackers": a build that stopped nearly complete on a tracker you have not
 // pre-approved, found again on your other trackers. Building it from a pre-approved one
 // lets the missing bit come over BitTorrent without asking; the Usenet downloads already
-// made are reused, so nothing is downloaded twice.
+// made are reused, so nothing is downloaded twice. When a pre-approved tracker has the same
+// files with someone seeding them, that is done at once - nothing to choose.
 import { html, useState } from "../lib.js";
 import { api } from "../api.js";
 import { refreshJobs, settings, toast } from "../store.js";
@@ -15,9 +16,16 @@ export const approved = (tracker) => (settings.get()?.settings?.behaviour?.nearl
 export function OtherTrackers({ j, Act }) {
   const [found, setFound] = useState(null);       // null: not looked yet
   const [busy, setBusy] = useState(false);
+  const [went, setWent] = useState(null);         // the pre-approved release built from at once
   const look = async () => {
     setBusy(true);
-    try { setFound(await api("/api/jobs/other_trackers", { id: j.id })); }
+    try {
+      const r = await api("/api/jobs/other_trackers", { id: j.id });
+      // pre-approved, seeded, and the same files (same size, when the size is known)
+      const pick = r.releases.find(x => x.approved && (x.seeders || 0) > 0 && (r.size == null || x.same_size));
+      if (pick) { setWent(pick); await build(pick); }
+      else setFound(r);
+    }
     catch (err) { toast("Could not look: " + err.message); }
     finally { setBusy(false); }
   };
@@ -29,6 +37,9 @@ export function OtherTrackers({ j, Act }) {
       toast(`Building it from ${r.indexer} - the Usenet downloads already made are reused.`);
     } catch (err) { toast("Could not start it: " + err.message); }
   };
+  if (went) {
+    return html`<small class="status">Building it from ${went.indexer} - pre-approved, ${plural(went.seeders, "seeder")}</small>`;
+  }
   if (!found) {
     return html`<${Act} label=${busy ? "Looking…" : "Look on other trackers"}
       title="Find this release on your other trackers: built from one you have pre-approved, the missing bit comes over BitTorrent without asking. The Usenet downloads already made are reused."

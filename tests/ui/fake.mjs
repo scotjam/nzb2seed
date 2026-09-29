@@ -77,6 +77,9 @@ export function makeServer(settingsPayload) {
     const j = JOBS.find(x => x.id === id) || JOBS[0];
     return { ...j, lines: LINES.slice(since), next: LINES.length, pieces: "####x....##" };
   };
+  const others = { releases: [                 // what "Look on other trackers" finds (a scenario may change it)
+    { ...TORRENTS[0], indexer: "TrackerThree", guid: "t9", seeders: 4, approved: true, same_size: true },
+    { ...TORRENTS[0], indexer: "TrackerFour", guid: "t8", seeders: 30, size: 21474836481, approved: false, same_size: false }] };
   const answer = (path, body) => {
     if (path === "/api/settings") return settingsPayload;
     if (path === "/api/trackers") return { trackers: ["TrackerFour", "TrackerOne", "TrackerThree (API)"] };
@@ -105,9 +108,7 @@ export function makeServer(settingsPayload) {
     if (path === "/api/test") return { prowlarr: { ok: true, text: "Prowlarr 1.0" }, sabnzbd: { ok: false, text: "refused" }, qbittorrent: { ok: true, text: "qBittorrent 5" } };
     if (path === "/api/metadata/clear_cache") return { removed: 3 };
     if (path === "/api/demand/forget") return { removed: 2 };
-    if (path === "/api/jobs/other_trackers") return { name: "Film.2020.1080p.BluRay-GRPA", size: 21474836480, releases: [
-      { ...TORRENTS[0], indexer: "TrackerThree", guid: "t9", seeders: 4, approved: true, same_size: true },
-      { ...TORRENTS[0], indexer: "TrackerFour", guid: "t8", seeders: 30, size: 21474836481, approved: false, same_size: false }] };
+    if (path === "/api/jobs/other_trackers") return { name: "Film.2020.1080p.BluRay-GRPA", size: 21474836480, releases: others.releases };
     if (path.startsWith("/api/jobs/")) return { result: "done", id: 13, removed: 1, kept: 0 };
     return {};
   };
@@ -119,5 +120,5 @@ export function makeServer(settingsPayload) {
     const data = answer(u.pathname + (u.pathname.match(/^\/api\/jobs\/\d+$/) ? u.search : ""), body || {});
     return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(data)) };
   };
-  return { fetch, calls, jobs: JOBS };
+  return { fetch, calls, jobs: JOBS, others };
 }
