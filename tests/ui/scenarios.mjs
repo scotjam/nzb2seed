@@ -64,8 +64,11 @@ export const SCENARIOS = {
 
   /* the new page only: nzb2seed's automatic builds measured alongside all your torrents */
   async demandAuto({ act, doc, server }) {
-    server.demand.nzb2seed = { torrents: 9, stored_gb: 300, uploaded_gb: 450, overall_ratio: 1.5, median_ratio: 1.2,
-      dead: 1, dead_gb: 20, cross_seeds: 2, by: [{ what: "group", rows: [{ where: "GRPA", n: 7, ratio: 1.9, dead: 0 }] }] };
+    server.demand.nzb2seed = {
+      manual: { torrents: 40, built: 44, stored_gb: 900, uploaded_gb: 1100, overall_ratio: 1.22, median_ratio: 1.0,
+        dead: 3, dead_gb: 30, cross_seeds: 0, by: [{ what: "group", rows: [{ where: "GRPB", n: 12, ratio: 0.2, dead: 50 }] }] },
+      auto: { torrents: 9, built: 9, stored_gb: 300, uploaded_gb: 450, overall_ratio: 1.5, median_ratio: 1.2,
+        dead: 1, dead_gb: 20, cross_seeds: 2, by: [{ what: "group", rows: [{ where: "GRPA", n: 7, ratio: 1.9, dead: 0 }] }] } };
     await act.go("demand");
     await act.settle();
     const table = doc.querySelector(".dmtable table");
