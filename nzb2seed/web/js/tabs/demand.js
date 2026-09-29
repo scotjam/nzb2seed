@@ -30,6 +30,25 @@ function blockFor(x) {
 }
 const copy = (x) => JSON.parse(JSON.stringify(x));
 
+/* nzb2seed's own builds, measured alongside every torrent: manual and automatic apart */
+const OURS = [["manual", "manual builds"], ["auto", "automatic builds"]];
+function Ours({ m, name, age, card }) {
+  if (!m.torrents) {
+    return html`<div class="head"><h3>nzb2seed's ${name}</h3></div>
+      <p class="status">${`${m.built} in qBittorrent, none older than ${age} days yet - they are measured here once they are.`}</p>`;
+  }
+  return html`
+    <div class="head"><h3>nzb2seed's ${name}</h3><small>${`${m.torrents} older than ${age} days`
+      + (m.built > m.torrents ? ` (of ${m.built})` : "")
+      + (m.cross_seeds ? `, with ${m.cross_seeds} cross-seed${m.cross_seeds === 1 ? "" : "s"} of their files` : "")}</small></div>
+    <div class="dmcards">
+      ${card(m.overall_ratio.toFixed(2) + "x", "uploaded per GB stored, overall", m.overall_ratio >= 1 ? "good" : m.overall_ratio < 0.5 ? "poor" : "")}
+      ${card(m.uploaded_gb.toLocaleString() + " GB", `uploaded from ${m.stored_gb.toLocaleString()} GB stored`)}
+      ${card(m.dead.toLocaleString(), "have never uploaded a byte", m.dead ? "poor" : "")}
+      ${card(m.dead_gb.toLocaleString() + " GB", "of disk they hold", m.dead_gb ? "poor" : "")}
+    </div>`;
+}
+
 export function DemandTab({ active }) {
   const [r, setR] = useState(null);
   const [status, setStatus] = useState("");
@@ -79,18 +98,7 @@ export function DemandTab({ active }) {
         ${card(r.dead.toLocaleString(), "have never uploaded a byte", r.dead ? "poor" : "")}
         ${card(r.dead_gb.toLocaleString() + " GB", "of disk they hold", r.dead_gb ? "poor" : "")}
       </div>
-      ${r.nzb2seed && !r.nzb2seed.torrents && html`
-        <div class="head"><h3>nzb2seed's automatic builds</h3></div>
-        <p class="status">${`${r.nzb2seed.built} in qBittorrent, none older than ${r.age_days} days yet - they are measured here once they are.`}</p>`}
-      ${r.nzb2seed?.torrents > 0 && html`
-        <div class="head"><h3>nzb2seed's automatic builds</h3><small>${`${r.nzb2seed.torrents} of them older than ${r.age_days} days`
-          + (r.nzb2seed.cross_seeds ? `, with ${r.nzb2seed.cross_seeds} cross-seed${r.nzb2seed.cross_seeds === 1 ? "" : "s"} of their files` : "")}</small></div>
-        <div class="dmcards">
-          ${card(r.nzb2seed.overall_ratio.toFixed(2) + "x", "uploaded per GB stored, overall", r.nzb2seed.overall_ratio >= 1 ? "good" : r.nzb2seed.overall_ratio < 0.5 ? "poor" : "")}
-          ${card(r.nzb2seed.uploaded_gb.toLocaleString() + " GB", `uploaded from ${r.nzb2seed.stored_gb.toLocaleString()} GB stored`)}
-          ${card(r.nzb2seed.dead.toLocaleString(), "have never uploaded a byte", r.nzb2seed.dead ? "poor" : "")}
-          ${card(r.nzb2seed.dead_gb.toLocaleString() + " GB", "of disk they hold", r.nzb2seed.dead_gb ? "poor" : "")}
-        </div>`}
+      ${OURS.map(([k, name]) => r.nzb2seed?.[k] && html`<${Ours} m=${r.nzb2seed[k]} name=${name} age=${r.age_days} card=${card} />`)}
       <div class="dmrec">
         <h3>Worth chasing</h3>
         <p class="status">${(r.chase || []).length
@@ -122,14 +130,15 @@ export function DemandTab({ active }) {
       </div>
       <${FoundOnUsenet} rows=${r.usenet} never=${r.never_after} />
       <div>${r.by.map(g => {
-        // alongside: the same for nzb2seed's automatic builds, where it has any in that row
-        const mine = r.nzb2seed?.torrents > 0 && Object.fromEntries(((r.nzb2seed.by.find(b => b.what === g.what) || {}).rows || []).map(x => [x.where, x]));
+        // alongside: the same for nzb2seed's manual and automatic builds, where they have any in that row
+        const cols = OURS.filter(([k]) => r.nzb2seed?.[k]?.torrents > 0).map(([k, name]) => [name,
+          Object.fromEntries(((r.nzb2seed[k].by.find(b => b.what === g.what) || {}).rows || []).map(x => [x.where, x]))]);
         return html`<div class="dmtable"><h3>By ${g.what}</h3>
         <table><thead><tr><th>${g.what}</th><th>torrents</th><th>upload per GB</th><th>never uploaded</th>
-          ${mine && html`<th title="nzb2seed's automatic builds only">nzb2seed builds</th><th title="nzb2seed's automatic builds only">their upload per GB</th>`}</tr></thead>
+          ${cols.map(([name]) => html`<th title=${`nzb2seed's ${name} only: how many, and their upload per GB`}>nzb2seed ${name}</th>`)}</tr></thead>
           <tbody>${g.rows.map(x => html`<tr class=${x.ratio < 0.25 ? "poor" : x.ratio >= 1 ? "good" : ""}>
             <td>${x.where}</td><td>${String(x.n)}</td><td>${x.ratio.toFixed(2)}x</td><td>${x.dead}%</td>
-            ${mine && html`<td>${mine[x.where] ? String(mine[x.where].n) : "-"}</td><td>${mine[x.where] ? mine[x.where].ratio.toFixed(2) + "x" : "-"}</td>`}</tr>`)}</tbody></table></div>`; })}</div>`}
+            ${cols.map(([, mine]) => html`<td>${mine[x.where] ? `${mine[x.where].n} · ${mine[x.where].ratio.toFixed(2)}x` : "-"}</td>`)}</tr>`)}</tbody></table></div>`; })}</div>`}
     <div class="actions"><button type="button" class="btn" onClick=${load}>Refresh</button>
       <button type="button" class="btn" onClick=${forget} title="Forget the posting times, seeder counts and grab counts asked of Prowlarr. They are asked for again only when a rule needs them.">Forget what trackers said</button>
       <small class="status">${status}</small></div>`;
