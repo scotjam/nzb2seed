@@ -530,3 +530,46 @@ def test_a_stopped_automatic_torrents_downloads_are_kept_only_while_its_job_is_l
     finally:
         hold.set()
         clients.SEARCH_GATE = None
+
+
+def test_an_automatic_build_that_settled_can_be_tried_with_whole_posts(server, tmp_path, monkeypatch):  # noqa: F811
+    """Not only Build-tab builds: an automatic one goes back into the Automatic tab's queue,
+    and that run tries whole posts - a plain Try again after it settles again."""
+    import dataclasses
+    from nzb2seed import pipeline
+    app, url = server
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_minutes=60,
+                                  auto_retry_first_minutes=60, auto_wait_hours=48)
+    runs = []
+
+    def fake_run(cfg, opts, rel, groups, torrent_data=None):
+        runs.append(opts.whole_posts)
+        pipeline._this_build.settled = [{"label": "S01E03", "missing": 5_000_000, "post": 1_400_000_000}]
+        raise pipeline.Incomplete("short", 0.999, "a" * 40, "/t", "/d", in_client=False)
+    monkeypatch.setattr(inbox, "execute_run", fake_run)
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+    app.start_inbox()
+    t = box / "Show.S01.720p-GRPA.torrent"
+    t.write_bytes(make_torrent("Show.S01.720p-GRPA", {"a.mkv": b"x" * 40000}))
+    old = time.time() - 60
+    os.utime(t, (old, old))
+    try:
+        app.inbox.poll()
+        wait(lambda: runs and not app.inbox.running)
+        first = next(j for j in app.jobs.values() if j.kind == "auto")
+        wait(lambda: first.status == "failed")
+        assert first.extra["settled"][0]["label"] == "S01E03"
+        status, r = call(url + "/api/jobs/whole_posts", *AUTH, body={"id": first.id})
+        assert status == 200 and first.retried_as == r["id"]
+        wait(lambda: len(runs) == 2 and not app.inbox.running)
+        assert runs == [False, True]
+        again = app.jobs[r["id"]]
+        wait(lambda: again.status == "failed")
+        h = app.inbox.items()[0]["infohash"]
+        app.inbox.retry(h)                                  # a plain Try again
+        wait(lambda: len(runs) == 3)
+        assert runs[-1] is False
+    finally:
+        clients.SEARCH_GATE = None
