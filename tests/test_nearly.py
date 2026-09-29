@@ -456,3 +456,29 @@ def test_a_build_that_settled_can_be_built_again_trying_whole_posts(server, monk
     other = app.start_job("Film", "build", lambda cfg: None)
     other.status, other.extra = "failed", {"have": 0.99, "infohash": H}
     assert call(url + "/api/jobs/whole_posts", *AUTH, body={"id": other.id})[0] == 400   # nothing settled
+
+
+def test_an_assemble_job_that_settled_can_be_tried_with_whole_posts(server, tmp_path, monkeypatch):  # noqa: F811
+    """Built from folders with what they lack fetched from Usenet: the same fetching as a
+    build, so the same offer - replayed as an assemble, not refused."""
+    import threading
+    app, url = server
+    started, seen = threading.Event(), {}
+
+    def run(cfg, opts, tpath, sources):
+        seen["opts"], seen["sources"] = opts, sources
+        started.set()
+        return {"result": "ok"}
+    monkeypatch.setattr(gui, "execute_assemble", run)
+    src = tmp_path / "folder"
+    src.mkdir()
+    tfile = tmp_path / "x.torrent"
+    tfile.write_bytes(b"d4:infod4:name1:xee")
+    job = app.start_job("x.torrent", "assemble", lambda cfg: None)
+    job.repeat = {"path": "/api/assemble", "body": {"sources": [str(src)], "torrent_path": str(tfile),
+                                                    "options": {"fetch_missing": True}}}
+    job.status, job.extra = "failed", {"have": 0.99, "infohash": H, "settled": [{"label": "x", "missing": 5, "post": 9}]}
+    status, r = call(url + "/api/jobs/whole_posts", *AUTH, body={"id": job.id})
+    assert status == 200 and started.wait(5)
+    assert seen["opts"].whole_posts and seen["opts"].fetch_missing and seen["sources"] == [str(src)]
+    assert job.retried_as == r["id"]
