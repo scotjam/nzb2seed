@@ -714,6 +714,8 @@ class App:
             try:
                 out = fn(cfg) or {}
                 job.result = out.get("result", "done")
+                if out.get("extra"):
+                    job.extra = {**(job.extra or {}), **out["extra"]}
                 job.status = "done"
             except report.Cancelled:
                 job.status, job.result = "cancelled", "cancelled"
@@ -1281,7 +1283,8 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 if skip_owned:
                     report.step("Looking for episodes you already have")
                     skip = series_mod.owned(cfg, metadata.tvmaze_show(sid), lib).get(sn, set())
-                return season_mod.grab_season(cfg, sid, sn, key, packing, skip=skip, source=source)
+                return season_mod.grab_season(cfg, sid, sn, key, packing, skip=skip, source=source,
+                                              whole_posts=bool(body.get("whole_posts")))
             job = app.start_job(label, "season", run)
             return self._json({"id": job.id})
 
@@ -1311,7 +1314,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             priority = [str(k) for k in body.get("priority") or []]
             job = app.start_job(label, "season", lambda cfg: series_mod.grab_series(
                 self._with_names(body, cfg), sid, packing, library=lib, skip_owned=skip_owned, plan_only=plan_only, prefer_res=res,
-                source=source, priority=priority))
+                source=source, priority=priority, whole_posts=bool(body.get("whole_posts"))))
             return self._json({"id": job.id})
 
         # ------------------------------------------------ the Automatic tab
@@ -1364,6 +1367,14 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             rq = job.repeat or {}
             again = json.loads(json.dumps(rq.get("body") or {}))
             again.setdefault("options", {})["whole_posts"] = True
+            if rq.get("path") in ("/api/season/grab", "/api/series/grab"):
+                # a season grab: again, with whole posts looked into for the missing files -
+                # episodes already in the season folder stay
+                again = json.loads(json.dumps(rq.get("body") or {}))
+                again["whole_posts"] = True
+                app.request.asked = {"path": rq["path"], "body": again}
+                app.request.retrying = job
+                return (self.season_grab if rq["path"] == "/api/season/grab" else self.series_grab)(again)
             if rq.get("path") == "/api/assemble":
                 # built from folders, with what they lack fetched from Usenet: the same again
                 app.request.asked = {"path": "/api/assemble", "body": again}

@@ -482,3 +482,22 @@ def test_an_assemble_job_that_settled_can_be_tried_with_whole_posts(server, tmp_
     assert status == 200 and started.wait(5)
     assert seen["opts"].whole_posts and seen["opts"].fetch_missing and seen["sources"] == [str(src)]
     assert job.retried_as == r["id"]
+
+
+def test_a_season_grab_still_lacking_files_can_be_grabbed_again_with_whole_posts(server, monkeypatch):  # noqa: F811
+    import threading
+    from nzb2seed import season as season_mod
+    app, url = server
+    started, seen = threading.Event(), {}
+
+    def grab(cfg, sid, sn, key, packing, skip=None, source=None, whole_posts=False):
+        seen.update(sid=sid, sn=sn, whole=whole_posts)
+        started.set()
+        return {"result": "3/3 episodes"}
+    monkeypatch.setattr(season_mod, "grab_season", grab)
+    job = app.start_job("season 1", "season", lambda cfg: None)
+    job.repeat = {"path": "/api/season/grab", "body": {"show_id": 7, "season": 1, "key": "k"}}
+    job.status, job.extra = "done", {"settled": [{"label": "Show.S01E03-GRP", "missing": 5, "post": 9}]}
+    status, r = call(url + "/api/jobs/whole_posts", *AUTH, body={"id": job.id})
+    assert status == 200 and started.wait(5)
+    assert seen == {"sid": 7, "sn": 1, "whole": True} and job.retried_as == r["id"]

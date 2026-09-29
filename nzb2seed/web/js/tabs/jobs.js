@@ -92,7 +92,7 @@ function JobRow({ j, all, on, current, tick }) {
         <div class="t"><span class=${"dot " + j.status}></span>${j.title}</div>
         <div class="s">${says}</div>
       </div>
-      ${BADLY_ENDED.includes(j.status) && html`<${JobActions} j=${j} all=${all} />`}
+      ${(BADLY_ENDED.includes(j.status) || j.extra?.settled?.length > 0) && html`<${JobActions} j=${j} all=${all} />`}
     </div>`;
 }
 
@@ -140,7 +140,7 @@ function JobActions({ j, all }) {
         title=${`Only small files were missing from ${wholePostsText(x).names}, so no other whole post was downloaded for them. Build it again trying whole posts - about ${wholePostsText(x).post} or more - to see if they hold the rest.`}
         onPress=${() => wholePosts(j)} />`}
       ${j.retried_as ? html`<small class="status">tried again as job ${j.retried_as}</small>`
-        : j.can_retry && (starting ? html`<small class="status">starting again...</small>`
+        : j.can_retry && BADLY_ENDED.includes(j.status) && (starting ? html`<small class="status">starting again...</small>`
           // the button goes the moment it is pressed, so it cannot be pressed twice
           : html`<${Act} label="Try again" title="Run it again, exactly as it was started"
               onPress=${() => { setStarting(true); retryJob(j); }} />`)}
