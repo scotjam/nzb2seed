@@ -1362,10 +1362,15 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 app.store.changed(urgent=True)
                 return self._json({"id": job.retried_as})
             rq = job.repeat or {}
-            if rq.get("path") != "/api/build":
-                return self._err("this job was not started by a build request that can be repeated")
             again = json.loads(json.dumps(rq.get("body") or {}))
             again.setdefault("options", {})["whole_posts"] = True
+            if rq.get("path") == "/api/assemble":
+                # built from folders, with what they lack fetched from Usenet: the same again
+                app.request.asked = {"path": "/api/assemble", "body": again}
+                app.request.retrying = job
+                return self.assemble(again)
+            if rq.get("path") != "/api/build":
+                return self._err("this job was not started by a request that can be repeated")
             title, run = build_job(app, again)
             busy = app.active_build(title)
             if busy:
