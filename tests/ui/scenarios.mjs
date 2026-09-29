@@ -118,7 +118,9 @@ export const SCENARIOS = {
   },
 
   /* the new page only: a nearly complete build found again on your other trackers */
-  async others({ act, doc, calls }) {
+  async others({ act, doc, calls, server }) {
+    // no pre-approved tracker with a seeder: the list, to choose from
+    server.others.releases[0].seeders = 0;
     await act.go("jobs");
     const row = () => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Film.2020.1080p.BluRay-GRPA"));
     row().querySelector("span.btn[title^='Find this release']").click();
@@ -128,6 +130,18 @@ export const SCENARIOS = {
     row().querySelector(".other span.btn").click();
     await act.settle();
     return { listed, sent: calls.slice(n).filter(c => c.path === "/api/build") };
+  },
+
+  /* the new page only: a pre-approved tracker with the same files and a seeder - built
+     from at once, nothing offered */
+  async othersAuto({ act, doc, calls }) {
+    await act.go("jobs");
+    const row = () => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Film.2020.1080p.BluRay-GRPA"));
+    const n = calls.length;
+    row().querySelector("span.btn[title^='Find this release']").click();
+    await act.settle();
+    return { sent: calls.slice(n).filter(c => c.path === "/api/build"), shown: act.text(row()),
+             listed: !!row().querySelector(".others") };
   },
 
   /* the new page only: on a phone the list and the job are two screens */

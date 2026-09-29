@@ -160,8 +160,8 @@ def test_on_a_phone_the_list_and_the_job_are_two_screens(settings_file):
 
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
 def test_a_nearly_complete_build_can_be_built_from_another_tracker(settings_file):
-    seen = run("new", "others", settings_file)["seen"]
-    assert "TrackerThree pre-approved · 4 seeders" in seen["listed"] and "same size" in seen["listed"]
+    seen = run("new", "others", settings_file)["seen"]         # pre-approved, but nobody seeding
+    assert "TrackerThree pre-approved · 0 seeders" in seen["listed"] and "same size" in seen["listed"]
     assert "different size - not the same files" in seen["listed"]
     (sent,) = seen["sent"]
     assert sent["body"]["torrent"]["indexer"] == "TrackerThree" and sent["body"]["nzbs"] == []
@@ -251,3 +251,11 @@ def test_the_always_added_trackers_are_ticked_in_prowlarrs_list(settings_file):
     assert seen["listed"] == ["[ ] TrackerFour", "[ ] TrackerOne", "[x] TrackerThree (API)"]
     assert seen["after"] == ["[x] TrackerFour", "[ ] TrackerOne", "[ ] TrackerThree (API)"]
     assert seen["saved"] == ["TrackerFour"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_pre_approved_tracker_with_a_seeder_is_built_from_at_once(settings_file):
+    seen = run("new", "othersAuto", settings_file)["seen"]
+    (sent,) = seen["sent"]                                       # no list, no choice
+    assert sent["body"]["torrent"]["indexer"] == "TrackerThree" and not seen["listed"]
+    assert "Building it from TrackerThree - pre-approved, 4 seeders" in seen["shown"]
