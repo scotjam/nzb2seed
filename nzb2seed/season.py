@@ -461,7 +461,7 @@ PACKING = {"scene": "Keep scene RARs", "unpack": "Unpack all"}
 
 
 def grab_season(cfg: Config, show_id: int, season: int, key, packing: str | None = None,
-                screens: int = 4, skip=None, source: str | None = None) -> dict:
+                screens: int = 4, skip=None, source: str | None = None, whole_posts: bool = False) -> dict:
     """``packing``: "scene" keeps (or rebuilds from srrDB's .srr) the original scene RAR set of
     every RAR'd release, "unpack" leaves the unpacked video. None = the configured default.
     ``key``: one option's key, or a list of them in priority order (an episode comes from
@@ -477,14 +477,15 @@ def grab_season(cfg: Config, show_id: int, season: int, key, packing: str | None
     grab.remove_stray_checks(sab)
     try:
         return _grab_season(cfg, pr, sab, srr, show_id, season, key, packing, screens, set(skip or ()),
-                            source or cfg.episode_source or "all")
+                            source or cfg.episode_source or "all", whole_posts)
     finally:
         pr.close()
         metadata.close_session()
 
 
 def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key, packing: str,
-                 screens: int, skip: set[int] = frozenset(), source: str = "all") -> dict:
+                 screens: int, skip: set[int] = frozenset(), source: str = "all",
+                 whole_posts: bool = False) -> dict:
     step("Looking up the season")
     show = metadata.tvmaze_show(show_id)
     episodes, used = episodes_mod.season_episodes(show, season, source, log=info)
@@ -792,15 +793,24 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key, packing: str
     # 5. check each release against srrDB, keep or rebuild its scene RARs, tidy it
     step("Checking the releases against srrDB and predb")
     checks = []
-    fetcher = FileFetcher(cfg, pr, sab, set())
-    for release, folder in sorted(releases.items()):
-        result = None
-        with _Skip(f"checking {release}", notes):
-            result = check_release(srr, release, folder, packing, owned, fetcher)
-        checks.append(result or {"release": release, "folder": folder, "srrdb": None, "files": [],
-                                 "video": [], "predb": None, "predb_me": None, "nfo": None,
-                                 "error": "the check failed; see the notes"})
+    fetcher = FileFetcher(cfg, pr, sab, set(), whole=whole_posts)
+    try:
+        for release, folder in sorted(releases.items()):
+            result = None
+            with _Skip(f"checking {release}", notes):
+                result = check_release(srr, release, folder, packing, owned, fetcher)
+            checks.append(result or {"release": release, "folder": folder, "srrdb": None, "files": [],
+                                     "video": [], "predb": None, "predb_me": None, "nfo": None,
+                                     "error": "the check failed; see the notes"})
+    finally:
+        fetcher.close()                        # whole posts downloaded to look inside: not kept
     owned.save()
+    # releases still missing files no post listed by name: a whole post may hold them (a
+    # Sample inside an obfuscated RAR set) - offered as "try whole posts", unless tried already
+    settled = [] if whole_posts else [
+        {"label": c["release"], "missing": sum(f["size"] for f in lack),
+         "post": sum(os.path.getsize(os.path.join(r, n)) for r, _, ns in os.walk(c["folder"]) for n in ns)}
+        for c in checks if (lack := [f for f in c.get("files", []) if f["state"].startswith("missing") and f["size"]])]
 
     # 6. the report in the sidecar
     step("Writing the report")
@@ -826,9 +836,12 @@ def _grab_season(cfg, pr, sab, srr, show_id: int, season: int, key, packing: str
     missing = [f"E{e['number']:02d}" for e in report["episodes"] if not e["present"] and not e["owned"]]
     if missing:
         warn("missing: " + ", ".join(missing))
+    if settled:
+        info(f"{len(settled)} release(s) still lack a file no post lists by name - "
+             "Try whole posts can look inside whole posts for them")
     return {"result": f"{got}/{len(wanted)} episodes" + (f" ({len(skip)} already yours)" if skip else "")
             + ("" if not missing else " - missing " + ", ".join(missing)),
-            "report": name}
+            "report": name, "extra": {"settled": settled} if settled else None}
 
 
 def check_release(srr: Srr, release: str, folder: str, packing: str, owned, fetch=None) -> dict:
@@ -962,10 +975,71 @@ class FileFetcher:
     not store: find other posts of the same release whose NZB lists that file, queue an NZB
     trimmed to just that file, and keep it only if its size and CRC match the original."""
 
-    def __init__(self, cfg: Config, pr: Prowlarr, sab: SABnzbd, used: set[str]):
+    def __init__(self, cfg: Config, pr: Prowlarr, sab: SABnzbd, used: set[str], whole: bool = False):
         self.cfg, self.pr, self.sab = cfg, pr, sab
         self.used = used                      # SABnzbd job folders created for this (ours)
         self.posts: dict[str, list[Release]] = {}
+        # asked to: when no post lists the file by name, whole posts of the release are
+        # downloaded and looked into (a Sample inside an obfuscated RAR set)
+        self.whole = whole
+        self.whole_dirs: dict[str, list[str]] = {}   # release -> whole posts downloaded for it
+        self.whole_tried: set[str] = set()
+
+    def close(self):
+        """Remove the whole posts downloaded to look inside - what was needed was moved out."""
+        for dirs in self.whole_dirs.values():
+            for d in dirs:
+                shutil.rmtree(d, ignore_errors=True)
+        self.whole_dirs.clear()
+
+    def _take(self, d: str, name: str, size: int, crc: str, dest: str) -> bool:
+        from . import scenefill                # every shape a post can carry a file in
+        p = scenefill._find(d, size, name)
+        if p is None or metadata.crc32(p).upper() != crc.upper():
+            return False
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        os.replace(p, dest)
+        return True
+
+    def _whole(self, release: str, name: str, size: int, crc: str, dest: str) -> bool:
+        from .pipeline import gb, ledger_for
+        for d in self.whole_dirs.get(release, []):
+            if self._take(d, name, size, crc, dest):
+                info(f"{release}: {name} was in a whole post downloaded for this release")
+                return True
+        for r in self.posts.get(release, []):
+            check_cancel()
+            if r.guid in self.whole_tried:
+                continue
+            self.whole_tried.add(r.guid)
+            if any(j.get("guid") == r.guid or j.get("size") == r.size
+                   for j in ledger_for(self.cfg).matches(r.title, r.guid, r.size)):
+                continue                      # this very post downloaded before: the release came from it
+            info(f"{release}: no post lists {name} - downloading the whole post {r.title} "
+                 f"({r.indexer}, {gb(r.size)}) to look inside")
+            try:
+                data = self.pr.fetch(r)
+                if hasattr(self.pr, "drop"):
+                    self.pr.drop(r)
+                job = f"{release}.whole-{len(self.whole_tried)}"
+                nzo = self.sab.add_nzb(data, job, self.cfg.sab_category, PP_REPAIR, self.cfg.sab_priority)
+                status, slot = sab_wait(self.sab, {nzo: r.title})[nzo]
+                if status not in SAB_DONE:
+                    warn(f"SABnzbd could not complete {r.title}")
+                    continue
+                d = job_dir(self.cfg, slot, job)
+            except (ApiError, Abort) as e:
+                warn(f"{r.indexer}: {e}")
+                continue
+            if os.path.isfile(d):
+                d = os.path.dirname(d)
+            self.used.add(d)
+            self.whole_dirs.setdefault(release, []).append(d)
+            if self._take(d, name, size, crc, dest):
+                info(f"{release}: {name} was inside {r.title} (size and CRC match)")
+                return True
+            self.last_why = f"no whole post of the release held {name}"
+        return False
 
     def leftovers(self, job: str) -> list[str]:
         """Folders of earlier helper downloads for this same file (named after our helper job)."""
@@ -1048,6 +1122,8 @@ class FileFetcher:
             else:
                 for g in files:
                     os.remove(g)                    # the stray file of our own one-file job
+        if self.whole:
+            return self._whole(release, name, size, crc, dest)
         return False
 
 

@@ -301,7 +301,7 @@ def parse_pair(x) -> tuple:
 def grab_series(cfg: Config, show_id: int, packing: str | None = None, screens: int = 4,
                 library=None, skip_owned: bool = False, plan_only: bool = False,
                 prefer_group: str | None = None, prefer_res: str | None = None,
-                source: str | None = None, priority: list | None = None) -> dict:
+                source: str | None = None, priority: list | None = None, whole_posts: bool = False) -> dict:
     source = source or cfg.episode_source or "all"
     priority = [parse_pair(x) for x in priority or []]
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
@@ -320,14 +320,15 @@ def grab_series(cfg: Config, show_id: int, packing: str | None = None, screens: 
         return {"result": f"plan: {len(todo)} season(s) to grab, {wanted} episode(s) missing"}
     if not todo:
         return {"result": "nothing to grab" if not wanted else f"{wanted} episode(s) missing, none on Usenet"}
-    results = []
+    results, settled = [], []
     for p in todo:
         step(f"{show['name']} season {p.season}: " + " > ".join(f"{o.group.upper()} {o.res or ''}".strip()
                                                                   for o in p.choices))
         try:
             r = season_mod.grab_season(cfg, show_id, p.season, [o.key for o in p.choices], packing, screens,
-                                       skip=p.have, source=source)
+                                       skip=p.have, source=source, whole_posts=whole_posts)
             results.append(f"S{p.season:02d} {r['result']}")
+            settled += (r.get("extra") or {}).get("settled") or []
         except Cancelled:
             raise
         except (Abort, ApiError) as e:
@@ -335,4 +336,4 @@ def grab_series(cfg: Config, show_id: int, packing: str | None = None, screens: 
             results.append(f"S{p.season:02d} failed: {e}")
     for line in results:
         info(line)
-    return {"result": "; ".join(results)}
+    return {"result": "; ".join(results), "extra": {"settled": settled} if settled else None}
