@@ -120,5 +120,5 @@ export function makeServer(settingsPayload) {
     const data = answer(u.pathname + (u.pathname.match(/^\/api\/jobs\/\d+$/) ? u.search : ""), body || {});
     return { ok: true, status: 200, json: async () => JSON.parse(JSON.stringify(data)) };
   };
-  return { fetch, calls, jobs: JOBS, others, torrents: TORRENTS };
+  return { fetch, calls, jobs: JOBS, others, torrents: TORRENTS, demand: DEMAND };
 }
