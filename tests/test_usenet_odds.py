@@ -200,3 +200,28 @@ def test_a_group_never_on_usenet_is_excluded_in_autobrr_on_request(server, monke
     status, r = call(url + "/api/auto/exclude_group", *AUTH, body={"group": "grpb"})
     assert r["filters"] == 0                                      # already excluded: not added twice
     assert call(url + "/api/auto/exclude_group", *AUTH, body={"group": "a b;c"})[0] == 400
+
+
+def test_the_demand_tab_measures_nzb2seeds_automatic_builds_too(server, monkeypatch):  # noqa: F811
+    """Alongside every torrent: the ones the Automatic tab built, with cross-seeds of their files."""
+    import json as _json
+    app, url = server
+    old = time.time() - 30 * 86400
+    rows = [{"hash": "a" * 40, "name": "Film.2020.1080p-GRPA", "size": 10 * 1024 ** 3, "uploaded": 20 * 1024 ** 3,
+             "added_on": old, "tracker": "https://t1.example/a", "category": "x"},
+            {"hash": "c" * 40, "name": "Film.2020.1080p-GRPA", "size": 10 * 1024 ** 3, "uploaded": 5 * 1024 ** 3,
+             "added_on": old + 60, "tracker": "https://t2.example/a", "category": "x"},       # its cross-seed
+            {"hash": "b" * 40, "name": "Other.2019.1080p-GRPB", "size": 5 * 1024 ** 3, "uploaded": 0,
+             "added_on": old, "tracker": "https://t1.example/a", "category": "x"}]           # built by hand
+    os.makedirs(app.cfg.torrent_dir, exist_ok=True)
+    for h, src in (("a" * 40, "auto"), ("b" * 40, "manual")):
+        with open(os.path.join(app.cfg.torrent_dir, f"{h}.owned.json"), "w") as fh:
+            _json.dump({"files": [], "dirs": [], "source": src}, fh)
+    assert [r["hash"] for r in app.auto_torrent_rows(rows)] == ["a" * 40, "c" * 40]
+    monkeypatch.setattr(app, "_qbit", lambda: type("Q", (), {"torrents": lambda self: rows})())
+    app.cfg = dataclasses.replace(app.cfg, qbit_url="http://qbit.example")
+    status, r = call(url + "/api/demand", *AUTH)
+    assert status == 200 and r["torrents"] == 2
+    mine = r["nzb2seed"]
+    assert mine["torrents"] == 1 and mine["built"] == 1 and mine["cross_seeds"] == 1 and mine["uploaded_gb"] == 25.0
+    assert mine["by"][0]["rows"]                      # every group shown, however small
