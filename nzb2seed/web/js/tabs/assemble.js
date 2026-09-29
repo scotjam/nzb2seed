@@ -1,4 +1,5 @@
-// The Assemble tab: a .torrent you already have plus NZB downloads that already finished.
+// The Assemble tab: a .torrent you already have plus NZB downloads that already finished -
+// or none: with no folders, everything comes from Usenet.
 import { html, useRef, useState } from "../lib.js";
 import { api } from "../api.js";
 import { openJob, toast } from "../store.js";
@@ -20,19 +21,19 @@ export function AssembleTab() {
   }
   return html`
     <h1>Assemble from files you already have</h1>
-    <p class="lede">For a .torrent you already have and NZB downloads that are already finished. Everything from arranging the files onward runs exactly as in a normal build.</p>
+    <p class="lede">For a .torrent you already have and NZB downloads that are already finished. Everything from arranging the files onward runs exactly as in a normal build. The folders are optional: with none, everything is downloaded from Usenet.</p>
     <form class="form" onSubmit=${submit}>
       <label class="field"><span>.torrent file</span>
         <input type="file" ref=${fileRef} accept=".torrent,application/x-bittorrent" />
         <small>Or type the path of a .torrent on the machine running nzb2seed:</small>
         <input type="text" placeholder="D:\\torrents\\Release.Name.torrent" value=${path} onInput=${(e) => setPath(e.target.value)} />
       </label>
-      <label class="field"><span>Folders holding the NZB download(s)</span>
+      <label class="field"><span>Folders holding the NZB download(s) (optional)</span>
         <textarea rows="4" placeholder="One folder per line, as seen by the machine running nzb2seed"
           value=${sources} onInput=${(e) => setSources(e.target.value)}></textarea>
       </label>
       <label class="field"><span>Put the torrent's files in</span>
-        <input type="text" placeholder="Leave empty to use the parent of the first folder" value=${output} onInput=${(e) => setOutput(e.target.value)} />
+        <input type="text" placeholder="Leave empty to use the output folder from Settings, or the parent of the first folder" value=${output} onInput=${(e) => setOutput(e.target.value)} />
       </label>
       <div class="opts actions"><${Options} value=${opts} onChange=${setOpts} assemble /></div>
       <div class="actions"><button class="btn primary">Assemble</button></div>
