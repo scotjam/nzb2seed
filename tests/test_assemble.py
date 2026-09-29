@@ -283,3 +283,45 @@ def test_an_owner_is_read_as_numbers_or_names():
     assert asm.parse_owner("1000:100") == (1000, 100)
     assert asm.parse_owner("") is None
     assert asm.parse_owner("no-such-user-here:x") is None
+
+
+def test_files_placed_for_the_same_release_from_another_tracker_are_taken_over(tmp_path):
+    """Built from one tracker, then - "Look on other trackers" - from another: the same
+    release, another torrent (its .nfo differs), so another record. What the first build
+    placed is nzb2seed's own, not someone else's in the way; unless that torrent is in
+    qBittorrent, the second build takes it over."""
+    from nzb2seed import pipeline
+    from nzb2seed.config import Config
+    from nzb2seed.torrent import parse
+    from helpers import make_torrent, rnd
+    video = rnd(60_000, 3)
+    name = "Film.2017.1080p.BluRay.x264-GRP"
+    a = parse(make_torrent(name, {"film.mkv": video, "film.nfo": b"line\r\n" * 50}))
+    b = parse(make_torrent(name, {"film.mkv": video, "film.nfo": b"line\n" * 50}))
+    assert a.infohash != b.infohash
+    cfg = Config(path=str(tmp_path / "c.toml"), torrent_dir=str(tmp_path / "torrents"))
+    out = tmp_path / "out"
+    src_a = tmp_path / "dl-a"
+    src_a.mkdir()
+    (src_a / "film.mkv").write_bytes(video)
+    (src_a / "film.nfo").write_bytes(b"line\r\n" * 50)
+    owned_a = pipeline.owned_record(cfg, a)
+    assert asm.assemble(a, [str(src_a)], str(out), owned=owned_a, log=lambda *_: None).complete
+    owned_a.save()
+
+    src_b = tmp_path / "dl-b"
+    src_b.mkdir()
+    (src_b / "film.nfo").write_bytes(b"line\n" * 50)
+    owned_b = pipeline.owned_record(cfg, b)
+    before = asm.assemble(b, [str(src_b)], str(out), dry_run=True, owned=owned_b, log=lambda *_: None)
+    assert before.conflicts                                   # as it was: "in the way"
+
+    class InClient:
+        def info(self, h):
+            return {"state": "stoppedUP"} if h == a.infohash else None
+    assert pipeline.adopt_owned(cfg, b, str(out), owned_b, InClient()) == 0      # in use: left alone
+    assert pipeline.adopt_owned(cfg, b, str(out), owned_b, None) == 2
+    res = asm.assemble(b, [str(src_b)], str(out), owned=owned_b, log=lambda *_: None)
+    assert not res.conflicts and res.complete
+    assert (out / name / "film.nfo").read_bytes() == b"line\n" * 50
+    assert not pipeline.owned_record(cfg, a).files                               # no longer the other's
