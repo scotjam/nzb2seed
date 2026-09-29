@@ -1743,8 +1743,13 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
 
         def assemble(self, body):
             sources = [local_folder(app.cfg, s) for s in body.get("sources", []) if s.strip()]
-            if not sources:
-                return self._err("add at least one folder holding the NZB download")
+            if not sources and not (body.get("options") or {}).get("fetch_missing"):
+                # folders are optional - but then everything comes from Usenet
+                return self._err("add a folder holding the NZB download, or tick "
+                                 "\"Download missing files from Usenet\" to fetch everything")
+            if not sources and not ((body.get("options") or {}).get("output_dir") or app.cfg.output_dir):
+                return self._err("with no folders, say where to put the torrent's files "
+                                 "(or set the output folder in Settings)")
             for src in sources:
                 if not os.path.isdir(src):
                     return self._err(f"{src} does not exist on the NAS")

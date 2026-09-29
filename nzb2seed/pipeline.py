@@ -2428,7 +2428,11 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
     for d in dirs:
         if not os.path.exists(d):
             raise Abort(f"{d} does not exist")
-    output_dir = opts.output_dir or cfg.output_dir or os.path.dirname(dirs[0])
+    if not dirs and not (opts.fetch_missing or opts.dry_run):
+        raise Abort("no folders given and downloading from Usenet is switched off - nothing to assemble from")
+    output_dir = opts.output_dir or cfg.output_dir or (os.path.dirname(dirs[0]) if dirs else "")
+    if not output_dir:
+        raise Abort("no folders given: set where the torrent's files go (or the output folder in Settings)")
     qb = existing = None
     if not opts.no_qbit and not opts.dry_run:
         qb = QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
@@ -2461,7 +2465,8 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
     missing = asm.assemble(t, avail, PROBE_DIR, dry_run=True, log=lambda *_: None).missing
     try:
         if missing and opts.fetch_missing and not opts.dry_run:
-            step(f"Downloading the {len(missing)} file(s) the folders do not have from Usenet")
+            step(f"Downloading the {len(missing)} file(s) the folders do not have from Usenet" if dirs
+                 else f"No folders given: downloading all {len(missing)} file(s) from Usenet")
             for f in missing[:10]:
                 info(f"needed: {f.relpath} ({gb(f.length)})")
             sab = SABnzbd(cfg.sab_url, cfg.sab_key)
