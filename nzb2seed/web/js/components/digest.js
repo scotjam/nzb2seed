@@ -2,7 +2,7 @@
 // resolution the seasons (or, for a film, the torrents) with their sizes. A season is
 // ticked by tapping it, just as in the full list.
 import { html, useState } from "../lib.js";
-import { groupOf, norm, size } from "../util.js";
+import { groupOf, norm, pageLink, size } from "../util.js";
 
 const RES = /(?<![a-z0-9])(2160|1080|720|576|480)p(?![a-z0-9])/;
 const RES_ORDER = ["2160p", "1080p", "720p", "576p", "480p", "other"];
@@ -109,7 +109,7 @@ export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full
                   onClick=${(ev) => { if (ev.target.tagName !== "INPUT" && chosen.has(t.guid)) { ev.preventDefault(); edit(t); } }}>
                   <input type="checkbox" checked=${chosen.has(t.guid)} aria-label=${t.title}
                     onChange=${(e) => pick(t, e.target.checked)} />
-                  <span class="dwhat">${item.label || t.title}</span>
+                  ${pageLink(t, item.label || t.title, "dwhat")}
                   <span class="dsize">${size(t.size)}</span>
                   ${item.nzb && html`<span class="dnzb" title="An NZB of the same release group, resolution and season was found on Usenet">NZBs found</span>`}
                   <small class="status">${[t.indexer, t.seeders != null ? `${t.seeders} seeders` : null].filter(Boolean).join(" · ")}</small>

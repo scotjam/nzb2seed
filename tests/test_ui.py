@@ -259,3 +259,12 @@ def test_a_pre_approved_tracker_with_a_seeder_is_built_from_at_once(settings_fil
     (sent,) = seen["sent"]                                       # no list, no choice
     assert sent["body"]["torrent"]["indexer"] == "TrackerThree" and not seen["listed"]
     assert "Building it from TrackerThree - pre-approved, 4 seeders" in seen["shown"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_torrents_name_opens_its_tracker_page_and_only_the_box_ticks(settings_file):
+    seen = run("new", "pagelinks", settings_file)["seen"]
+    assert seen["digestHref"] == "https://tracker.example/details/1?id=5"     # the passkey left out
+    assert seen["linkChanged"] is False and seen["boxChanged"] is True
+    assert seen["rowHref"] == "https://tracker.example/details/1?id=5"
+    assert seen["plain"] >= 1                                                   # no page: plain text

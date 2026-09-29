@@ -120,6 +120,8 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .side.torrent .row.on { background: var(--torrent-soft); }
 .side.usenet .row.on { background: var(--usenet-soft); }
 .row .title { word-break: break-all; font-weight: 700; line-height: 1.35; }
+a.pagelink { color: inherit; text-decoration: underline; text-decoration-color: color-mix(in srgb, currentColor 35%, transparent); text-underline-offset: 3px; }
+a.pagelink:hover { text-decoration-color: currentColor; }
 .row .meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: .88rem; margin-top: 2px; }
 .row .same { color: var(--usenet); font-weight: 700; }
 .empty { padding: 28px 16px; color: var(--ink-2); }
