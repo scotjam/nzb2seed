@@ -60,6 +60,27 @@ export const shortSize = (n) => n >= 1024 ** 3 ? `${(Math.ceil(n / 1024 ** 3 * 1
 export const missText = (x) => `${missPct((1 - x.have) * 100)}%` + (x.short ? ` (${shortSize(x.short)})` : "");
 export const trackerName = (t) => (t || "").replace(/\s*\(API\)$/, "");
 
+/* a release's page on its tracker or indexer - without any key its link may carry */
+const SECRET = new Set(["apikey", "api_key", "r", "i", "passkey", "token", "key", "sig"]);
+export function pageUrl(u) {
+  try {
+    const url = new URL(u);
+    if (!/^https?:$/.test(url.protocol)) return null;
+    for (const k of [...url.searchParams.keys()]) if (SECRET.has(k.toLowerCase())) url.searchParams.delete(k);
+    return url.toString();
+  } catch { return null; }
+}
+
+/* the name of a release, as a link to its page (a click on it opens the page, it does not
+   tick the row's box); plain text when it has no page */
+export function pageLink(r, text, cls = "") {
+  const u = pageUrl(r.info_url || "");
+  return u ? html`<a class=${"pagelink " + cls} href=${u} target="_blank" rel="noopener noreferrer"
+      title=${`Open ${r.title} on ${r.indexer || "its site"}`}
+      onClick=${(e) => { e.preventDefault(); e.stopPropagation(); window.open(u, "_blank", "noopener"); }}>${text}</a>`
+    : html`<span class=${cls}>${text}</span>`;
+}
+
 /* remembered per browser; storage can be switched off, which must never break the page */
 export function remember(key, fallback) {
   try { const v = localStorage.getItem("nzb2seed." + key); return v == null ? fallback : v; } catch { return fallback; }

@@ -62,6 +62,32 @@ export const SCENARIOS = {
     return out;
   },
 
+  /* the new page only: a torrent's name (or season) opens its tracker page; only the box ticks */
+  async pagelinks({ act, doc, server }) {
+    server.torrents[0].info_url = "https://tracker.example/details/1?id=5&passkey=SECRET";
+    await act.go("build");
+    await act.type("Search Prowlarr", "Film.2020.1080p.BluRay-GRPA");
+    await act.submit("Search Prowlarr");
+    await act.settle();
+    const out = {};
+    const link = doc.querySelector(".ditem a.pagelink");
+    out.digestHref = link?.href;
+    const box = () => link.closest(".ditem").querySelector("input");
+    const before = box().checked;
+    link.click();
+    await act.settle();
+    out.linkChanged = box().checked !== before;
+    box().click();
+    await act.settle();
+    out.boxChanged = box().checked !== before;
+    [...doc.querySelectorAll("button")].find(b => b.textContent.trim() === "Full list").click();
+    await act.settle();
+    const row = doc.querySelector(".side.torrent .row a.pagelink, .row a.pagelink");
+    out.rowHref = row?.href;
+    out.plain = [...doc.querySelectorAll(".row .title")].filter(t => !t.querySelector("a")).length;
+    return out;
+  },
+
   /* the new page only: the always-added trackers are ticked in Prowlarr's list */
   async trackers({ act, doc, calls }) {
     await act.go("settings");
