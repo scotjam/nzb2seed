@@ -202,8 +202,9 @@ def test_a_group_never_on_usenet_is_excluded_in_autobrr_on_request(server, monke
     assert call(url + "/api/auto/exclude_group", *AUTH, body={"group": "a b;c"})[0] == 400
 
 
-def test_the_demand_tab_measures_nzb2seeds_automatic_builds_too(server, monkeypatch):  # noqa: F811
-    """Alongside every torrent: the ones the Automatic tab built, with cross-seeds of their files."""
+def test_the_demand_tab_measures_nzb2seeds_manual_and_automatic_builds_apart(server, monkeypatch):  # noqa: F811
+    """Alongside every torrent: nzb2seed's own builds, manual and automatic apart - each with
+    the cross-seeds of its files."""
     import json as _json
     app, url = server
     old = time.time() - 30 * 86400
@@ -212,16 +213,49 @@ def test_the_demand_tab_measures_nzb2seeds_automatic_builds_too(server, monkeypa
             {"hash": "c" * 40, "name": "Film.2020.1080p-GRPA", "size": 10 * 1024 ** 3, "uploaded": 5 * 1024 ** 3,
              "added_on": old + 60, "tracker": "https://t2.example/a", "category": "x"},       # its cross-seed
             {"hash": "b" * 40, "name": "Other.2019.1080p-GRPB", "size": 5 * 1024 ** 3, "uploaded": 0,
-             "added_on": old, "tracker": "https://t1.example/a", "category": "x"}]           # built by hand
+             "added_on": old, "tracker": "https://t1.example/a", "category": "x"},           # built by hand
+            {"hash": "d" * 40, "name": "Older.2018.1080p-GRPC", "size": 5 * 1024 ** 3, "uploaded": 5 * 1024 ** 3,
+             "added_on": old, "tracker": "https://t1.example/a", "category": "nzb2seed"},    # no record: its category
+            {"hash": "e" * 40, "name": "Theirs.2018.1080p-GRPD", "size": 5 * 1024 ** 3, "uploaded": 1,
+             "added_on": old, "tracker": "https://t1.example/a", "category": "films"}]       # not nzb2seed's
     os.makedirs(app.cfg.torrent_dir, exist_ok=True)
     for h, src in (("a" * 40, "auto"), ("b" * 40, "manual")):
         with open(os.path.join(app.cfg.torrent_dir, f"{h}.owned.json"), "w") as fh:
             _json.dump({"files": [], "dirs": [], "source": src}, fh)
-    assert [r["hash"] for r in app.auto_torrent_rows(rows)] == ["a" * 40, "c" * 40]
+    split = app.nzb2seed_torrent_rows(rows)
+    assert [r["hash"] for r in split["auto"]["rows"]] == ["a" * 40] and split["auto"]["cross_seeds"] == 1
+    assert split["auto"]["rows"][0]["uploaded"] == 25 * 1024 ** 3                # its cross-seed's upload added
+    assert sorted(r["hash"] for r in split["manual"]["rows"]) == ["b" * 40, "d" * 40]
     monkeypatch.setattr(app, "_qbit", lambda: type("Q", (), {"torrents": lambda self: rows})())
     app.cfg = dataclasses.replace(app.cfg, qbit_url="http://qbit.example")
     status, r = call(url + "/api/demand", *AUTH)
-    assert status == 200 and r["torrents"] == 2
-    mine = r["nzb2seed"]
-    assert mine["torrents"] == 1 and mine["built"] == 1 and mine["cross_seeds"] == 1 and mine["uploaded_gb"] == 25.0
-    assert mine["by"][0]["rows"]                      # every group shown, however small
+    assert status == 200 and r["torrents"] == 4
+    auto, manual = r["nzb2seed"]["auto"], r["nzb2seed"]["manual"]
+    assert auto["torrents"] == 1 and auto["built"] == 1 and auto["cross_seeds"] == 1 and auto["uploaded_gb"] == 25.0
+    assert manual["torrents"] == 2 and manual["dead"] == 1
+    assert auto["by"][0]["rows"]                      # every group shown, however small
+
+
+
+def test_cross_seeds_named_after_the_file_and_releases_finished_by_hand_are_counted(server, monkeypatch):  # noqa: F811
+    """A cross-seed tool names many cross-seeds after the video file and tags them - they
+    still belong to the build. And a release the Automatic tab took on, finished from the
+    Build tab, is an automatic build's for these numbers."""
+    import json as _json
+    app, url = server
+    rows = [{"hash": "a" * 40, "name": "Film.2020.1080p.BluRay-GRPA", "size": 10, "uploaded": 4, "added_on": 1,
+             "tracker": "", "category": "nzb2seed", "tags": "nzb2seed"},
+            {"hash": "f" * 40, "name": "Film.2020.1080p.BluRay-GRPA.mkv", "size": 9, "uploaded": 6, "added_on": 2,
+             "tracker": "", "category": "cross-seed-link", "tags": "cross-seed, nzb2seed.cross-seed"},
+            {"hash": "g" * 40, "name": "Unrelated.2020.1080p.BluRay-GRPZ.mkv", "size": 9, "uploaded": 6, "added_on": 2,
+             "tracker": "", "category": "cross-seed-link", "tags": "cross-seed"}]
+    os.makedirs(app.cfg.torrent_dir, exist_ok=True)
+    with open(os.path.join(app.cfg.torrent_dir, f"{'a' * 40}.owned.json"), "w") as fh:
+        _json.dump({"files": [], "dirs": [], "source": "manual"}, fh)
+    split = app.nzb2seed_torrent_rows(rows)
+    assert [r["uploaded"] for r in split["manual"]["rows"]] == [10] and split["manual"]["cross_seeds"] == 1
+    box = type("B", (), {})()
+    box.state = type("S", (), {"items": {"x" * 40: {"name": "Film 2020 1080p BluRay-GRPA", "status": "failed"}}})()
+    monkeypatch.setattr(app, "inbox", box, raising=False)
+    split = app.nzb2seed_torrent_rows(rows)
+    assert [r["hash"] for r in split["auto"]["rows"]] == ["a" * 40] and not split["manual"]["rows"]

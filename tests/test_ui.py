@@ -273,6 +273,8 @@ def test_a_torrents_name_opens_its_tracker_page_and_only_the_box_ticks(settings_
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
 def test_the_demand_tab_shows_nzb2seeds_builds_alongside_all_torrents(settings_file):
     seen = run("new", "demandAuto", settings_file)["seen"]
+    assert "nzb2seed's manual builds 40 older than 14 days (of 44)" in seen["page"] and "1.22x" in seen["page"]
     assert "nzb2seed's automatic builds" in seen["page"] and "1.50x" in seen["page"]
     assert "2 cross-seeds of their files" in seen["page"]
-    assert seen["rows"] == [["GRPA", "30", "1.80x", "5%", "7", "1.90x"], ["GRPB", "12", "0.20x", "50%", "-", "-"]]
+    assert seen["rows"] == [["GRPA", "30", "1.80x", "5%", "-", "7 · 1.90x"],
+                            ["GRPB", "12", "0.20x", "50%", "12 · 0.20x", "-"]]

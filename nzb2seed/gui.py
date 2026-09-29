@@ -310,26 +310,78 @@ class App:
                 self.build_slots_size -= 1
         return self.build_slots
 
-    def auto_torrent_rows(self, rows: list[dict]) -> list[dict]:
-        """qBittorrent's rows for the torrents the Automatic tab built - as nzb2seed's own
-        records say (and its Automatic tab's list) - plus the cross-seeds of their files
-        (the same name and size), which only exist because the build did."""
-        hashes = set()
+    def nzb2seed_torrent_rows(self, rows: list[dict]) -> dict[str, dict]:
+        """nzb2seed's own torrents in qBittorrent, as {"auto": {...}, "manual": {...}}, each
+        {"rows": its torrents, "cross_seeds": how many cross-seeds were folded into them}.
+
+        Automatic - the Automatic tab built it (its record or its list says so), or built
+        the release first and it was finished by hand (Build tab, Look on other trackers).
+        Manual - any other build of nzb2seed's: a record that says so or predates saying
+        which, or a torrent with nzb2seed's category or tag.
+
+        A cross-seed of a build's files takes no disk of its own: its upload is added to
+        the build it came from - found by the same name and size, or, for one tagged or
+        filed as a cross-seed, by name (a cross-seed is often named after the video file)."""
+        norm = worth_mod._norm
+        auto, manual = set(), set()
         for p in glob.glob(os.path.join(glob.escape(self.cfg.torrent_dir), "*.owned.json")):
             try:
                 with open(p, encoding="utf-8") as fh:
-                    if json.load(fh).get("source") == "auto":
-                        hashes.add(os.path.basename(p)[:-len(".owned.json")].lower())
+                    src = json.load(fh).get("source")
             except (OSError, ValueError):
                 continue
+            (auto if src == "auto" else manual).add(os.path.basename(p)[:-len(".owned.json")].lower())
         box = getattr(self, "inbox", None)
+        tried = set()                          # releases the Automatic tab took on, however it went
         for h, it in (box.state.items.items() if box else []):
             if it.get("status") == "done":
-                hashes.add(h.lower())
-        mine = [r for r in rows if (r.get("hash") or "").lower() in hashes]
-        same = {(worth_mod._norm(r.get("name") or ""), r.get("size") or 0) for r in mine}
-        return [r for r in rows if (r.get("hash") or "").lower() in hashes
-                or (worth_mod._norm(r.get("name") or ""), r.get("size") or 0) in same]
+                auto.add(h.lower())
+            if it.get("name"):
+                tried.add(norm(it["name"]))
+        cat = (self.cfg.qbit_category or "nzb2seed").lower()
+        tags = {t.lower() for t in (self.cfg.qbit_tags or [])} or {"nzb2seed"}
+        marks = lambda r: {t.strip().lower() for t in (r.get("tags") or "").split(",") if t.strip()}  # noqa: E731
+        for r in rows:
+            if (r.get("category") or "").lower() == cat or marks(r) & tags:
+                manual.add((r.get("hash") or "").lower())
+        manual -= auto
+        by_hash = {(r.get("hash") or "").lower(): r for r in rows}
+        for h in list(manual):
+            if h in by_hash and norm(by_hash[h].get("name") or "") in tried:
+                manual.discard(h)
+                auto.add(h)                    # the Automatic tab's release, finished by hand
+        ours = {h: dict(by_hash[h], copies=1) for h in auto | manual if h in by_hash}
+        by_name: dict[tuple, str] = {}
+        for h, r in ours.items():
+            by_name.setdefault((norm(r.get("name") or ""), r.get("size") or 0), h)
+
+        def origin(r) -> str | None:
+            same = by_name.get((norm(r.get("name") or ""), r.get("size") or 0))
+            if same:
+                return same
+            flagged = (r.get("category") or "").lower().startswith("cross-seed") or \
+                any(t.endswith(".cross-seed") or t == "cross-seed" for t in marks(r))
+            if not flagged:
+                return None
+            base = norm(re.sub(r"\.[A-Za-z0-9]{2,4}$", "", r.get("name") or ""))
+            if len(base) < 8:
+                return None
+            hits = [h for h, o in ours.items()
+                    if (n := norm(o.get("name") or "")) and (base == n or base.startswith(n) or n.startswith(base))]
+            return max(hits, key=lambda h: len(ours[h].get("name") or "")) if hits else None
+
+        folded = {"auto": 0, "manual": 0}
+        for h, r in by_hash.items():
+            if h in ours:
+                continue
+            o = origin(r)
+            if o is None:
+                continue
+            ours[o]["uploaded"] = (ours[o].get("uploaded") or 0) + (r.get("uploaded") or 0)
+            ours[o]["copies"] += 1
+            folded["auto" if o in auto else "manual"] += 1
+        return {kind: {"rows": [ours[h] for h in hashes if h in ours], "cross_seeds": folded[kind]}
+                for kind, hashes in (("auto", auto), ("manual", manual))}
 
     def nearly_built(self, title: str) -> Job | None:
         """An earlier build of this release that stopped nearly complete and still has its
@@ -1036,15 +1088,18 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     return self._json({"error": str(e), "torrents": 0, "by": [], "stats": {}})
                 out = worth_mod.overview(rows, app.cfg.demand_age_days, app.cfg.demand_min_sample)
                 out.pop("stats", None)
-                # alongside: the same measures for nzb2seed's automatic builds alone (with the
-                # cross-seeds of their files) - every group shown, however small: the count says
-                mine = app.auto_torrent_rows(rows)
-                auto = None
-                if mine:
+                # alongside: the same measures for nzb2seed's own builds - manual and automatic
+                # apart (with the cross-seeds of their files) - every group shown, however small
+                ours = {}
+                for kind, got in app.nzb2seed_torrent_rows(rows).items():
+                    mine = got["rows"]
+                    if not mine:
+                        continue
                     a = worth_mod.overview(mine, app.cfg.demand_age_days, 1)
-                    auto = {k: a[k] for k in ("torrents", "stored_gb", "uploaded_gb", "overall_ratio",
-                                              "median_ratio", "dead", "dead_gb", "cross_seeds", "by")}
-                    auto["built"] = len(worth_mod.collapse(mine))    # however new
+                    ours[kind] = {k: a[k] for k in ("torrents", "stored_gb", "uploaded_gb", "overall_ratio",
+                                                    "median_ratio", "dead", "dead_gb", "by")}
+                    ours[kind]["built"] = len(mine)                        # however new
+                    ours[kind]["cross_seeds"] = got["cross_seeds"]
                 flat = [r for g in out["by"] for r in
                         ({**x, "what": g["what"], "value": x["where"]} for x in g["rows"])]
                 return self._json({**out,
@@ -1057,7 +1112,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                    "avoid": out.pop("rules", []),
                                    "min_sample": app.cfg.demand_min_sample,
                                    "age_days": app.cfg.demand_age_days,
-                                   "nzb2seed": auto})
+                                   "nzb2seed": ours})
             if path == "/api/space":
                 try:
                     out = space_mod.check(app.cfg, app._sab())
