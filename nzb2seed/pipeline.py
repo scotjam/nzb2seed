@@ -6,6 +6,7 @@ feed a GUI job log.
 from __future__ import annotations
 
 import dataclasses
+import glob
 import itertools
 import json
 import math
@@ -2057,6 +2058,46 @@ def owned_record(cfg: Config, t: Torrent, opts: "Options | None" = None) -> asm.
     return owned
 
 
+def adopt_owned(cfg: Config, t: Torrent, output_dir: str, owned: asm.Owned, qb) -> int:
+    """Files nzb2seed placed for *another* torrent, exactly where this one's go - the same
+    release from another tracker, say, after "Look on other trackers": another infohash,
+    so another record, and they would read as someone else's. They are this build's to use
+    when that torrent is not in qBittorrent (nothing uses them) and the files are as
+    nzb2seed left them. Returns how many were taken over."""
+    targets = {asm._key(asm.target_path(output_dir, f)) for f in t.real_files}
+    root = asm._key(asm.torrent_root(t, output_dir))
+    mine = os.path.abspath(owned.path or "")
+    taken = 0
+    for rec_path in sorted(glob.glob(os.path.join(glob.escape(cfg.torrent_dir), "*.owned.json"))):
+        if os.path.abspath(rec_path) == mine:
+            continue
+        other = asm.Owned(rec_path)
+        hits = [p for p in other.files if asm._key(p) in targets and other.unchanged(p) is not False]
+        if not hits:
+            continue
+        ih = os.path.basename(rec_path)[:-len(".owned.json")]
+        try:
+            there = qb.info(ih) if qb is not None else None
+        except ApiError:
+            there = True                        # cannot tell: left as it is
+        if there:
+            info(f"{len(hits)} file(s) where this torrent's go belong to another torrent nzb2seed built "
+                 f"({ih[:8]}...), which is in qBittorrent - left alone")
+            continue
+        for p in hits:
+            other.forget_file(p)
+            other.stamps.pop(p, None)
+            owned.add_file(p)
+        for d in [d for d in other.dirs if asm._key(d) == root or asm._key(d).startswith(root + os.sep)]:
+            other.dirs.discard(d)
+            owned.dirs.add(d)
+        other.save()
+        taken += len(hits)
+        info(f"taking over {len(hits)} file(s) nzb2seed placed for another torrent of this release "
+             f"({ih[:8]}..., not in qBittorrent)")
+    return taken
+
+
 def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dirs: list[str],
            output_dir: str, qb: QBittorrent | None, existing: dict | None,
            sources_are_ours: bool = True, retry: Retry | None = None,
@@ -2084,6 +2125,8 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     space.wait_for_room(step, progress, role="output")
     owned = owned_record(cfg, t, opts)
     asm.OWNER = asm.parse_owner(cfg.file_owner)
+    if not opts.dry_run:
+        adopt_owned(cfg, t, output_dir, owned, qb)
     try:
         res = asm.assemble(t, source_dirs, output_dir, dry_run=opts.dry_run, log=line,
                            progress=copying, owned=owned, keep=keep_dirs)
