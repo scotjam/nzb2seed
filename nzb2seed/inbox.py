@@ -354,7 +354,8 @@ class Inbox:
                 self.slots.release()        # stopped while it waited: never starts building
                 raise Cancelled("stopped")
             try:
-                opts = Options(unattended=True, start=cfg.auto_start)
+                opts = Options(unattended=True, start=cfg.auto_start,
+                               whole_posts=bool(it.get("whole_posts")))
                 tor = local_release(t, it["file"])
                 if rel.seeders is not None and rel.seeders >= 0:
                     tor = dataclasses.replace(tor, seeders=rel.seeders)
@@ -444,7 +445,9 @@ class Inbox:
                 return h
         return None
 
-    def retry(self, h: str):
+    def retry(self, h: str, whole_posts: bool = False):
+        """Try a torrent again - ``whole_posts``: trying whole posts where the last build
+        settled for small files missing (a plain Try again goes back to settling)."""
         it = self.state.items.get(h)
         if not it or h in self.running:
             raise ValueError("nothing to retry")
@@ -453,7 +456,8 @@ class Inbox:
             os.makedirs(os.path.dirname(it["file"]), exist_ok=True)
             shutil.move(failed, it["file"])
         old = self.app.jobs.get(it.get("job") or -1)
-        self.state.update(h, status="queued", first_seen=time.time(), next_try=0, why="", stopped=False)
+        self.state.update(h, status="queued", first_seen=time.time(), next_try=0, why="", stopped=False,
+                          whole_posts=whole_posts)
         self.start(h)
         if old is not None and old.status != "running" and not old.retried_as:
             old.retried_as = self.state.items[h].get("job")     # "tried again as job N"
