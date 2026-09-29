@@ -475,3 +475,59 @@ def test_several_releases_in_priority_order_make_one_season(world, monkeypatch):
     assert {p.name for p in dest.iterdir() if p.is_dir()} == {
         "Test.Show.2016.S01E01.720p.HDTV.x264-GRP", "Test.Show.2016.S01E02.720p.HDTV.x264-GRP",
         "Test.Show.2016.S01E03.720p.HDTV.x264-OTHER"}
+
+
+def test_a_sample_no_post_lists_is_looked_for_inside_whole_posts(world, tmp_path):
+    """Try whole posts: no NZB lists the Sample by name (it is inside obfuscated RARs), so
+    whole posts of the release are downloaded and looked into - never the one already used."""
+    _, cfg = world
+    sample = b"s" * 5000
+    crc = f"{zlib.crc32(sample) & 0xFFFFFFFF:08X}"
+    name = "test.show.2016.s01e01.720p.hdtv.x264-grp-sample.mkv"
+    posts = [rel(ep_title(1), "used"), rel(ep_title(1), "other")]
+    from nzb2seed.pipeline import ledger_for
+    ledger_for(cfg).record("old-nzo", ep_title(1), "used", "idx", None, "")       # the release came from it
+
+    class P(PR):
+        def fetch(self, r):
+            return b"<?xml version='1.0'?><nzb><file subject='x.part01.rar'><segments/></file></nzb>"
+
+    class WholeSAB:
+        def __init__(self):
+            self.added = []
+
+        def add_nzb(self, nzb, job, *a):
+            self.added.append(job)
+            d = tmp_path / "dl" / job
+            d.mkdir(parents=True)
+            (d / "a8f3e1.bin").write_bytes(sample)          # obfuscated, loose after the repair
+            return "nzo1"
+
+        def status(self, nzo):
+            return "Completed", {"storage": f"/dl/{self.added[-1]}"}
+    sab = WholeSAB()
+    dest = tmp_path / "rel" / "Sample" / name
+    off = season.FileFetcher(cfg, P(posts), sab, set())
+    assert not off(ep_title(1), "Sample/" + name, 5000, crc, str(dest)) and sab.added == []   # not asked to
+    fetch = season.FileFetcher(cfg, P(posts), sab, set(), whole=True)
+    assert fetch(ep_title(1), "Sample/" + name, 5000, crc, str(dest))
+    assert dest.read_bytes() == sample and len(sab.added) == 1                  # only the other post
+    fetch.close()
+    assert not any((tmp_path / "dl").iterdir())                                # nothing of it kept
+
+
+def test_a_grab_that_still_lacks_files_offers_whole_posts_once(world, monkeypatch):
+    tmp_path, cfg = world
+    results = [rel(ep_title(e), f"e{e}") for e in (1, 2, 3)]
+    sab = SAB(str(tmp_path / "dl"), {f"e{e}": post(e) for e in (1, 2, 3)})
+    monkeypatch.setattr(season, "Prowlarr", lambda *a: PR(results))
+    monkeypatch.setattr(season, "SABnzbd", lambda *a: sab)
+    key = season.find_options(cfg, PR(results), "Test Show", 1, [1, 2, 3])[0].key
+    out = season.grab_season(cfg, 7, 1, key)
+    lacking = [c for c in json.load(open(tmp_path / "dl" / "Test.Show.2016.S01.720p.HDTV.x264-GRP-metadata" / "report.json"))["releases"]
+               if any(f["state"].startswith("missing") and f["size"] for f in c["files"])]
+    settled = (out.get("extra") or {}).get("settled") or []
+    assert [s["label"] for s in settled] == [c["release"] for c in lacking]
+    assert settled and all(s["missing"] > 0 and s["post"] > 0 for s in settled)
+    again = season.grab_season(cfg, 7, 1, key, whole_posts=True)
+    assert again.get("extra") is None                     # whole posts tried: not offered again
