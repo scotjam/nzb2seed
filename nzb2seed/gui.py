@@ -1339,7 +1339,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             """A build that stopped short where only small files were missing - and settled
             rather than download another whole post, since a whole post is usually hundreds of
             MB for a file of a few dozen: build it again, trying whole posts for those parts
-            this time. Everything already downloaded is reused; what is still missing after
+            this time - from the Build tab's request, or back through the Automatic tab. Everything already downloaded is reused; what is still missing after
             that is offered again, alongside completing it from the tracker."""
             job = self._nearly(body)
             if job is None:
@@ -1351,9 +1351,19 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._err("it was already added to qBittorrent or abandoned")
             if job.retried_as:
                 return self._err(f"it was already tried again, as job {job.retried_as}", 409)
+            if job.kind == "auto":
+                # an automatic build goes back into the Automatic tab's queue, as Try again does
+                box = getattr(app, "inbox", None)
+                h = box.retryable_job(job.id) if box else None
+                if not h:
+                    return self._err("it is not waiting on the Automatic tab to be tried again", 409)
+                box.retry(h, whole_posts=True)
+                job.retried_as = box.running.get(h) or box.state.items[h].get("job")
+                app.store.changed(urgent=True)
+                return self._json({"id": job.retried_as})
             rq = job.repeat or {}
             if rq.get("path") != "/api/build":
-                return self._err("only a build started from the Build tab can be built again this way")
+                return self._err("this job was not started by a build request that can be repeated")
             again = json.loads(json.dumps(rq.get("body") or {}))
             again.setdefault("options", {})["whole_posts"] = True
             title, run = build_job(app, again)
