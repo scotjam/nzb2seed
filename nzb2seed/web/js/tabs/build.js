@@ -4,7 +4,7 @@
 import { html, useEffect, useReducer, useRef } from "../lib.js";
 import { api } from "../api.js";
 import { jobs, openJob, refreshJobs, toast, useStore } from "../store.js";
-import { age, fileB64, filterMatch, groupOf, keep, norm, remember, size, sortBy, sortKey } from "../util.js";
+import { age, fileB64, filterMatch, groupOf, keep, norm, pageLink, remember, size, sortBy, sortKey } from "../util.js";
 import { Options, useOptions } from "../components/options.js";
 import { SortSelect } from "../components/sort.js";
 import { GroupChips } from "../components/groups.js";
@@ -291,7 +291,7 @@ function ReleaseRow({ r, kind, on, extra, onPick, onRowClick }) {
   return html`
     <label class=${"row" + (on ? " on" : "")} onClick=${onRowClick}>
       <input type="checkbox" name=${kind} checked=${on} aria-label=${r.title} onChange=${(e) => onPick(e.target.checked)} />
-      <div><div class="title">${r.title}</div>
+      <div><div class="title">${kind === "torrent" ? pageLink(r, r.title) : r.title}</div>
         <div class="meta">${meta.map(m => html`<span>${m}</span>`)}${extra}</div></div>
     </label>`;
 }
