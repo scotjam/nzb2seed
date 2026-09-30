@@ -33,6 +33,8 @@ INTENDED = [
     # what is found on Usenet, by group and resolution - and not trying groups never found
     (re.compile(r" ?Found on Usenet Nothing yet: every build that ends adds to this\. ?"), " "),
     (re.compile(r" ?\[[x ]\] Don't try groups that are never on Usenet: .*?it can still be tried again\)"), ""),
+    # the card under "have never uploaded a byte" says whose disk it counts
+    (re.compile(r"of disk held by those that never uploaded"), "of disk they hold"),
     # the Build tab opens on a summary by release group; the full list links back to it
     (re.compile(r" ?← Summary by release group"), ""),
     # a build outside the limit (or with no seeders) can be added anyway, by override
