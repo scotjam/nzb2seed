@@ -280,3 +280,9 @@ def test_the_demand_tab_shows_nzb2seeds_builds_alongside_all_torrents(settings_f
     assert "2 cross-seeds of their files" in seen["page"]
     assert seen["rows"] == [["GRPA", "30", "1.80x", "5%", "-", "7 · 1.90x"],
                             ["GRPB", "12", "0.20x", "50%", "12 · 0.20x", "-"]]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_skipped_automatic_build_gets_a_grey_dot(settings_file):
+    seen = run("new", "skippedDot", settings_file)["seen"]
+    assert seen["skipped"] == "dot skipped" and seen["done"] == "dot done"

@@ -62,6 +62,18 @@ export const SCENARIOS = {
     return out;
   },
 
+  /* the new page only: a skipped automatic build gets a grey dot, a built one a green one */
+  async skippedDot({ act, doc, server }) {
+    server.jobs.unshift({ id: 90, title: "auto: Film.2026.2160p.WEB-GRPQ", kind: "auto", status: "done",
+      result: "skipped - no priority rule matches it, and only what a rule matches is being built",
+      started: 1_700_000_000, ended: 1_700_000_100, progress: "", question: null, can_retry: false, extra: null });
+    await act.go("jobs");
+    await act.settle();
+    const dot = (t) => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes(t))?.querySelector(".dot")?.className;
+    const done = server.jobs.find(j => j.status === "done" && !/^skipped/.test(j.result || ""));
+    return { skipped: dot("Film.2026.2160p.WEB-GRPQ"), done: done && dot(done.title) };
+  },
+
   /* the new page only: nzb2seed's automatic builds measured alongside all your torrents */
   async demandAuto({ act, doc, server }) {
     server.demand.nzb2seed = {

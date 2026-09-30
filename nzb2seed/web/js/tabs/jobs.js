@@ -5,7 +5,7 @@ import { api, onChange } from "../api.js";
 import { jobs, jobScreen, nearlyLimitText, openJob, openJobId, shortEnough, toast, useStore } from "../store.js";
 import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName } from "../util.js";
 import { SortSelect } from "../components/sort.js";
-import { BADLY_ENDED, JOB_KINDS, builtLater, canAbandon, canAdd, canRemove, canRetry, finalOf, isLive, kindOf } from "./jobs-rules.js";
+import { BADLY_ENDED, JOB_KINDS, builtLater, canAbandon, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
 import { abandonJob, abandonMany, addMany, addToClient, cancelMany, clearAutoQueue, overrideAdd, removeAndDelete, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
@@ -89,7 +89,7 @@ function JobRow({ j, all, on, current, tick }) {
       <input type="checkbox" checked=${on} aria-label=${"Tick " + j.title} onChange=${(e) => tick(j.id, e.target.checked)} />
       <div class="jmain" role="button" tabindex="0" onClick=${open}
         onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
-        <div class="t"><span class=${"dot " + j.status}></span>${j.title}</div>
+        <div class="t"><span class=${"dot " + dotOf(j)}></span>${j.title}</div>
         <div class="s">${says}</div>
       </div>
       ${(BADLY_ENDED.includes(j.status) || j.extra?.settled?.length > 0) && html`<${JobActions} j=${j} all=${all} />`}
