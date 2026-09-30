@@ -45,7 +45,7 @@ function Ours({ m, name, age, card }) {
       ${card(m.overall_ratio.toFixed(2) + "x", "uploaded per GB stored, overall", m.overall_ratio >= 1 ? "good" : m.overall_ratio < 0.5 ? "poor" : "")}
       ${card(m.uploaded_gb.toLocaleString() + " GB", `uploaded from ${m.stored_gb.toLocaleString()} GB stored`)}
       ${card(m.dead.toLocaleString(), "have never uploaded a byte", m.dead ? "poor" : "")}
-      ${card(m.dead_gb.toLocaleString() + " GB", "of disk they hold", m.dead_gb ? "poor" : "")}
+      ${card(m.dead_gb.toLocaleString() + " GB", "of disk held by those that never uploaded", m.dead_gb ? "poor" : "")}
     </div>`;
 }
 
@@ -96,7 +96,7 @@ export function DemandTab({ active }) {
         ${card(r.overall_ratio.toFixed(2) + "x", "uploaded per GB stored, overall", r.overall_ratio >= 1 ? "good" : r.overall_ratio < 0.5 ? "poor" : "")}
         ${card(r.uploaded_gb.toLocaleString() + " GB", `uploaded from ${r.stored_gb.toLocaleString()} GB stored`)}
         ${card(r.dead.toLocaleString(), "have never uploaded a byte", r.dead ? "poor" : "")}
-        ${card(r.dead_gb.toLocaleString() + " GB", "of disk they hold", r.dead_gb ? "poor" : "")}
+        ${card(r.dead_gb.toLocaleString() + " GB", "of disk held by those that never uploaded", r.dead_gb ? "poor" : "")}
       </div>
       ${OURS.map(([k, name]) => r.nzb2seed?.[k] && html`<${Ours} m=${r.nzb2seed[k]} name=${name} age=${r.age_days} card=${card} />`)}
       <div class="dmrec">
