@@ -34,6 +34,8 @@ export const JOB_KINDS = [
 export function kindOf(j) { const k = JOB_KINDS.find(([, , fits]) => fits(j)); return k ? k[0] : "done"; }
 
 export const canRetry = (j) => BADLY_ENDED.includes(j.status) && j.can_retry;
+/* the dot's colour: a job that ended by skipping its release built nothing - grey, not green */
+export const dotOf = (j) => j.status === "done" && /^skipped\b/.test(j.result || "") ? "skipped" : j.status;
 export function canAdd(j, jobs) {
   const x = j.extra || {};
   return BADLY_ENDED.includes(j.status) && x.have != null && !x.added && !x.abandoned
