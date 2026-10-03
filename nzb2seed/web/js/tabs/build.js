@@ -8,7 +8,8 @@ import { age, fileB64, filterMatch, groupOf, keep, norm, pageLink, remember, siz
 import { Options, useOptions } from "../components/options.js";
 import { SortSelect } from "../components/sort.js";
 import { GroupChips } from "../components/groups.js";
-import { Digest } from "../components/digest.js";
+import { Digest, isWhole, withNzbs } from "../components/digest.js";
+import { LANGUAGES, fitsLanguage } from "../languages.js";
 
 /* What to filter the Usenet side by for the torrent being picked for.
 
@@ -50,6 +51,9 @@ const fresh = () => ({
   torrents: [], usenet: [], chosen: new Map(), editing: null, pairing: false, starting: false,
   searched: false, autoFilter: "", tfilter: "", tgroup: "", ufilter: "", earlier: [],
   tview: "digest", dsort: remember("dsort", "auto"),
+  // what the torrent results show: by default only whole seasons or films, and only those
+  // Usenet has the same release group, resolution and season of - untick for everything
+  whole: true, withNzbs: true, lang: "any",
   tsort: remember("tsort", "best"), usort: remember("usort", "best"),
   searching: false, finding: false, upload: "Upload .torrent",
 });
@@ -192,7 +196,14 @@ export function BuildTab({ active }) {
   }
 
   const sortChange = (k) => (e) => { s[k] = e.target.value; keep(k, s[k]); redraw(); };
-  const ts = sortBy(s.torrents.filter(t => filterMatch(t.title + " " + t.indexer, s.tfilter)
+  // the result filters - a torrent you ticked always stays in view
+  const hasNzbs = withNzbs(s.usenet);
+  const shownT = s.torrents.filter(t => s.chosen.has(t.guid)
+    || ((!s.whole || isWhole(t.title)) && (!s.withNzbs || hasNzbs(t)) && fitsLanguage(t.title, s.lang)));
+  const hidden = s.torrents.length - shownT.length;
+  const tip = hidden > 0 && html`<p class="status rtip">${hidden} more torrent${hidden === 1 ? " is" : "s are"} not shown.
+    For more results, untick ${[s.whole && "“Complete seasons or films only”", s.withNzbs && "“Only with NZBs found”"].filter(Boolean).join(" or ") || "nothing"}${s.lang !== "any" ? (s.whole || s.withNzbs ? ", or set the language to Any" : " - set the language to Any") : ""}.</p>`;
+  const ts = sortBy(shownT.filter(t => filterMatch(t.title + " " + t.indexer, s.tfilter)
     && (!s.tgroup || groupOf(t.title).toLowerCase() === s.tgroup)), s.tsort);
   const pk = picked(), fd = found();
   // picked NZBs first, then the rest
@@ -228,10 +239,17 @@ export function BuildTab({ active }) {
       </div>` : html`
       <div class="pair">
         <div class="side torrent">
-          <div class="head"><h2>Torrent</h2><span class="right"><small>${s.torrents.length} found</small>
+          <div class="head"><h2>Torrent</h2><span class="right"><small>${hidden ? `${shownT.length} of ${s.torrents.length} shown` : `${s.torrents.length} found`}</small>
             <${SortSelect} label="Sort torrents" value=${s.tsort} onChange=${sortChange("tsort")} /></span></div>
+          ${s.torrents.length > 1 && html`<div class="tfilters">
+            <label class="check"><input type="checkbox" checked=${s.whole} onChange=${(e) => { s.whole = e.target.checked; redraw(); }} /> Complete seasons or films only</label>
+            <label class="check"><input type="checkbox" checked=${s.withNzbs} onChange=${(e) => { s.withNzbs = e.target.checked; redraw(); }} /> Only with NZBs found</label>
+            <label class="lang">Language <select aria-label="Language" value=${s.lang} onChange=${(e) => { s.lang = e.target.value; redraw(); }}>
+              <option value="any">Any</option><option value="none">None in the name (usually English)</option>
+              ${LANGUAGES.map(([k, label]) => html`<option value=${k}>${label}</option>`)}</select></label>
+          </div>`}
           ${s.tview === "digest" && s.torrents.length > 1 ? html`
-          <${Digest} torrents=${s.torrents} usenet=${s.usenet} how=${s.dsort} chosen=${s.chosen}
+          <${Digest} torrents=${shownT} usenet=${s.usenet} how=${s.dsort} chosen=${s.chosen} tip=${tip}
             setHow=${(v) => { s.dsort = v; keep("dsort", v); redraw(); }}
             pick=${(t, on) => on ? selectTorrent(t) : dropTorrent(t)}
             edit=${(t) => { if (s.editing?.guid !== t.guid) { edit(t); loadEarlier(t); } }}
@@ -254,7 +272,8 @@ export function BuildTab({ active }) {
                   if (s.editing?.guid !== t.guid) { ev.preventDefault(); edit(t); loadEarlier(t); }
                 }} />`;
             }) : html`<div class="empty">${s.torrents.length ? "Nothing matches the filter." : "No torrents found. Try a shorter search."}</div>`}
-          </div>`}
+          </div>
+          ${tip}`}
         </div>
         <div class="side usenet">
           <div class="head"><h2>Usenet</h2><span class="right"><small>${s.usenet.length} found</small>

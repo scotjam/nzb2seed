@@ -35,6 +35,8 @@ INTENDED = [
     (re.compile(r" ?\[[x ]\] Don't try groups that are never on Usenet: .*?it can still be tried again\)"), ""),
     # the card under "have never uploaded a byte" says whose disk it counts
     (re.compile(r"of disk held by those that never uploaded"), "of disk they hold"),
+    # the torrents found can be narrowed: whole seasons/films, with NZBs found, a language
+    (re.compile(r" \[[x ]\] Complete seasons or films only \[[x ]\] Only with NZBs found Language \[[^\]]*\]"), ""),
     # the Build tab opens on a summary by release group; the full list links back to it
     (re.compile(r" ?← Summary by release group"), ""),
     # a build outside the limit (or with no seeders) can be added anyway, by override
@@ -286,3 +288,16 @@ def test_the_demand_tab_shows_nzb2seeds_builds_alongside_all_torrents(settings_f
 def test_a_skipped_automatic_build_gets_a_grey_dot(settings_file):
     seen = run("new", "skippedDot", settings_file)["seen"]
     assert seen["skipped"] == "dot skipped" and seen["done"] == "dot done"
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_the_torrents_shown_are_whole_with_nzbs_found_and_can_be_narrowed_by_language(settings_file):
+    seen = run("new", "tfilters", settings_file)["seen"]
+    # whole films with an NZB of the same group and resolution - not the 2160p one (no NZB),
+    # not the single episode
+    assert seen["first"] == ["Film.2020.1080p.BluRay-GRPA", "Film.2020.FRENCH.1080p.BluRay-GRPA"]
+    assert seen["head"] == "2 of 4 shown"
+    assert seen["tip"].startswith("2 more torrents are not shown.") and "Only with NZBs found" in seen["tip"]
+    assert seen["french"] == ["Film.2020.FRENCH.1080p.BluRay-GRPA"]
+    assert seen["none"] == ["Film.2020.1080p.BluRay-GRPA"]
+    assert len(seen["all"]) == 4 and seen["tipAfter"] == ""

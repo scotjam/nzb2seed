@@ -9,7 +9,7 @@ const RES_ORDER = ["2160p", "1080p", "720p", "576p", "480p", "other"];
 const pad = (n) => String(n).padStart(2, "0");
 
 /* what one torrent is of: "S02", "S02E05", "S01–S03" - or null for a film */
-function partOf(title) {
+export function partOf(title) {
   const n = norm(title);
   const range = n.match(/(?<![a-z0-9])s(\d{1,3})-s?(\d{1,3})(?![0-9e])/);
   if (range) return { label: `S${pad(range[1])}–S${pad(range[2])}`, order: Number(range[1]) * 1000 };
@@ -27,10 +27,18 @@ function nzbKey(group, title) {
   return `${group.toLowerCase()}|${res ? res + "p" : "other"}|${season != null ? "s" + season : "film"}`;
 }
 
-export function digest(torrents, usenet = []) {
-  // what Usenet has, by group, resolution and season: a torrent with the same on Usenet is
-  // one nzb2seed can build with some confidence
+/* a whole season (or several), or a film - not a single episode */
+export const isWhole = (title) => !/E\d/.test(partOf(title)?.label || "");
+
+/* (torrent) => did Usenet turn up the same release group, resolution and season (or film)?
+   Such a torrent is one nzb2seed can build with some confidence */
+export function withNzbs(usenet = []) {
   const posted = new Set(usenet.map(u => groupOf(u.title)).map((g, i) => g && nzbKey(g, usenet[i].title)).filter(Boolean));
+  return (t) => { const g = groupOf(t.title); return !!g && posted.has(nzbKey(g, t.title)); };
+}
+
+export function digest(torrents, usenet = []) {
+  const hasNzbs = withNzbs(usenet);
   const groups = new Map();
   for (const t of torrents) {
     const name = groupOf(t.title) || "no group in the name";
@@ -45,8 +53,7 @@ export function digest(torrents, usenet = []) {
     const items = g.res.get(r);
     let item = items.get(itemKey);
     if (!item) {
-      item = { label: part?.label || null, order: part ? part.order : 0, torrents: [],
-               nzb: groupOf(t.title) !== "" && posted.has(nzbKey(groupOf(t.title), t.title)) };
+      item = { label: part?.label || null, order: part ? part.order : 0, torrents: [], nzb: hasNzbs(t) };
       if (item.nzb) g.nzb++;
     }
     item.torrents.push(t);
@@ -81,7 +88,7 @@ export function sortDigest(groups, how) {
     || (tv ? DIGEST_SORTS.seasons[1](a, b) : DIGEST_SORTS.resolutions[1](a, b)) || b.count - a.count || byName(a, b));
 }
 
-export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full }) {
+export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full, tip }) {
   const groups = sortDigest(digest(torrents, usenet), how);
   const [shut, setShut] = useState(() => new Set());        // groups folded away
   const fold = (key) => setShut(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
@@ -116,6 +123,7 @@ export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full
                 </label>`))}
             </div>`)}
         </section>`)}
+      ${tip}
       <button type="button" class="btn dfull" onClick=${full}>Full list</button>
     </div>`;
 }
