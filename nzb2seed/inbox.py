@@ -349,16 +349,21 @@ class Inbox:
             self._move(it["file"], DONE)
             return {"result": f"skipped - {why}"}
 
-        # what costs no search is checked first: a release your rules turn down is skipped
-        # without spending one. Only a rule that needs the tracker's numbers asks before.
-        if rules_mod.needs_lookup(self.app.cfg):
-            known = look()
-        call = rules_mod.decide(self.app.cfg, rel)
+        # what costs no search is checked first: a release ruled out by anything free is
+        # skipped without spending one. A rule that needs the tracker's numbers asks only
+        # once its own free conditions hold - and at most once for the torrent.
+        asked = []
+
+        def fetch():
+            nonlocal known
+            if not asked:
+                asked.append(True)
+                known = look()
+        call = rules_mod.decide(self.app.cfg, rel, fetch=fetch)
         if not call.build:
             return skip(call.why)
         if limit > 0:
-            if known is None:
-                known = look()            # the search the rules did not need: only now
+            fetch()                       # the age limit: only now, if no rule asked already
             if known and known.published and known.age_min > limit * 1440:
                 # not new to the tracker: autobrr sent an old release (a re-announce, a freeleech)
                 return skip(f"the tracker posted it {age_text(known.age_min)} ago - older than your "
