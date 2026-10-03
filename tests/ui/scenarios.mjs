@@ -102,6 +102,18 @@ export const SCENARIOS = {
     return out;
   },
 
+  /* the new page only: Try whole posts says how much is missing, however little */
+  async wholeSmall({ act, doc, server }) {
+    server.jobs.unshift({ id: 91, title: "auto: Show.S02E06.1080p.BluRay-GRPQ", kind: "auto", status: "failed",
+      result: "short", started: 1_700_000_000, ended: 1_700_000_100, progress: "", question: null, can_retry: true,
+      extra: { have: 0.9999999, infohash: "h".repeat(40), tracker: "TrackerOne", short: 1000, seeders: 3,
+               settled: [{ label: "S02E06", missing: 1000, post: 12_000_000_000 }] } });
+    await act.go("jobs");
+    await act.settle();
+    const row = [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Show.S02E06.1080p.BluRay-GRPQ"));
+    return { button: [...row.querySelectorAll("span.btn")].map(b => b.textContent).find(t => t.startsWith("Try whole posts")) };
+  },
+
   /* the new page only: a skipped automatic build gets a grey dot, a built one a green one */
   async skippedDot({ act, doc, server }) {
     server.jobs.unshift({ id: 90, title: "auto: Film.2026.2160p.WEB-GRPQ", kind: "auto", status: "done",
