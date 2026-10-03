@@ -37,6 +37,8 @@ INTENDED = [
     (re.compile(r"of disk held by those that never uploaded"), "of disk they hold"),
     # the torrents found can be narrowed: whole seasons/films, with NZBs found, a language
     (re.compile(r" \[[x ]\] Complete seasons or films only \[[x ]\] Only with NZBs found Language \[[^\]]*\]"), ""),
+    # automatic builds only take torrents the tracker posted recently (2 days by default)
+    (re.compile(r" Only if the tracker posted it within \(days, 0 = any age\) \[[\d.]*\]"), ""),
     # the Build tab opens on a summary by release group; the full list links back to it
     (re.compile(r" ?← Summary by release group"), ""),
     # a build outside the limit (or with no seeders) can be added anyway, by override
@@ -75,7 +77,7 @@ INTENDED = [
 ]
 
 
-NEW_SETTINGS = {"skip_unposted"}          # settings the new page sends that the classic one had not
+NEW_SETTINGS = {"skip_unposted", "max_age_days"}          # settings the new page sends that the classic one had not
 
 
 def without_new_settings(value):

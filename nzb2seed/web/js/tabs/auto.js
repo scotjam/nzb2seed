@@ -6,7 +6,7 @@ import { autoOn, openJob, toast, useStore } from "../store.js";
 import { plural } from "../util.js";
 
 const FIELDS = { autobrr_url: "", folder: "", autobrr_folder: "", wait_hours: "", retry_first_minutes: "",
-                 retry_minutes: "", parallel: "", queue_max: "", searches_per_hour: "" };
+                 retry_minutes: "", parallel: "", queue_max: "", searches_per_hour: "", max_age_days: "" };
 
 /* the form as the server has it: filled when the tab opens and after saving - never while
    you type, so a live update cannot overwrite what you are changing */
@@ -15,7 +15,8 @@ function formFrom(st) {
   return { autobrr_url: s.autobrr_url || "", autobrr_key: "", folder: s.folder || "", autobrr_folder: s.autobrr_folder || "",
            wait_hours: s.wait_hours, retry_minutes: s.retry_minutes, retry_first_minutes: s.retry_first_minutes,
            parallel: s.parallel, queue_max: s.queue_max ?? 10, queue_keep_older: !!s.queue_keep_older,
-           searches_per_hour: s.searches_per_hour, start: !!s.start, skip_unposted: s.skip_unposted !== false };
+           searches_per_hour: s.searches_per_hour, start: !!s.start, skip_unposted: s.skip_unposted !== false,
+           max_age_days: s.max_age_days ?? 2 };
 }
 function toSettings(f) {
   return { folder: f.folder.trim(), autobrr_folder: f.autobrr_folder.trim(),
@@ -24,6 +25,7 @@ function toSettings(f) {
     parallel: Number(f.parallel) || 1, searches_per_hour: Number(f.searches_per_hour) || 40,
     queue_max: f.queue_max === "" ? 10 : Math.max(0, Math.floor(Number(f.queue_max) || 0)),
     queue_keep_older: f.queue_keep_older, start: f.start, skip_unposted: f.skip_unposted,
+    max_age_days: f.max_age_days === "" ? 2 : Math.max(0, Number(f.max_age_days) || 0),
     autobrr_url: f.autobrr_url.trim(), autobrr_key: f.autobrr_key.trim() };
 }
 
@@ -151,6 +153,7 @@ export function AutoTab({ active }) {
           ${num("parallel", "Builds at once", { min: "1", max: "8", step: "1" })}
           ${num("queue_max", "Queued at once (0 = no cap)", { min: "0", step: "1", title: "The most torrents waiting their turn at a time, not counting builds already running. When the queue is full, the oldest waiting one is stopped to make room for a new arrival (or the newcomer is, with the box below ticked). Stopped ones stay in the list and can be tried again." })}
           ${num("searches_per_hour", "Prowlarr searches an hour (automatic only)", { min: "1", step: "1" })}
+          ${num("max_age_days", "Only if the tracker posted it within (days, 0 = any age)", { min: "0", step: "0.5", title: "autobrr can send an old release - a re-announce, a freeleech. A torrent the tracker posted longer ago than this is skipped. Finding out costs one Prowlarr search per torrent (remembered for two hours); when the posting time cannot be found it is built anyway." })}
         </div>
         <label class="check" style="margin-top:10px"><input type="checkbox" checked=${form.queue_keep_older} onChange=${set("queue_keep_older")} /> When the queue is full, keep the older queued torrents and stop the new arrival instead</label>
         <label class="check" style="margin-top:10px"><input type="checkbox" checked=${form.skip_unposted} onChange=${set("skip_unposted")} /> Don't try groups that are never on Usenet: a torrent whose release group and resolution were never found on Usenet in 5 tries is stopped as it arrives, without a search (see Demand → Found on Usenet; it can still be tried again)</label>
