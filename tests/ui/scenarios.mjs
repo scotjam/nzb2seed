@@ -3,12 +3,22 @@
 
 const since = (calls, n) => calls.slice(n).filter(c => !/^\/api\/(auto\/state|demand|season\/reports|jobs\/\d+)/.test(c.path));
 
+/* the new page shows only whole seasons/films with NZBs found, at first: untick both to see
+   every torrent, as the classic page did (nothing to do on the classic page) */
+async function showAll(act, doc) {
+  for (const box of doc.querySelectorAll(".tfilters input[type=checkbox]")) {
+    if (box.checked) { box.click(); await act.settle(); }
+  }
+}
+
 export const SCENARIOS = {
   /* the new page only: the torrents found, summarised by release group and resolution */
   async digest({ act, doc }) {
     await act.go("build");
     await act.type("Search Prowlarr", "Film.2020");
     await act.submit("Search Prowlarr");
+    await act.settle();
+    await showAll(act, doc);
     const toggle = doc.querySelector(".digest .dtoggle");
     const arrow = () => toggle.querySelector(".arrow").textContent;
     const shown = () => doc.querySelectorAll(".digest .ditem").length;
@@ -33,6 +43,8 @@ export const SCENARIOS = {
     await act.go("build");
     await act.type("Search Prowlarr", "Film.2020");
     await act.submit("Search Prowlarr");
+    await act.settle();
+    await showAll(act, doc);
     [...doc.querySelectorAll("button")].find(b => b.textContent.trim() === "Full list").click();
     await act.settle();
     const chips = () => [...doc.querySelectorAll(".groupchips .chip")].map(c => c.textContent.replace(/\s+/g, " ").trim());
@@ -59,6 +71,34 @@ export const SCENARIOS = {
     await act.settle();
     out.asked = confirms.at(-1);
     out.sent = calls.slice(n).filter(c => c.path === "/api/jobs/add_to_client").map(c => c.body);
+    return out;
+  },
+
+  /* the new page only: at first only whole seasons/films with NZBs found; a language can be
+     chosen; a tip says how to see more */
+  async tfilters({ act, doc, server }) {
+    const base = server.torrents[0];
+    server.torrents.push({ ...base, title: "Film.2020.FRENCH.1080p.BluRay-GRPA", guid: "t5" },
+                         { ...base, title: "Show.S01E02.1080p.BluRay-GRPA", guid: "t6" });
+    await act.go("build");
+    await act.type("Search Prowlarr", "Film.2020");
+    await act.submit("Search Prowlarr");
+    await act.settle();
+    const shown = () => [...doc.querySelectorAll(".ditem input")].map(i => i.getAttribute("aria-label")).sort();
+    const tip = () => doc.querySelector(".rtip")?.textContent.replace(/\s+/g, " ").trim() || "";
+    const out = { first: shown(), tip: tip(), head: doc.querySelector(".side.torrent .head small").textContent };
+    const lang = doc.querySelector(".tfilters select");
+    lang.value = "french"; lang.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+    await act.settle();
+    out.french = shown();
+    lang.value = "none"; lang.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+    await act.settle();
+    out.none = shown();
+    lang.value = "any"; lang.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+    await act.settle();
+    for (const box of doc.querySelectorAll(".tfilters input[type=checkbox]")) { box.click(); await act.settle(); }
+    out.all = shown();
+    out.tipAfter = tip();
     return out;
   },
 
@@ -264,6 +304,8 @@ export const SCENARIOS = {
     await act.go("build");
     await act.type("Search Prowlarr", "Film.2020.1080p.BluRay-GRPA");
     await act.submit("Search Prowlarr");
+    await act.settle();
+    await showAll(act, doc);
     await act.settle();
     // the new page opens on a summary by release group; the list the classic page had is one tap away
     const full = [...doc.querySelectorAll("button")].find(b => b.textContent.trim() === "Full list");
