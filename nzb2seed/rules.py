@@ -99,8 +99,10 @@ def _any_host(host: str, wanted) -> bool:
     return False
 
 
-def matches(rule: dict, rel: Release, now: float | None = None) -> bool:
-    """Does this release satisfy every condition the rule sets?"""
+def matches(rule: dict, rel: Release, now: float | None = None, fetch=None) -> bool:
+    """Does this release satisfy every condition the rule sets? What the tracker knows (age,
+    seeders...) is checked last, and ``fetch()`` - which asks for it, a search - is called only
+    when everything else already holds."""
     name = (rel.name or "").lower()
     if not _any_host(rel.tracker, rule.get("trackers")):
         return False
@@ -120,6 +122,8 @@ def matches(rule: dict, rel: Release, now: float | None = None) -> bool:
         return False
     if rule.get("max_gb") and rel.size > float(rule["max_gb"]) * GB:
         return False
+    if fetch and any(rule.get(k) for k in FROM_TRACKER):
+        fetch()                           # only now: every free condition has passed
     if rule.get("max_age_min"):
         at = rel.published or rel.first_seen
         age = ((now or time.time()) - at) / 60 if at else 0.0
@@ -172,17 +176,18 @@ class Decision:
     rule: dict | None = field(default=None)
 
 
-def decide(cfg, rel: Release, now: float | None = None) -> Decision:
+def decide(cfg, rel: Release, now: float | None = None, fetch=None) -> Decision:
     """Block, prioritise, or leave it to the back of the queue.
 
     The blocklist is checked first, so a block always wins over a priority rule however
-    high that rule sits."""
+    high that rule sits. ``fetch()``: asks the tracker (through Prowlarr) what only it knows,
+    filling ``rel`` - called at most when a rule needs it and nothing free has ruled it out."""
     for rule in cfg.demand_block or []:
-        if rule.get("enabled", True) and matches(rule, rel, now):
+        if rule.get("enabled", True) and matches(rule, rel, now, fetch):
             return Decision(False, 0, "blocked by " + describe(rule), rule)
     order = [r for r in (cfg.demand_rules or []) if r.get("enabled", True)]
     for i, rule in enumerate(order):
-        if matches(rule, rel, now):
+        if matches(rule, rel, now, fetch):
             return Decision(True, i, f"priority {i + 1}: " + describe(rule), rule)
     if getattr(cfg, "demand_only_rules", False) and order:
         return Decision(False, len(order), "no priority rule matches it, and only what a "

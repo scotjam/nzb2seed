@@ -489,11 +489,10 @@ def test_an_old_release_missing_from_usenet_is_tried_once(tmp_path, monkeypatch)
     box.mkdir()
     app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
                                   auto_retry_minutes=0.001, auto_retry_first_minutes=0.001, auto_wait_hours=1,
-                                  auto_max_age_days=0)        # an old release on purpose: no age limit here
+                                  auto_max_age_days=100)      # an old release on purpose, within this limit
     calls = []
     monkeypatch.setattr(inbox, "execute_run",
                         lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(Abort("no Usenet post could supply X")))
-    monkeypatch.setattr(inbox.rules_mod, "needs_lookup", lambda cfg: True)
     monkeypatch.setattr(inbox.lookup_mod, "find", lambda *a, **k: SimpleNamespace(
         published=time.time() - 35 * 86400, seeders=11, leechers=0, grabs=5, age_min=35 * 1440))
     monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
@@ -632,5 +631,28 @@ def test_a_release_the_rules_turn_down_costs_no_search(tmp_path, monkeypatch):
     try:
         wait(lambda: app.inbox.items()[0]["status"] == "skipped")
         assert searched == [] and built == []
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_a_rule_asks_the_tracker_only_once_its_free_conditions_hold(tmp_path, monkeypatch):
+    """A rule wanting 15 GB and an age: a small release never matches it, so no search is
+    spent on it - and a release the free conditions let through is asked about once."""
+    rules = [{"enabled": True, "name": "fresh and big", "min_gb": 15, "max_age_min": 30}]
+    app, searched, built = _aged_inbox(tmp_path, monkeypatch, time.time() - 3600, demand_rules=rules,
+                                       auto_max_age_days=0)
+    try:
+        wait(lambda: built)
+        assert searched == []                  # 40 KB: never 15 GB, so its age was never asked
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_the_rules_and_the_age_limit_share_one_search(tmp_path, monkeypatch):
+    rules = [{"enabled": True, "name": "fresh", "max_age_min": 30}]
+    app, searched, built = _aged_inbox(tmp_path, monkeypatch, time.time() - 3600, demand_rules=rules)
+    try:
+        wait(lambda: built)
+        assert searched == [1]                 # asked for the rule; the age limit reused it
     finally:
         clients.SEARCH_GATE = None
