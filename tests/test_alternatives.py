@@ -410,3 +410,24 @@ def test_what_was_settled_for_is_recorded_and_whole_posts_can_be_tried(tmp_path)
                                      NoOtherPosts(), sab, t, posts, 2)
     assert len(sab.added) == 3                             # every whole post tried
     assert dirs and pipeline._this_build.settled == []     # then settled: nothing more to offer
+
+
+def test_a_build_that_stops_short_says_why_and_what_next(tmp_path, monkeypatch):
+    """Every missing file gets a reason in the log, and the build says what can be done -
+    naming the tracker the rest would come from."""
+    from nzb2seed import metadata
+    monkeypatch.setattr(metadata, "srrdb_details", lambda r: None)          # a P2P release
+    film = "Film 2022 1080p BluRay REMUX-GRP"
+    t = parse(make_torrent(film, {f"{film}.mkv": rnd(200_000, 7), f"{film}.mkv.nfo": b"n" * 800}))
+    nfo = next(f for f in t.real_files if f.name.endswith(".nfo"))
+    cfg = Config(path=str(tmp_path / "c.toml"))
+    pipeline._this_build.tracker, pipeline._this_build.seeders, pipeline._this_build.settled = "TrackerOne", 3, []
+    lines = pipeline.explain_missing(cfg, t, [nfo], [], 800, 200_800)
+    assert "made by the group for this upload" in lines[0] and "in no pre database" in lines[0]
+    assert lines[-1].startswith("Next: Add to torrent client downloads just the missing") and "TrackerOne" in lines[-1]
+    pipeline._this_build.seeders = 0
+    assert "no seeders on TrackerOne" in pipeline.explain_missing(cfg, t, [nfo], [], 800, 200_800)[-1]
+    pipeline._this_build.seeders, pipeline._this_build.settled = 3, [{"label": film, "missing": 800, "post": 1}]
+    assert "Try whole posts first" in pipeline.explain_missing(cfg, t, [nfo], [], 800, 200_800)[-1]
+    big = pipeline.explain_missing(cfg, t, [nfo], [], 150_000, 200_800)[-1]
+    assert "more than your limit" in big and "Override" in big
