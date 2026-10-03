@@ -2058,6 +2058,56 @@ def owned_record(cfg: Config, t: Torrent, opts: "Options | None" = None) -> asm.
     return owned
 
 
+_EXTRA_EXTS = {".nfo", ".txt", ".jpg", ".jpeg", ".png", ".srt", ".sub", ".idx", ".sfv", ".md5", ".url"}
+
+
+def explain_missing(cfg: Config, t: Torrent, missing: list, wrong_size: list, short: int,
+                    total: int) -> list[str]:
+    """Why each missing file could not come from Usenet, and what can be done next - said in
+    the log, so a build that stops short needs no digging to understand."""
+    from . import metadata, scenefill
+    out = []
+    for f in missing:
+        release, det = scenefill.details_for(t, scenefill.release_of(t, f), [f])
+        ext = os.path.splitext(f.name)[1].lower()
+        if det:
+            listed = any(os.path.basename(x["name"]).lower() == f.name.lower() for x in metadata.release_files(det))
+            if "sample" in f.name.lower() and ext in (".mkv", ".mp4", ".avi", ".m2ts", ".ts"):
+                why = ("the release's Sample: srrDB never stores samples, and no Usenet post of the "
+                       "release that nzb2seed tried had it")
+            elif listed:
+                why = "srrDB has it with the scene release, but it could not be fetched from srrDB this time"
+            else:
+                why = (f"not part of the scene release {release} as srrDB knows it - added for this "
+                       "upload, so only the torrent has it")
+        elif ext in _EXTRA_EXTS or f.length < 5 << 20:
+            why = ("made by the group for this upload (a P2P release, in no pre database and not on "
+                   "srrDB) - only the torrent has it, byte for byte")
+        else:
+            why = "no Usenet post that nzb2seed tried holds it"
+        out.append(f"why {f.name} ({exact_gb(f.length)}) is missing: {why}")
+    for f, size in wrong_size:
+        out.append(f"why {f.name} is wrong: the Usenet copy is {size} bytes, the torrent's {f.length} - "
+                   "another version of that file")
+    pct = short / (total or 1) * 100
+    within = pct < float(cfg.nearly_complete_percent or 5) and short < float(cfg.nearly_complete_mb or 200) * 1024 ** 2
+    seeders = getattr(_this_build, "seeders", None)
+    tracker = getattr(_this_build, "tracker", "") or "the tracker"
+    tried_all = not getattr(_this_build, "settled", None)
+    if seeders == 0:
+        nxt = (f"Prowlarr reported no seeders on {tracker}, so the missing {exact_gb(short)} cannot come "
+               "over BitTorrent from there - Look on other trackers" + ("" if tried_all else ", or Try whole posts"))
+    elif within:
+        nxt = (f"Add to torrent client downloads just the missing {exact_gb(short)} over BitTorrent from "
+               f"{tracker}" + ("" if tried_all else " - or Try whole posts first, to look inside other posts"))
+    else:
+        nxt = (f"the missing {exact_gb(short)} is more than your limit of {float(cfg.nearly_complete_percent or 5):g}% "
+               f"or {float(cfg.nearly_complete_mb or 200):g} MB - " + ("Try whole posts, " if not tried_all else "")
+               + "Look on other trackers, or use Override to add it to the torrent client anyway")
+    out.append("Next: " + nxt)
+    return out
+
+
 def adopt_owned(cfg: Config, t: Torrent, output_dir: str, owned: asm.Owned, qb) -> int:
     """Files nzb2seed placed for *another* torrent, exactly where this one's go - the same
     release from another tracker, say, after "Look on other trackers": another infohash,
@@ -2154,6 +2204,11 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
         total = sum(f.length for f in t.real_files) or 1
         short = sum(f.length for f in res.missing) + sum(f.length for f, _ in res.wrong_size)
         have = max(0.0, 1 - short / total)
+        try:
+            for text in explain_missing(cfg, t, res.missing, res.wrong_size, short, total):
+                info(text)
+        except Exception as e:                  # an explanation must never stop the result
+            warn(f"could not say why: {e}")
         raise Incomplete(
             f"the NZB download(s) do not contain every file of the torrent: {exact_pct(have)} "
             f"of it is here and {exact_gb(short)} is missing; not adding it (nothing deleted; try "
@@ -2393,6 +2448,9 @@ def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor
         _this_build.tracker = tracker_name(t.trackers, getattr(pr, "pr", pr)) or _this_build.tracker
     report_torrent(t.infohash)
     _this_build.seeders = tor_rel.seeders if (tor_rel.seeders or 0) >= 0 and tor_rel.seeders is not None else None
+    info(f"tracker: {_this_build.tracker or 'unknown'}"
+         + (f" ({_this_build.seeders} seeder{'' if _this_build.seeders == 1 else 's'} reported)"
+            if _this_build.seeders is not None else ""))
     existing = qbit_preflight(qb, t) if qb else None
 
     pp = choose_pp(opts, cfg, t)
