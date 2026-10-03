@@ -1412,6 +1412,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                        "parallel": ("auto_parallel", int), "searches_per_hour": ("auto_searches_per_hour", int),
                        "queue_max": ("auto_queue_max", int), "queue_keep_older": ("auto_queue_keep_older", bool),
                        "skip_unposted": ("auto_skip_unposted", bool),
+                       "max_age_days": ("auto_max_age_days", float),
                        "autobrr_url": ("autobrr_url", str), "autobrr_key": ("autobrr_key", str)}
 
         # ------------------------------------------------ a build that nearly made it

@@ -50,6 +50,15 @@ _NOT_YET = re.compile(r"no Usenet post could supply|nothing was downloaded|none 
 _auto = threading.local()                       # set in automatic jobs' threads
 
 
+def age_text(minutes: float) -> str:
+    """How long ago, in the unit that reads best: "40 minutes", "5 hours", "782 days"."""
+    if minutes < 120:
+        return f"{minutes:.0f} minute{'' if round(minutes) == 1 else 's'}"
+    if minutes < 48 * 60:
+        return f"{minutes / 60:.0f} hours"
+    return f"{minutes / 1440:.0f} days"
+
+
 class Budget:
     """At most ``per_hour`` Prowlarr searches an hour for automatic builds; a search over the
     budget waits (cancellable) until the oldest of the last hour is an hour old."""
@@ -317,24 +326,45 @@ class Inbox:
         rel = rules_mod.Release(name=t.name, size=t.total_size,
                                 tracker=worth.tracker_of(t.trackers),
                                 first_seen=it.get("first_seen") or time.time())
-        if rules_mod.needs_lookup(self.app.cfg):
-            # only when a rule asks for it: this costs an indexer search
-            known = lookup_mod.find(self.app.prowlarr(), self.app.tracker_cache(), t.name,
+        limit = float(getattr(self.app.cfg, "auto_max_age_days", 0) or 0)
+        known = None
+
+        def look():
+            """Ask Prowlarr what the tracker says about it - one search (remembered for a while)."""
+            found = lookup_mod.find(self.app.prowlarr(), self.app.tracker_cache(), t.name,
                                     want_counts=rules_mod.wants_counts(self.app.cfg), log=warn)
-            if known:
-                rel.published, rel.seeders = known.published, known.seeders
-                rel.leechers, rel.grabs = known.leechers, known.grabs
-                if known.published:
-                    info(f"the tracker posted it {known.age_min:.0f} minutes ago"
-                         + (f", {known.seeders} seeders" if known.seeders >= 0 else "")
-                         + (f", {known.leechers} leechers" if known.leechers >= 0 else "")
-                         + (f", grabbed {known.grabs} times" if known.grabs >= 0 else ""))
+            if found:
+                rel.published, rel.seeders = found.published, found.seeders
+                rel.leechers, rel.grabs = found.leechers, found.grabs
+                if found.published:
+                    info(f"the tracker posted it {age_text(found.age_min)} ago"
+                         + (f", {found.seeders} seeders" if found.seeders >= 0 else "")
+                         + (f", {found.leechers} leechers" if found.leechers >= 0 else "")
+                         + (f", grabbed {found.grabs} times" if found.grabs >= 0 else ""))
+            return found
+
+        def skip(why: str) -> dict:
+            warn(f"not building it: {why}")
+            self.state.update(h, status="skipped", why=why)
+            self._move(it["file"], DONE)
+            return {"result": f"skipped - {why}"}
+
+        # what costs no search is checked first: a release your rules turn down is skipped
+        # without spending one. Only a rule that needs the tracker's numbers asks before.
+        if rules_mod.needs_lookup(self.app.cfg):
+            known = look()
         call = rules_mod.decide(self.app.cfg, rel)
         if not call.build:
-            warn(f"not building it: {call.why}")
-            self.state.update(h, status="skipped", why=call.why)
-            self._move(it["file"], DONE)
-            return {"result": f"skipped - {call.why}"}
+            return skip(call.why)
+        if limit > 0:
+            if known is None:
+                known = look()            # the search the rules did not need: only now
+            if known and known.published and known.age_min > limit * 1440:
+                # not new to the tracker: autobrr sent an old release (a re-announce, a freeleech)
+                return skip(f"the tracker posted it {age_text(known.age_min)} ago - older than your "
+                            f"{limit:g}-day limit for automatic builds")
+            if not (known and known.published):
+                info("the tracker's posting time could not be found - built anyway, as there is no age to go by")
         if call.why:
             info(call.why)
         while True:
