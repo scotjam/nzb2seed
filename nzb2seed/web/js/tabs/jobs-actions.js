@@ -2,7 +2,7 @@
 // tells the server and refreshes the list. The list stays on screen throughout.
 import { api } from "../api.js";
 import { jobs, loadSettings, nearlyLimitText, openJobId, jobScreen, refreshJobs, toast } from "../store.js";
-import { gb, missText, size, trackerName } from "../util.js";
+import { gb, missText, shortSize, size, trackerName } from "../util.js";
 import { canAdd, canAbandon } from "./jobs-rules.js";
 
 async function each(list, path, done, failed, ok) {
@@ -27,7 +27,8 @@ export async function retryJob(j) {
 export function wholePostsText(x) {
   const parts = x.settled || [];
   const miss = parts.reduce((n, p) => n + (p.missing || 0), 0), post = parts.reduce((n, p) => n + (p.post || 0), 0);
-  return { parts: parts.length, miss: size(miss), post: size(post), names: parts.map(p => p.label).join(", ") };
+  // what is missing can be a 1 KB .nfo: shown in KB, rounded up, never as "0.0 MB"
+  return { parts: parts.length, miss: shortSize(miss), post: size(post), names: parts.map(p => p.label).join(", ") };
 }
 
 export async function wholePosts(j) {
