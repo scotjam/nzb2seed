@@ -488,7 +488,8 @@ def test_an_old_release_missing_from_usenet_is_tried_once(tmp_path, monkeypatch)
     box = tmp_path / "inbox"
     box.mkdir()
     app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
-                                  auto_retry_minutes=0.001, auto_retry_first_minutes=0.001, auto_wait_hours=1)
+                                  auto_retry_minutes=0.001, auto_retry_first_minutes=0.001, auto_wait_hours=1,
+                                  auto_max_age_days=0)        # an old release on purpose: no age limit here
     calls = []
     monkeypatch.setattr(inbox, "execute_run",
                         lambda *a, **k: calls.append(1) or (_ for _ in ()).throw(Abort("no Usenet post could supply X")))
@@ -571,5 +572,65 @@ def test_an_automatic_build_that_settled_can_be_tried_with_whole_posts(server, t
         app.inbox.retry(h)                                  # a plain Try again
         wait(lambda: len(runs) == 3)
         assert runs[-1] is False
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def _aged_inbox(tmp_path, monkeypatch, published, **cfg):
+    import dataclasses
+    from nzb2seed import lookup
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_minutes=60,
+                                  auto_retry_first_minutes=60, auto_wait_hours=48, **cfg)
+    searched, built = [], []
+    monkeypatch.setattr(inbox.lookup_mod, "find", lambda *a, **k: searched.append(1) or (
+        lookup.Info(published=published) if published is not None else None))
+    monkeypatch.setattr(inbox, "execute_run", lambda *a, **k: built.append(1) or {"result": "done"})
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+    app.start_inbox()
+    t = box / "Film.2019.1080p.BluRay-GRPA.torrent"
+    t.write_bytes(make_torrent("Film.2019.1080p.BluRay-GRPA", {"a.mkv": b"x" * 40000}))
+    old = time.time() - 60
+    os.utime(t, (old, old))
+    app.inbox.poll()
+    return app, searched, built
+
+
+def test_an_automatic_build_skips_what_the_tracker_posted_long_ago(tmp_path, monkeypatch):
+    app, searched, built = _aged_inbox(tmp_path, monkeypatch, time.time() - 782 * 86400)
+    try:
+        wait(lambda: app.inbox.items()[0]["status"] == "skipped")
+        why = app.inbox.items()[0]["why"]
+        assert "782 days ago" in why and "2-day limit" in why and built == []
+        job = next(j for j in app.jobs.values() if j.kind == "auto")
+        wait(lambda: job.status == "done")
+        assert job.result.startswith("skipped - ")              # a grey dot on the Jobs tab
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_a_new_one_or_one_of_unknown_age_is_built(tmp_path, monkeypatch):
+    for published in (time.time() - 3600, None):                  # an hour old; age not found
+        sub = tmp_path / ("new" if published else "unknown")
+        sub.mkdir()
+        app, searched, built = _aged_inbox(sub, monkeypatch, published)
+        try:
+            wait(lambda: built)
+            assert searched == [1]
+        finally:
+            clients.SEARCH_GATE = None
+
+
+def test_a_release_the_rules_turn_down_costs_no_search(tmp_path, monkeypatch):
+    """The age limit asks Prowlarr - but only after what costs nothing has passed."""
+    block = [{"enabled": True, "name": "no films", "types": ["movie"]}]
+    app, searched, built = _aged_inbox(tmp_path, monkeypatch, time.time() - 3600, demand_block=block)
+    try:
+        wait(lambda: app.inbox.items()[0]["status"] == "skipped")
+        assert searched == [] and built == []
     finally:
         clients.SEARCH_GATE = None
