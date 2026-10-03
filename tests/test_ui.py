@@ -301,3 +301,9 @@ def test_the_torrents_shown_are_whole_with_nzbs_found_and_can_be_narrowed_by_lan
     assert seen["french"] == ["Film.2020.FRENCH.1080p.BluRay-GRPA"]
     assert seen["none"] == ["Film.2020.1080p.BluRay-GRPA"]
     assert len(seen["all"]) == 4 and seen["tipAfter"] == ""
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_try_whole_posts_never_says_nothing_is_missing(settings_file):
+    seen = run("new", "wholeSmall", settings_file)["seen"]
+    assert seen["button"] == "Try whole posts (1 part, 1 KB missing)"        # not "0.0 MB"
