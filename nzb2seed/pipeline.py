@@ -83,6 +83,7 @@ class Options:
     unattended: bool = False       # automatic builds: never ask the person to pick a post
     peek: bool | None = None       # look inside a RAR post first (None = behaviour.peek_archives)
     whole_posts: bool = False      # a small file missing: try whole posts for it before settling
+    related: tuple = ()            # infohashes of torrents of the same release built before
 
 
 def gb(n: int) -> str:
@@ -1718,6 +1719,42 @@ def preview_plan(cfg: Config, pr: Prowlarr, t: Torrent, title: str) -> Unit:
     return root
 
 
+_POSTER_SUFFIX = re.compile(r"-(xpost|repost|obfuscated|postbot|scrambled)$", re.I)
+
+
+def found_on_disk(cfg: Config, sab: SABnzbd, t: Torrent, related=()) -> tuple[list[str], set[str]]:
+    """nzb2seed's own finished downloads that may hold this torrent's files - made for it,
+    for a torrent of the same release (``related``: built from another tracker), or of a post
+    named as the release - and which of its files they hold (name and size, as laying out
+    matches them). Looked at before anything is searched for: a file already here is never
+    looked for again. (folders, the torrent's relpaths they hold)"""
+    want = matching.norm(release_title(t.name))
+    hashes = {h for h in (t.infohash, *related) if h}
+    records = ledger_for(cfg).all()
+    for j in records:
+        if j.get("torrent") and matching.norm(_POSTER_SUFFIX.sub("", j.get("title") or "")) == want:
+            hashes.add(j["torrent"])
+    dirs = []
+    for j in records:
+        if j.get("torrent") not in hashes:
+            continue
+        try:
+            status, slot = sab.status(j["nzo"])
+            if status not in SAB_DONE:
+                continue
+            d = job_dir(cfg, slot, j.get("title", ""))
+        except (ApiError, Abort, KeyError):
+            continue
+        if os.path.isdir(d) and d not in dirs:
+            dirs.append(d)
+    if not dirs:
+        return [], set()
+    res = asm.assemble(t, dirs, PROBE_DIR, dry_run=True, log=lambda *_: None)
+    lacking = {f.relpath for f in res.missing} | {f.relpath for f, _ in res.wrong_size}
+    have = {f.relpath for f in t.real_files} - lacking
+    return (dirs if have else []), have
+
+
 def earlier_dirs(cfg: Config, sab: SABnzbd, t: Torrent) -> list[str]:
     """Folders of every finished download nzb2seed made for this torrent on any attempt:
     once the torrent is complete, their leftovers are cleaned up with the rest."""
@@ -2471,9 +2508,24 @@ def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor
     info(f"SABnzbd post-processing: {'+Repair' if pp == PP_REPAIR else '+Repair/Unpack'} ({why}); never +Delete")
     sab_preflight(sab, pp)
 
+    # what is already here comes first: files nzb2seed placed (for this torrent, or for another
+    # torrent of the release that is not in qBittorrent), then its downloads that hold some of
+    # the files - only what is still missing is searched for, and nothing is looked for twice
+    out_dir = opts.output_dir or cfg.output_dir
+    if out_dir and not opts.dry_run:
+        mine = owned_record(cfg, t, opts)
+        if adopt_owned(cfg, t, out_dir, mine, qb):
+            mine.save()
     placed = placed_before(cfg, opts, t)
+    disk_dirs, on_disk = found_on_disk(cfg, sab, t, opts.related)
+    fresh = on_disk - placed
+    if fresh:
+        files = [f for f in t.real_files if f.relpath in fresh]
+        info(f"already on disk in nzb2seed's earlier downloads: {len(files)} of {len(t.real_files)} file(s), "
+             f"{gb(sum(f.length for f in files))} - not looked for again")
     picks = [r for g in groups for r in g]
-    dirs, nzos, slots, rejected = plan_and_fetch(cfg, opts, pr, sab, t, t.name, picks, pp, placed)
+    dirs, nzos, slots, rejected = plan_and_fetch(cfg, opts, pr, sab, t, t.name, picks, pp, placed | on_disk)
+    dirs = disk_dirs + [d for d in dirs if d not in disk_dirs]
     if not dirs and not placed:
         raise Abort("nothing was downloaded")
 
@@ -2534,11 +2586,22 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
     missing = asm.assemble(t, avail, PROBE_DIR, dry_run=True, log=lambda *_: None).missing
     try:
         if missing and opts.fetch_missing and not opts.dry_run:
+            sab = SABnzbd(cfg.sab_url, cfg.sab_key)
+            # nzb2seed's own earlier downloads of the release first: what they hold is not
+            # searched for or downloaded again
+            disk_dirs, on_disk = found_on_disk(cfg, sab, t)
+            got = [f for f in missing if f.relpath in on_disk]
+            if got:
+                info(f"already on disk in nzb2seed's earlier downloads: {len(got)} of the {len(missing)} "
+                     f"file(s) the folders lack, {gb(sum(f.length for f in got))} - not looked for again")
+                avail = avail + [d for d in disk_dirs if d not in avail]
+                fetched = list(disk_dirs)
+                missing = [f for f in missing if f.relpath not in on_disk]
+        if missing and opts.fetch_missing and not opts.dry_run:
             step(f"Downloading the {len(missing)} file(s) the folders do not have from Usenet" if dirs
                  else f"No folders given: downloading all {len(missing)} file(s) from Usenet")
             for f in missing[:10]:
                 info(f"needed: {f.relpath} ({gb(f.length)})")
-            sab = SABnzbd(cfg.sab_url, cfg.sab_key)
             pr = grab.Source(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), sab)
             grab.remove_stray_checks(sab)
             metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
@@ -2546,7 +2609,8 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
             pp = choose_pp(opts, cfg, t)
             sab_preflight(sab, pp)
             have = {f.relpath for f in t.real_files} - {f.relpath for f in missing}
-            fetched, _, units, _ = plan_and_fetch(cfg, opts, pr, sab, t, t.name, [], pp, have)
+            new, _, units, _ = plan_and_fetch(cfg, opts, pr, sab, t, t.name, [], pp, have)
+            fetched = fetched + [d for d in new if d not in fetched]
             retry = Retry(cfg, pr, sab, pp, units)
         elif missing and not opts.dry_run:
             info(f"{len(missing)} file(s) are in none of the folders; downloading them from Usenet is switched off")

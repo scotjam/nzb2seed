@@ -100,3 +100,54 @@ def test_the_assemble_form_needs_folders_only_without_downloading(server, tmp_pa
     assert status == 400                                           # no folders, no downloading
     body["options"]["fetch_missing"] = True
     assert call(url + "/api/assemble", *AUTH, body=body)[0] == 200 and started.wait(5)
+
+
+class LedgerSab:
+    """SABnzbd as far as finding earlier downloads goes: each job is finished in a folder."""
+
+    def __init__(self, root):
+        self.root = root
+
+    def status(self, nzo):
+        return "Completed", {"storage": f"/dl/{nzo}"}
+
+    def config(self):
+        return {"misc": {}}
+
+
+def test_earlier_downloads_of_the_release_are_found_before_any_search(tmp_path, monkeypatch):
+    """Built from another tracker (another torrent, another infohash): the download made for
+    the first one holds the files - found on disk, by the release's name, not searched for."""
+    name = "Show.S01.1080p.WEB.h264-GRPA"
+    t = parse(make_torrent(name + ".mkv", {name + ".mkv": FILES["Show.S01E01.mkv"]}))   # a one-file torrent
+    d = tmp_path / "dl" / "nzo-first"
+    d.mkdir(parents=True)
+    (d / "x8f3.mkv").write_bytes(FILES["Show.S01E01.mkv"])
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]])
+    pipeline.ledger_for(cfg).record("nzo-first", name + "-xpost", "g", "IndexerA", None, "f" * 40)
+    dirs, have = pipeline.found_on_disk(cfg, LedgerSab(str(tmp_path)), t)
+    assert dirs == [str(d)] and have == {f.relpath for f in t.real_files}
+    other = Config(path=str(tmp_path / "other" / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]])
+    assert pipeline.found_on_disk(other, LedgerSab(str(tmp_path)), t) == ([], set())     # nothing recorded
+
+
+def test_assemble_takes_what_earlier_downloads_hold_before_searching(tmp_path, monkeypatch):
+    t_bytes = make_torrent("Show.S01.1080p.WEB.h264-GRPA", FILES)
+    tfile = tmp_path / "x.torrent"
+    tfile.write_bytes(t_bytes)
+    t = parse(t_bytes)
+    lib = tmp_path / "library"
+    lib.mkdir()
+    (lib / "Show.S01E01.mkv").write_bytes(FILES["Show.S01E01.mkv"])
+    d = tmp_path / "dl" / "nzo-e02"
+    d.mkdir(parents=True)
+    (d / "Show.S01E02.mkv").write_bytes(FILES["Show.S01E02.mkv"])
+    out = tmp_path / "out"
+    cfg = Config(path=str(tmp_path / "c.toml"), output_dir=str(out), torrent_dir=str(tmp_path / "torrents"),
+                 sab_to_local=[["/dl", str(tmp_path / "dl")]])
+    pipeline.ledger_for(cfg).record("nzo-e02", "Show.S01E02.1080p.WEB.h264-GRPA", "g", "IndexerA", None, t.infohash)
+    monkeypatch.setattr(pipeline, "SABnzbd", lambda *a: LedgerSab(str(tmp_path)))
+    monkeypatch.setattr(pipeline, "plan_and_fetch", lambda *a, **k: (_ for _ in ()).throw(AssertionError("searched")))
+    pipeline.execute_assemble(cfg, Options(no_qbit=True, fetch_missing=True), str(tfile), [str(lib)])
+    for f in t.real_files:
+        assert (out / f.relpath).read_bytes() == FILES[f.name]
