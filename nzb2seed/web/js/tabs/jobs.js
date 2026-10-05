@@ -5,16 +5,17 @@ import { api, onChange } from "../api.js";
 import { backToJobs, jobs, jobScreen, nearlyLimitText, openJob, openJobId, setTrackerLimit, settings, shortEnough, toast, trackerLimit, useStore } from "../store.js";
 import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName } from "../util.js";
 import { SortSelect } from "../components/sort.js";
-import { BADLY_ENDED, JOB_KINDS, builtLater, canAbandon, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf } from "./jobs-rules.js";
+import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAbandon, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, trackersOf, viaTracker } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
-import { abandonJob, abandonMany, addMany, addToClient, cancelMany, clearAutoQueue, overrideAdd, removeAndDelete, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
+import { abandonJob, addFromTrackers, addToClient, cancelMany, clearAndDelete, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
 export function JobsTab({ active }) {
   const all = useStore(jobs);
   const current = useStore(openJobId);
   const showing = useStore(jobScreen);
   const [filter, setFilter] = useState(() => remember("jobFilter", "all"));
-  const [picked, setPicked] = useState(() => new Set());
+  // ticked jobs: id -> null (the job itself) or the release of another tracker it is ticked "via"
+  const [picked, setPicked] = useState(() => new Map());
 
   const counts = {};
   for (const j of all) counts[kindOf(j)] = (counts[kindOf(j)] || 0) + 1;
@@ -27,20 +28,21 @@ export function JobsTab({ active }) {
     if (active && current == null && all.length) openJob(all[0].id, false);
   }, [active, current, all.length]);
 
-  const choose = (v) => { setFilter(v); keep("jobFilter", v); setPicked(new Set()); };
-  const tick = (id, on) => setPicked(p => { const n = new Set(p); on ? n.add(id) : n.delete(id); return n; });
-  const untick = () => setPicked(new Set());
+  const choose = (v) => { setFilter(v); keep("jobFilter", v); setPicked(new Map()); };
+  const tick = (id, on) => setPicked(p => { const n = new Map(p); on ? n.set(id, null) : n.delete(id); return n; });
+  const untick = () => setPicked(new Map());
+  const select = (entries) => setPicked(new Map(entries));          // a "Select:" choice replaces the ticks
 
   return html`
     <div class=${"jobs" + (showing ? " showing" : "")}>
       <div class="jobside">
-        <${JobBar} all=${all} shown=${shown} ticked=${ticked} kind=${kind} counts=${counts}
-          choose=${choose} tickAll=${(list) => setPicked(new Set([...picked, ...list.map(j => j.id)]))} untick=${untick} />
-        <p class="status jobtip">Tip: abandoning old jobs allows nzb2seed to clear old downloads relating to those jobs -
-          be sure to abandon old jobs on your jobs list after you're done with them.</p>
+        <${JobBar} all=${all} shown=${shown} ticked=${ticked} picked=${picked} kind=${kind} counts=${counts}
+          choose=${choose} select=${select} untick=${untick} />
+        <p class="status jobtip">Tip: clearing old jobs from the list lets nzb2seed clear the downloads they made -
+          clear them once you are done with them (Clear from list, delete files does it at once).</p>
         <div class="joblist" id="joblist">
           ${shown.length ? shown.map(j => html`
-            <${JobRow} key=${j.id} j=${j} all=${all} on=${picked.has(j.id)} current=${j.id === current}
+            <${JobRow} key=${j.id} j=${j} all=${all} on=${picked.has(j.id)} via=${picked.get(j.id)} current=${j.id === current}
               tick=${tick} />`)
           : html`<div class="empty">${all.length ? "No jobs match this filter." : "No builds yet. Start one from Build."}</div>`}
         </div>
@@ -49,8 +51,9 @@ export function JobsTab({ active }) {
     </div>`;
 }
 
-function JobBar({ all, shown, ticked, kind, counts, choose, tickAll, untick }) {
-  const failed = shown.filter(j => BADLY_ENDED.includes(j.status));
+function JobBar({ all, shown, ticked, picked, kind, counts, choose, select, untick }) {
+  const [tracker, setTracker] = useState("");
+  const trackers = trackersOf(shown);
   // a greyed-out button says why, rather than doing nothing without a word
   const live = ticked.filter(isLive).length;
   const btn = (label, list, fn, title) => html`
@@ -59,6 +62,17 @@ function JobBar({ all, shown, ticked, kind, counts, choose, tickAll, untick }) {
         : live === ticked.length ? `${title}. The ticked jobs are still running - cancel them first`
         : `${title}. None of the ticked jobs can have this done`}
       onClick=${() => fn(list, untick)}>${list.length ? `${label} (${list.length})` : label}</button>`;
+  const pick = (fits) => select(shown.filter(fits).map(j => [j.id, null]));
+  const byTracker = (t) => {
+    setTracker(t);
+    if (!t) return untick();
+    select(shown.flatMap(j => { const via = viaTracker(j, t); return via === undefined ? [] : [[j.id, via]]; }));
+  };
+  // Add to torrent client: a job ticked as itself, if it can go; one ticked via another
+  // tracker builds that tracker's torrent instead
+  const viaOther = ticked.filter(j => picked.get(j.id));
+  const addable = ticked.filter(j => !picked.get(j.id) && canAdd(j, all));
+  const add = (list, done) => addFromTrackers(addable, viaOther.map(j => [j, picked.get(j.id)]), done);
   return html`
     <div class="jobbar" id="jobbar" role="toolbar" aria-label="Act on the ticked jobs">
       <select aria-label="Show only jobs of one kind" value=${kind} onChange=${(e) => choose(e.target.value)}>
@@ -66,21 +80,26 @@ function JobBar({ all, shown, ticked, kind, counts, choose, tickAll, untick }) {
         ${JOB_KINDS.filter(([k]) => counts[k]).map(([k, label]) => html`<option value=${k}>${label} (${counts[k]})</option>`)}
       </select>
       <small>${ticked.length ? `${ticked.length} ticked` : "Tick jobs to act on several at once"}</small>
-      <button type="button" class="btn" disabled=${!failed.length} onClick=${() => tickAll(failed)}>
-        ${kind === "all" ? "Tick all that failed" : "Tick all shown that failed"}</button>
-      ${ticked.length > 0 && html`<button type="button" class="btn" title="Untick every job (the jobs are not changed)" onClick=${untick}>Untick all</button>`}
-      ${btn("Cancel", ticked.filter(isLive), cancelMany, "Stop each ticked running build after its current step - nothing is deleted")}
-      ${btn("Try again", ticked.filter(canRetry), retryMany, "Run each ticked job again, exactly as it was started")}
-      ${btn("Add to torrent client", ticked.filter(j => canAdd(j, all)), addMany, "Hand each ticked build that is within what its tracker lets you download to qBittorrent")}
-      ${btn("Abandon", ticked.filter(j => canAbandon(j, all)), abandonMany, "Delete every temporary file the ticked builds left")}
-      ${btn("Remove from list", ticked.filter(canRemove), removeMany, "Take the ticked finished jobs off this list. Their Usenet downloads are cleared within the hour, once nothing else needs them")}
-      ${btn("Remove and delete downloads", ticked.filter(canRemove), removeAndDelete, "Take the ticked finished jobs off this list and delete the Usenet downloads they made - never one a torrent in qBittorrent uses")}
-      <button type="button" class="btn" onClick=${clearAutoQueue}
-        title="Stop every automatic build that has not started building yet (same as Clear queue on the Automatic tab)">Clear auto jobs from queue</button>
+      <div class="jbrow"><b>Select:</b>
+        ${SELECT.map(([k, label, fits]) => html`<button type="button" class="btn" disabled=${!shown.some(fits)}
+          onClick=${() => { setTracker(""); pick(fits); }}>${label}</button>`)}
+        <button type="button" class="btn" disabled=${!ticked.length} onClick=${() => { setTracker(""); untick(); }}>None</button>
+        ${trackers.length > 0 && html`<select aria-label="Select by tracker" value=${tracker} onChange=${(e) => byTracker(e.target.value)}
+          title="The jobs from this tracker - and those it was found on by Look on other trackers, ticked for that tracker's torrent only">
+          <option value="">Tracker…</option>${trackers.map(t => html`<option value=${t}>${trackerName(t)}</option>`)}</select>`}
+      </div>
+      <div class="jbrow"><b>Action:</b>
+        ${btn("Retry selected", ticked.filter(canRetry), retryMany, "Run each ticked job again, exactly as it was started")}
+        ${btn("Cancel selected (kept on list)", ticked.filter(isLive), cancelMany, "Stop each ticked running or queued build after its current step - nothing is deleted, and it can be tried again")}
+        ${btn("Add to torrent client (download the rest)", [...addable, ...viaOther], add,
+          "Hand each ticked build that is within what its tracker lets you download to qBittorrent - and build the torrent of the tracker a job is ticked via, reusing what was downloaded")}
+        ${btn("Clear from list, keep files", ticked.filter(canRemove), removeMany, "Take the ticked finished jobs off this list. The files they placed and anything in qBittorrent stay; their unused Usenet downloads are cleared within the hour")}
+        ${btn("Clear from list, delete files", ticked.filter(canRemove), clearAndDelete, "Take the ticked finished jobs off this list and delete their Usenet downloads and the files they placed - never anything a torrent in qBittorrent uses")}
+      </div>
     </div>`;
 }
 
-function JobRow({ j, all, on, current, tick }) {
+function JobRow({ j, all, on, via, current, tick }) {
   const open = () => openJob(j.id);
   const says = j.status === "waiting" ? "Waiting for you: pick an NZB"
     : j.status === "running" ? (j.steps.at(-1) || "Starting") : (j.result || j.status);
@@ -89,7 +108,7 @@ function JobRow({ j, all, on, current, tick }) {
       <input type="checkbox" checked=${on} aria-label=${"Tick " + j.title} onChange=${(e) => tick(j.id, e.target.checked)} />
       <div class="jmain" role="button" tabindex="0" onClick=${open}
         onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
-        <div class="t"><span class=${"dot " + dotOf(j)}></span>${j.title}</div>
+        <div class="t"><span class=${"dot " + dotOf(j)}></span>${j.title}${via && html` <span class="via">via ${trackerName(via.indexer)}</span>`}</div>
         <div class="s">${says}</div>
       </div>
       ${(BADLY_ENDED.includes(j.status) || j.extra?.settled?.length > 0) && html`<${JobActions} j=${j} all=${all} />`}
@@ -131,6 +150,7 @@ function JobActions({ j, all }) {
     return html`<div class="jretry"><small class="status">built when tried again, as job ${finalOf(j, all).id}</small></div>`;
   }
   if (x.added) return html`<div class="jretry"><small class="status">${x.complete ? "complete in qBittorrent - seeding" : "in qBittorrent, downloading the rest"}</small></div>`;
+  if (x.added_via) return html`<div class="jretry"><small class="status">added to qBittorrent as ${trackerName(x.added_via)}'s torrent</small></div>`;
   const limit = nearlyLimitText(x.tracker);
   // the tracker is always named: whether downloading the rest risks a hit-and-run depends on it
   const where = x.tracker ? trackerName(x.tracker) : "tracker unknown";
