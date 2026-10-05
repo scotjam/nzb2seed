@@ -1500,11 +1500,16 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             except (ApiError, OSError) as e:
                 return self._err(f"Prowlarr could not be searched: {e}", 502)
             own, want = app.tracker_key(x.get("tracker", "")), matching.norm(name)
+            # within 1 MB: the same video, one torrent with a small file the other lacks (some
+            # trackers add their own .nfo) - built from the one without it, it is complete
             out = [{**dataclasses.asdict(r), "approved": app.always_adds(r.indexer),
-                    "same_size": size is not None and r.size == size}
+                    "same_size": size is not None and r.size == size,
+                    "near_size": size is not None and 0 < abs((r.size or 0) - size) <= 1 << 20,
+                    "size_diff": None if size is None else (r.size or 0) - size}
                    for r in torrents
                    if matching.norm(r.title) == want and app.tracker_key(r.indexer) != own]
-            out.sort(key=lambda r: (not r["approved"], not r["same_size"], -(r["seeders"] or 0)))
+            out.sort(key=lambda r: (not r["approved"], not (r["same_size"] or r["near_size"]),
+                                    not r["same_size"], -(r["seeders"] or 0)))
             return self._json({"name": name, "size": size, "releases": out})
 
         def add_to_client(self, body):
