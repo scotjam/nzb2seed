@@ -275,6 +275,24 @@ export const SCENARIOS = {
     return out;
   },
 
+  /* the new page only: Back (the browser's, or Android's) goes from a job to the jobs list */
+  async backButton({ act, doc, w }) {
+    await act.go("jobs");
+    const showing = () => doc.querySelector(".jobs").classList.contains("showing");
+    const back = async () => { w.history.back(); for (let i = 0; i < 20; i++) { await new Promise(r => setTimeout(r, 10)); await act.settle(); } };
+    const rows = [...doc.querySelectorAll(".jrow .jmain")];
+    const out = {};
+    rows[0].click(); await act.settle();
+    out.opened = [w.location.hash.startsWith("#jobs/"), showing()];
+    await back();
+    out.afterBack = [w.location.hash, showing()];
+    rows[0].click(); await act.settle();
+    [...doc.querySelectorAll(".jrow .jmain")][1].click(); await act.settle();   // a second job, straight after
+    await back();
+    out.afterTwo = [w.location.hash, showing()];
+    return out;
+  },
+
   /* the new page only: the list updates by itself, and never rebuilds the filter you are
      reading (which closed it, in the classic page) */
   async live({ act, doc, server }) {

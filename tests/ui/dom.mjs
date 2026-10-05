@@ -75,7 +75,7 @@ export async function load(ui, web, tab, settingsPayload) {
     return out.join("").replace(/\s+/g, " ").trim();
   };
   const all = (sel) => [...doc.querySelectorAll(sel)].filter(e => !hidden(e));
-  const view = () => doc.querySelector(`#view-${w.location.hash.slice(1) || "build"}`);
+  const view = () => doc.querySelector(`#view-${w.location.hash.slice(1).split("/")[0] || "build"}`);   // #jobs/8: the jobs tab
   /* the visible control whose own text (or aria-label / placeholder) is this */
   const find = (label, sel = "button, [role=button], a, summary, label, input, select, textarea, span.btn") => {
     const want = label.toLowerCase();
