@@ -1056,9 +1056,19 @@ class Need:
     seasons: list = dataclasses.field(default_factory=list)   # for a multi-season whole
 
 
+_FILE_EXT = re.compile(r"\.(mkv|mp4|m4v|avi|m2ts|ts|wmv|mov|iso|mpg|mpeg|webm)$", re.I)
+
+
+def release_title(name: str) -> str:
+    """A single-file torrent is named after its file ("...-GRP.mkv"); the release - and every
+    Usenet post of it - is named without the extension."""
+    return _FILE_EXT.sub("", (name or "").strip())
+
+
 def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
     """``whole_torrent``: one post must supply every file (single release); otherwise the
     post supplies the torrent file for ``title``'s episode (season pack from episodes)."""
+    title = release_title(title)
     n = matching.norm(title)
     ep = _EP.search(n)
     ep_tok = ep.group(0) if ep else None
@@ -1078,7 +1088,7 @@ def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
         query = n[:ep.end()]
     else:
         query = n[:n.find("-", res.end() if res else 0)] if "-" in n else n
-    return Need(label=ep_tok.upper() if ep_tok else t.name, query=query.replace(".", " ").strip(),
+    return Need(label=ep_tok.upper() if ep_tok else release_title(t.name), query=query.replace(".", " ").strip(),
                 group=group, res=res.group(0) if res else None, ep=ep_tok,
                 min_size=min_size, target=target)
 
@@ -1227,7 +1237,7 @@ class Unit:
         elif level == "season":
             label, query = f"S{season:02d}", f"{show} s{season:02d}"
         else:
-            label, query = t.name, n
+            label, query = release_title(t.name), n
         self.need = Need(label=label, query=query.replace(".", " ").strip(), group=group,
                          res=res.group(0) if res else None, ep=ep, min_size=sum(f.length for f in files),
                          target=main.name, level=level, season=season, show=show,
@@ -1286,6 +1296,7 @@ def show_prefix(title: str) -> str:
 
 
 def build_units(t: Torrent, title: str) -> Unit:
+    title = release_title(title)
     """The tree of units for a torrent: a movie or an episode is one unit; a season pack is a
     season with episodes under it; a multi-season pack is the whole with seasons under it."""
     show = show_prefix(title)

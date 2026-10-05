@@ -6,7 +6,7 @@
 import { html, useState } from "../lib.js";
 import { api } from "../api.js";
 import { refreshJobs, settings, toast } from "../store.js";
-import { plural, size } from "../util.js";
+import { plural, shortSize, size } from "../util.js";
 import { defaultOptions } from "../components/options.js";
 
 export const trackerKey = (name) => { const n = (name || "").trim().toLowerCase(); return n.endsWith("(api)") ? n.slice(0, -5).trim() : n; };
@@ -22,7 +22,7 @@ export function OtherTrackers({ j, Act }) {
     try {
       const r = await api("/api/jobs/other_trackers", { id: j.id });
       // pre-approved, seeded, and the same files (same size, when the size is known)
-      const pick = r.releases.find(x => x.approved && (x.seeders || 0) > 0 && (r.size == null || x.same_size));
+      const pick = r.releases.find(x => x.approved && (x.seeders || 0) > 0 && (r.size == null || x.same_size || x.near_size));
       if (pick) { setWent(pick); await build(pick); }
       else setFound(r);
     }
@@ -30,7 +30,7 @@ export function OtherTrackers({ j, Act }) {
     finally { setBusy(false); }
   };
   const build = async (r) => {
-    const { approved: _a, same_size: _s, ...torrent } = r;
+    const { approved: _a, same_size: _s, near_size: _n, size_diff: _d, ...torrent } = r;
     try {
       await api("/api/build", { torrent, nzbs: [], options: defaultOptions(settings.get()), other_tracker: j.id });
       await refreshJobs();                           // stay on the list: the new job shows at the top
@@ -55,7 +55,9 @@ export function OtherTrackers({ j, Act }) {
           <b>${r.indexer}</b>
           <small class="status">${[r.approved ? "pre-approved" : "not pre-approved",
             r.seeders != null ? plural(r.seeders, "seeder") : null, size(r.size),
-            found.size == null ? null : r.same_size ? "same size" : "different size - not the same files"].filter(Boolean).join(" · ")}</small>
+            found.size == null ? null : r.same_size ? "same size"
+              : r.near_size ? `same video - ${shortSize(Math.abs(r.size_diff))} ${r.size_diff < 0 ? "smaller" : "larger"} (a small file such as an .nfo)`
+              : "different size - not the same files"].filter(Boolean).join(" · ")}</small>
           <${Act} label="Build from this tracker" title=${`Build ${r.title} from ${r.indexer}, reusing the Usenet downloads already made`}
             onPress=${() => build(r)} />
         </div>`)}

@@ -374,6 +374,9 @@ def test_other_trackers_with_the_same_release_are_offered(server, monkeypatch, t
     assert status == 200
     assert [(x["indexer"], x["approved"], x["same_size"]) for x in r["releases"]] == [
         ("Approved One", True, True), ("Other", False, False)]
+    # a byte apart: the same video with a small file more or less (a tracker's own .nfo)
+    other = r["releases"][1]
+    assert other["near_size"] is True and other["size_diff"] == 1
 
 
 # ---------------------------------------------------------------- 5% or 200 MB

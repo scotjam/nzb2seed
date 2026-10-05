@@ -431,3 +431,14 @@ def test_a_build_that_stops_short_says_why_and_what_next(tmp_path, monkeypatch):
     assert "Try whole posts first" in pipeline.explain_missing(cfg, t, [nfo], [], 800, 200_800)[-1]
     big = pipeline.explain_missing(cfg, t, [nfo], [], 150_000, 200_800)[-1]
     assert "more than your limit" in big and "Override" in big
+
+
+def test_a_single_file_torrent_named_after_its_file_finds_its_posts():
+    """A tracker that names a one-file torrent after the file ("...-GRP.mkv"): Usenet posts
+    never carry the extension, so searching with it found nothing at all."""
+    name = "Film.2012.HDR.UHD.BluRay.2160p.TrueHD.Atmos.7.1.HEVC.REMUX-GRP"
+    t = parse(make_torrent(name + ".mkv", {name + ".mkv": b"x" * 1000}))
+    need = pipeline.build_units(t, t.name).need
+    assert "mkv" not in need.query and need.label == name
+    assert pipeline._fits(need, rel(name, 2000, "p")) is None
+    assert pipeline.need_for(t, t.name, True).label == name

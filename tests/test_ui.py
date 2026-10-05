@@ -309,3 +309,8 @@ def test_the_torrents_shown_are_whole_with_nzbs_found_and_can_be_narrowed_by_lan
 def test_try_whole_posts_never_says_nothing_is_missing(settings_file):
     seen = run("new", "wholeSmall", settings_file)["seen"]
     assert seen["button"] == "Try whole posts (1 part, 1 KB missing)"        # not "0.0 MB"
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_copy_without_a_trackers_small_nfo_counts_as_the_same_video(settings_file):
+    assert run("new", "othersNear", settings_file)["seen"]["sent"] == ["TrackerThree"]
