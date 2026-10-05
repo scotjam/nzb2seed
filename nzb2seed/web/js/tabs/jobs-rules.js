@@ -34,6 +34,34 @@ export const JOB_KINDS = [
 export function kindOf(j) { const k = JOB_KINDS.find(([, , fits]) => fits(j)); return k ? k[0] : "done"; }
 
 export const canRetry = (j) => BADLY_ENDED.includes(j.status) && j.can_retry;
+
+/* the Jobs bar's "Select:" choices - each ticks the jobs (shown) it fits */
+export const SELECT = [
+  ["all", "All", () => true],
+  ["failed", "Failed", j => BADLY_ENDED.includes(j.status)],
+  ["nearly", "Nearly complete", j => BADLY_ENDED.includes(j.status) && (j.extra || {}).have != null
+    && !(j.extra || {}).added && !(j.extra || {}).abandoned],
+  ["live", "Running / queued", j => isLive(j)],
+  ["done", "Completed", j => j.status === "done"],
+  ["auto", "Automatic", j => j.kind === "auto"],
+  ["manual", "Manual", j => j.kind !== "auto"],
+];
+const tkey = (n) => { const k = (n || "").trim().toLowerCase(); return k.endsWith("(api)") ? k.slice(0, -5).trim() : k; };
+/* every tracker a job is from, or was found on by Look on other trackers - for the Tracker choice */
+export function trackersOf(jobs) {
+  const names = new Map();
+  for (const j of jobs) {
+    const x = j.extra || {};
+    for (const n of [x.tracker, ...(x.others || []).map(r => r.indexer)]) if (n && !names.has(tkey(n))) names.set(tkey(n), n);
+  }
+  return [...names.values()].sort((a, b) => a.localeCompare(b));
+}
+/* the job's own tracker is this one: null (the whole job); else the release found on it, or undefined */
+export function viaTracker(j, tracker) {
+  const x = j.extra || {}, k = tkey(tracker);
+  if (tkey(x.tracker) === k) return null;
+  return (x.others || []).find(r => tkey(r.indexer) === k);
+}
 /* the dot's colour: a job that ended by skipping its release built nothing - grey, not green */
 /* ...and one handed to qBittorrent to download the rest: orange while it does, green once complete */
 export const dotOf = (j) => j.extra?.added ? (j.extra.complete ? "done" : "client")
