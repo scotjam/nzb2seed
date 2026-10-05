@@ -454,6 +454,16 @@ class QBittorrent:
         path = "torrents/stop" if self.api_version() >= (2, 11) else "torrents/pause"
         self._ok(self._req("POST", path, data={"hashes": infohash}), "stop")
 
+    def add_tags(self, infohash: str, tags: list[str]):
+        if tags:
+            self._ok(self._req("POST", "torrents/addTags", data={"hashes": infohash, "tags": ",".join(tags)}),
+                     "addTags")
+
+    def remove_tags(self, infohash: str, tags: list[str]):
+        if tags:
+            self._ok(self._req("POST", "torrents/removeTags", data={"hashes": infohash, "tags": ",".join(tags)}),
+                     "removeTags")
+
     def start(self, infohash: str):
         path = "torrents/start" if self.api_version() >= (2, 11) else "torrents/resume"
         self._ok(self._req("POST", path, data={"hashes": infohash}), "start")

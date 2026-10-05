@@ -244,7 +244,7 @@ def test_a_few_kb_short_is_not_saved_as_complete():
 class RecheckQbit:
     """qBittorrent whose recheck finds ``found`` of the torrent."""
     def __init__(self, found):
-        self.found, self.added, self.started = found, False, []
+        self.found, self.added, self.started, self.tags = found, False, [], []
 
     def info(self, h):
         return {"state": "stoppedDL", "progress": self.found} if self.added else None
@@ -260,6 +260,12 @@ class RecheckQbit:
 
     def start(self, h):
         self.started.append(h)
+
+    def add_tags(self, h, tags):
+        self.tags.append(("+", tags))
+
+    def remove_tags(self, h, tags):
+        self.tags.append(("-", tags))
 
 
 def finish(app, monkeypatch, tmp_path, found):
@@ -278,6 +284,26 @@ def test_it_starts_when_the_recheck_agrees(server, monkeypatch, tmp_path):  # no
     app, _ = server
     job, done, qb = finish(app, monkeypatch, tmp_path, found=0.99)
     assert done.status == "done" and qb.started == [H] and job.extra["added"]
+    assert qb.tags == []                     # within the limit: taken to be safe, its tags kept
+
+
+def test_an_override_outside_the_limit_is_tagged_after_the_tracker(server, monkeypatch, tmp_path):  # noqa: F811
+    """Added anyway, missing more than the limit: what comes from the tracker may bring
+    seeding obligations there - so it is tagged "<tracker> (nzb)", not as an nzb2seed build."""
+    import dataclasses
+    app, _ = server
+    app.cfg = dataclasses.replace(app.cfg, qbit_tags=["nzb2seed"])
+    t = tmp_path / "x.torrent"
+    t.write_bytes(b"d4:infod4:name1:xee")
+    qb = RecheckQbit(0.80)
+    monkeypatch.setattr(app, "_qbit", lambda: qb)
+    job = failed_part_way(app, have=0.80)
+    job.extra["torrent_path"] = str(t)
+    done = app.finish_in_client(job, override=True)
+    wait(lambda: done.status in ("done", "failed"))
+    assert done.status == "done" and qb.started == [H]
+    assert qb.tags == [("-", ["nzb2seed"]), ("+", ["Some Tracker (nzb)"])]
+    assert app.client_tag("Some Tracker (API)") == "Some Tracker (nzb)"
 
 
 def test_it_stays_stopped_when_the_recheck_finds_too_little(server, monkeypatch, tmp_path):  # noqa: F811
@@ -285,7 +311,7 @@ def test_it_stays_stopped_when_the_recheck_finds_too_little(server, monkeypatch,
     towards a hit-and-run, so it is never started - and the job now says 90%."""
     app, _ = server
     job, done, qb = finish(app, monkeypatch, tmp_path, found=0.90)
-    assert done.status == "failed" and qb.started == []
+    assert done.status == "failed" and qb.started == [] and qb.tags == []     # nothing downloaded: tags kept
     assert "90.0000%" in done.result and "stays stopped" in done.result
     assert job.extra["have"] == 0.90 and job.extra["in_client"] and not job.extra.get("added")
     assert not app.nearly_enough(job.extra)                      # its Add button goes
