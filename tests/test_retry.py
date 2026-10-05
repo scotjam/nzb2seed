@@ -242,7 +242,7 @@ def test_a_repair_that_cannot_finish_leaves_it_stopped_and_says_how_far(tmp_path
         tmp_path, {"pick2", "pick4", "alt20", "alt21", "alt40", "alt41"})     # no good copy anywhere
     out = str(tmp_path / "complete")
     monkeypatch.setattr(pipeline, "next_post",
-                        lambda cfg, pr, slot, ask=True: (slot.queue.pop(0) if slot.queue else None))
+                        lambda cfg, pr, slot, ask=True, note="": (slot.queue.pop(0) if slot.queue else None))
     qb = HashingQbit(t, out)
     with pytest.raises(pipeline.Incomplete) as e:
         pipeline.finish(cfg, Options(unattended=True), t, tfile, dirs, out, qb, None,

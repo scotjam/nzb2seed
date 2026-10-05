@@ -1022,6 +1022,13 @@ def group_of(name: str) -> str | None:
     m = re.search(r"[\s._]-[\s._]([A-Za-z0-9]{2,20})\)\s*(?:\.[A-Za-z0-9]{2,4})?(?:-x?(?:post|repo))?\s*$", s, re.I)
     if m and m.group(1).lower() not in _NOT_GROUP:
         return m.group(1).lower()
+    # "Show (2004) - S04E01 - Title - [Bluray-1080p] [GRP]": named the way Sonarr/Radarr do,
+    # the group is the last bracketed word, after the quality bracket
+    m = re.search(r"\[[^\]]+\]\s*\[([A-Za-z][A-Za-z0-9]{1,19})\]\s*(?:\.[A-Za-z0-9]{2,4})?\s*$", s)
+    if m and m.group(1).lower() not in _NOT_GROUP and not _RES.search(m.group(1).lower()) \
+            and not re.fullmatch(r"(?i)[xh]\.?26[45]|hevc|avc|av1|eng(lish)?|multi|proper|repack|"
+                                 r"remux|hdr(10)?|dv|atmos|truehd|dts|aac|eac3|ddp?\d?", m.group(1)):
+        return m.group(1).lower()
     m_res, m_ep = _RES.search(matching.norm(s)), _EP.search(matching.norm(s))
     # find the anchor in the raw name (norm only swaps separators, so positions line up)
     anchor = 0
@@ -1153,7 +1160,7 @@ def find_alternatives(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release
 
 
 def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
-                 known: list[Release] = ()) -> Release | None:
+                 known: list[Release] = (), note: str = "") -> Release | None:
     """Nothing fits automatically: show the search results and let the person pick - but
     not one whose name shows another release group or another resolution than the
     torrent's file: those can never match it byte for byte. A name that shows no group or
@@ -1174,6 +1181,8 @@ def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
                 "grabs": r.grabs, "publish_date": r.publish_date, "note": _fits(need, r) or ""} for r in results]
     prompt = (f"No automatic replacement for {need.label}. Pick the {need.group.upper() + ' ' if need.group else ''}"
               f"NZB to download instead - it has to hold {need.target} ({gb(need.min_size)}).")
+    if note:
+        prompt += " " + note
     idx = report_ask(prompt, choices)
     if idx is None:
         return None
@@ -1796,7 +1805,7 @@ def usenet_multi(cfg: Config, pr: Prowlarr, sab: SABnzbd, t: Torrent, groups: li
     return dirs, nzos
 
 
-def next_post(cfg: Config, pr: Prowlarr, slot, ask: bool = True) -> Release | None:
+def next_post(cfg: Config, pr: Prowlarr, slot, ask: bool = True, note: str = "") -> Release | None:
     """The next post to try for a unit when repairing: queued ones, then other posts of the
     same release group (searched once), then whatever the person picks."""
     while True:
@@ -1809,7 +1818,7 @@ def next_post(cfg: Config, pr: Prowlarr, slot, ask: bool = True) -> Release | No
             slot.queue = find_alternatives(cfg, pr, slot.need, slot.tried, slot.known)
             if slot.queue:
                 continue
-        return ask_for_post(cfg, pr, slot.need, slot.tried, slot.known) if ask else None
+        return ask_for_post(cfg, pr, slot.need, slot.tried, slot.known, note) if ask else None
 
 
 def remove_rejected(rejected: list[tuple[str, str]]):
@@ -1973,10 +1982,24 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
         owned.save()
         info(f"replaced {by_rel[rel].name} with the copy from {used.title} ({used.indexer})")
 
+    def stop_note() -> str:
+        """What stopping now means - so the question is not only "which NZB"."""
+        short = len(pending) * t.piece_length
+        pct = short / (t.total_size or 1) * 100
+        cfg = rt.cfg
+        within = pct < float(cfg.nearly_complete_percent or 5) and short < float(cfg.nearly_complete_mb or 200) * 1024 ** 2
+        tracker = getattr(_this_build, "tracker", "") or "the tracker"
+        return (f"Or stop the build here: about {exact_gb(short)} ({pct:.1f}%) would be missing, "
+                + ("within your nearly-complete limit - Add to torrent client then downloads it"
+                   if within else
+                   f"more than your limit of {float(cfg.nearly_complete_percent or 5):g}% or "
+                   f"{float(cfg.nearly_complete_mb or 200):g} MB - Override can still add it to download")
+                + f" from {tracker}.")
+
     def fetch_copy(f) -> tuple[str, Release] | None:
         slot = file_slot[f.relpath]
         while True:
-            rel = next_post(rt.cfg, rt.pr, slot, not rt.unattended)
+            rel = next_post(rt.cfg, rt.pr, slot, not rt.unattended, stop_note())
             if rel is None:
                 return None
             slot.tried.append(rel)
