@@ -7,6 +7,7 @@ away. Nothing of it is deleted until the person says so.
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -559,3 +560,27 @@ def test_a_season_grab_still_lacking_files_can_be_grabbed_again_with_whole_posts
     status, r = call(url + "/api/jobs/whole_posts", *AUTH, body={"id": job.id})
     assert status == 200 and started.wait(5)
     assert seen == {"sid": 7, "sn": 1, "whole": True} and job.retried_as == r["id"]
+
+
+def test_a_build_handed_to_qbittorrent_turns_complete_from_its_change_feed(server, monkeypatch):  # noqa: F811
+    """No timer of nzb2seed's own and no reloading: it follows qBittorrent's change feed while
+    a handed-over build is downloading the rest, and stops once none is."""
+    app, _ = server
+    real_sleep = time.sleep
+    monkeypatch.setattr(gui.time, "sleep", lambda s: real_sleep(0.01))
+    feed = [{"rid": 1, "full_update": True, "torrents": {H: {"progress": 0.97}}},
+            {"rid": 2, "torrents": {}},
+            {"rid": 3, "torrents": {H.upper(): {"progress": 1.0}}}]
+    asked = []
+
+    class Q:
+        def sync_maindata(self, rid):
+            asked.append(rid)
+            return feed.pop(0) if feed else {"rid": rid, "torrents": {}}
+    monkeypatch.setattr(app, "_qbit", lambda: Q())
+    job = failed_part_way(app, have=0.97)
+    job.extra = {**job.extra, "added": True}
+    app.watch_clients()
+    wait(lambda: job.extra.get("complete"))
+    assert "complete in qBittorrent" in job.result and asked[:3] == [0, 1, 2]
+    wait(lambda: not app._watching)                       # nothing left to follow: it stops

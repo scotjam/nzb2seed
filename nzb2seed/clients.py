@@ -454,6 +454,10 @@ class QBittorrent:
         path = "torrents/stop" if self.api_version() >= (2, 11) else "torrents/pause"
         self._ok(self._req("POST", path, data={"hashes": infohash}), "stop")
 
+    def sync_maindata(self, rid: int = 0) -> dict:
+        """qBittorrent's change feed: everything (rid 0), then only what changed since ``rid``."""
+        return self._ok(self._req("GET", "sync/maindata", params={"rid": rid}), "sync").json()
+
     def add_tags(self, infohash: str, tags: list[str]):
         if tags:
             self._ok(self._req("POST", "torrents/addTags", data={"hashes": infohash, "tags": ",".join(tags)}),

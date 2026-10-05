@@ -174,7 +174,8 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: var(--idle); }
 .dot.running { background: var(--torrent); animation: pulse 1.4s ease-in-out infinite; }
 .dot.done { background: var(--ok); }
-.dot.skipped { background: var(--idle); }            /* ended without building anything */
+.dot.skipped { background: var(--idle); }
+.dot.client { background: var(--warn); }              /* in qBittorrent, downloading the rest */            /* ended without building anything */
 .dot.failed { background: var(--bad); }
 .dot.cancelled, .dot.interrupted { background: var(--warn); }
 .dot.waiting { background: var(--warn); animation: pulse 1.4s ease-in-out infinite; }

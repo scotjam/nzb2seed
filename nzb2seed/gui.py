@@ -608,6 +608,7 @@ class App:
                     report.warn(f"could not change its tags in qBittorrent: {e}")
             qb.start(h)
             job.extra = {**(job.extra or {}), "added": True}
+            self.watch_clients()                 # tells the page the moment it is complete
             self.store.changed(urgent=True)
             report.info("its Usenet downloads are cleared once the torrent is complete")
             return {"result": f"in qBittorrent, downloading the last {rest}"}
@@ -666,6 +667,57 @@ class App:
                 self._clean_now.wait(3600)
                 self._clean_now.clear()
         threading.Thread(target=loop, name="cleaner", daemon=True).start()
+
+    def _waiting_in_client(self) -> dict[str, "Job"]:
+        """Builds handed to qBittorrent that are still downloading the rest, by infohash."""
+        return {(j.extra["infohash"] or "").lower(): j for j in list(self.jobs.values())
+                if (j.extra or {}).get("added") and not (j.extra or {}).get("complete")
+                and (j.extra or {}).get("infohash")}
+
+    def _complete_in_client(self, job: "Job"):
+        job.extra = {**job.extra, "complete": True}
+        job.result = "complete in qBittorrent - seeding"
+        self.store.changed(urgent=True)          # reaches the page through the live feed
+
+    _watching = False
+
+    def watch_clients(self):
+        """Follow qBittorrent's own change feed (sync/maindata: only what changed since the
+        last call) while a handed-over build is still downloading the rest, and mark it
+        complete the moment qBittorrent has all of it. Started when one is handed over (and at
+        start-up if any are); it stops by itself when none is left."""
+        with self.lock:
+            if self._watching or not self._waiting_in_client():
+                return
+            self._watching = True
+
+        def loop():
+            rid = 0
+            try:
+                while True:
+                    waiting = self._waiting_in_client()
+                    if not waiting:
+                        return
+                    qb = self._qbit()
+                    if qb is None:
+                        return
+                    try:
+                        data = qb.sync_maindata(rid)
+                    except ApiError as e:
+                        print(f"qBittorrent change feed: {e}", flush=True)
+                        time.sleep(60)
+                        rid = 0
+                        continue
+                    rid = data.get("rid", rid)
+                    for h, change in (data.get("torrents") or {}).items():
+                        job = waiting.get(h.lower())
+                        if job is not None and float(change.get("progress", 0) or 0) >= 1:
+                            self._complete_in_client(job)
+                    time.sleep(10)
+            finally:
+                with self.lock:
+                    self._watching = False
+        threading.Thread(target=loop, name="client-watch", daemon=True).start()
 
     # what the request being served asked for, so a job can be started again later
     request = threading.local()
@@ -1966,6 +2018,7 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     app.start_space_guard()
     app.start_sab_category()
     app.start_cleaner()
+    app.watch_clients()                          # builds still downloading the rest, if any
     override = (username or app.cfg.gui_username or config_mod.DEFAULT_GUI_USER, password) \
         if password is not None else None
     httpd = ThreadingHTTPServer((host, port), make_handler(app, override, allowed))
