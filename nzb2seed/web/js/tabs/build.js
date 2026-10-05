@@ -118,8 +118,9 @@ export function BuildTab({ active }) {
     redraw();
   }
 
-  async function search(e) {
+  async function search(e, again) {
     e.preventDefault();
+    if (again) queryRef.current.value = again;
     const query = queryRef.current.value.trim();
     if (!query) return queryRef.current.focus();
     s.searching = true; redraw();
@@ -201,7 +202,16 @@ export function BuildTab({ active }) {
   const shownT = s.torrents.filter(t => s.chosen.has(t.guid)
     || ((!s.whole || isWhole(t.title)) && (!s.withNzbs || hasNzbs(t)) && fitsLanguage(t.title, s.lang)));
   const hidden = s.torrents.length - shownT.length;
-  const tip = hidden > 0 && html`<p class="status rtip">${hidden} more torrent${hidden === 1 ? " is" : "s are"} not shown.
+  // Usenet found nothing at all - usually the spelling: trackers forgive a typo, Usenet
+  // indexers do not. Offered: the name the torrents themselves carry
+  const asked = (queryRef.current?.value || "").trim();
+  const better = !s.usenet.length && s.torrents.length ? namedAs(s.torrents, asked) : null;
+  const tip = hidden > 0 && !s.usenet.length && s.withNzbs ? html`<p class="status rtip">
+    No NZBs at all were found for “${asked}”, so “Only with NZBs found” hides every torrent - Usenet indexers
+    match the spelling exactly, where trackers forgive a typo.
+    ${better && html` The torrents are named like <b>${better}</b>:
+      <button type="button" class="btn" onClick=${(e) => search(e, better)}>Search for “${better}”</button>`}</p>`
+    : hidden > 0 && html`<p class="status rtip">${hidden} more torrent${hidden === 1 ? " is" : "s are"} not shown.
     For more results, untick ${[s.whole && "“Complete seasons or films only”", s.withNzbs && "“Only with NZBs found”"].filter(Boolean).join(" or ") || "nothing"}${s.lang !== "any" ? (s.whole || s.withNzbs ? ", or set the language to Any" : " - set the language to Any") : ""}.</p>`;
   const ts = sortBy(shownT.filter(t => filterMatch(t.title + " " + t.indexer, s.tfilter)
     && (!s.tgroup || groupOf(t.title).toLowerCase() === s.tgroup)), s.tsort);
@@ -361,4 +371,18 @@ function BuildBar({ s, all, picked, opts, setOpts, build }) {
           : "This torrent is being built (see Jobs); you can build it again if that build fails"}>
         ${entries.length > 1 ? `Build ${ready.length} torrents` : "Build"}</button>
     </div></div>`;
+}
+
+/* the name most of the torrents found go by (up to their year), when it is not what was
+   searched for: "The Odyssey 2026" for a search of "Odessey 2026" */
+function namedAs(torrents, asked) {
+  const count = new Map();
+  for (const t of torrents) {
+    const m = t.title.replace(/[._]+/g, " ").match(/^(.+?)\s*\(?((?:19|20)\d\d)\)?(?![0-9])/);
+    if (!m) continue;
+    const name = `${m[1].trim()} ${m[2]}`;
+    count.set(name, (count.get(name) || 0) + 1);
+  }
+  const best = [...count.entries()].sort((a, b) => b[1] - a[1])[0];
+  return best && norm(best[0]) !== norm(asked) ? best[0] : null;
 }

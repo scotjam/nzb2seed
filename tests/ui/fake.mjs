@@ -95,7 +95,8 @@ export function makeServer(settingsPayload) {
     if (path === "/api/auto/state") return AUTO;
     if (path.startsWith("/api/auto/")) return { ...AUTO, stopped: 2 };
     if (path === "/api/demand") return DEMAND;
-    if (path === "/api/search") return body.protocol === "usenet" ? { usenet: USENET.slice(2) } : { torrents: TORRENTS, usenet: USENET.slice(0, 2) };
+    if (path === "/api/search") return body.protocol === "usenet" ? { usenet: USENET.slice(2) }
+      : { torrents: TORRENTS, usenet: others.noUsenet && body.query !== "Film 2020" ? [] : USENET.slice(0, 2) };
     if (path === "/api/pair") return { usenet: USENET.slice(0, 2), groups: [["u1", "u2"]], how: "exact name" };
     if (path === "/api/previous") return { previous: [{ title: "Film.2020.1080p.BluRay-GRPA", state: "failed", indexer: "IndexerA", size: 21600000000, submitted: 1_700_000_000, note: "SABnzbd could not complete it" }] };
     if (path === "/api/build" || path === "/api/assemble" || path === "/api/season/grab" || path === "/api/series/grab") return { id: 12 };
