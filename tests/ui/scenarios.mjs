@@ -137,6 +137,22 @@ export const SCENARIOS = {
     return { button: [...row.querySelectorAll("span.btn")].map(b => b.textContent).find(t => t.startsWith("Try whole posts")) };
   },
 
+  /* the new page only: a build handed to qBittorrent is orange while it downloads the rest,
+     green once qBittorrent has it complete */
+  async clientDots({ act, doc, server }) {
+    const base = { kind: "build", status: "failed", result: "short", started: 1_700_000_000, ended: 1_700_000_100,
+                   progress: "", question: null, can_retry: true };
+    server.jobs.unshift(
+      { ...base, id: 93, title: "Show.S02.1080p.BluRay-GRPK", extra: { have: 0.99, infohash: "k".repeat(40), tracker: "TrackerOne", added: true } },
+      { ...base, id: 94, title: "Show.S03.1080p.BluRay-GRPK", extra: { have: 0.99, infohash: "m".repeat(40), tracker: "TrackerOne", added: true, complete: true } });
+    await act.go("jobs");
+    await act.settle();
+    const row = (t) => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes(t));
+    return { downloading: row("Show.S02.1080p").querySelector(".dot").className,
+             complete: row("Show.S03.1080p").querySelector(".dot").className,
+             says: row("Show.S03.1080p").querySelector(".jretry").textContent.trim() };
+  },
+
   /* the new page only: a skipped automatic build gets a grey dot, a built one a green one */
   async skippedDot({ act, doc, server }) {
     server.jobs.unshift({ id: 90, title: "auto: Film.2026.2160p.WEB-GRPQ", kind: "auto", status: "done",

@@ -352,3 +352,10 @@ def test_a_tracker_without_a_limit_is_asked_about_on_the_job(settings_file):
     assert any(b.startswith("Override") for b in seen["before"])           # still possible, knowingly
     assert seen["sent"] == [{"tracker": "TrackerNine", "percent": 1, "mb": 0}]
     assert any(b.startswith("Add to torrent client (TrackerNine)") for b in seen["after"]) and not seen["asksAfter"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_build_in_qbittorrent_is_orange_then_green(settings_file):
+    seen = run("new", "clientDots", settings_file)["seen"]
+    assert seen["downloading"] == "dot client" and seen["complete"] == "dot done"
+    assert seen["says"] == "complete in qBittorrent - seeding"

@@ -1067,6 +1067,69 @@ class Need:
 _FILE_EXT = re.compile(r"\.(mkv|mp4|m4v|avi|m2ts|ts|wmv|mov|iso|mpg|mpeg|webm)$", re.I)
 
 
+GAP_MIN = 256 << 10      # zero bytes in a row this long are a missing article, not data
+
+
+def repaired(slot: dict | None) -> bool:
+    """Did SABnzbd check this download against its repair data (par2)? Then every article
+    that was missing has been rebuilt - or SABnzbd would have failed it."""
+    for stage in (slot or {}).get("stage_log") or []:
+        if (stage.get("name") or "").lower() in ("repair", "verify"):
+            text = " ".join(str(a) for a in stage.get("actions") or []).lower()
+            if text and "no par2" not in text:
+                return True
+    return False
+
+
+_NONZERO = re.compile(rb"[^\x00]")
+
+
+def article_gaps(d: str, min_size: int = 1 << 20) -> tuple[int, int]:
+    """(how many, bytes): runs of zero bytes at least an article long in the files of
+    download folder ``d`` - what a Usenet download leaves where articles were missing and
+    nothing could rebuild them. Video and archive data never has runs like these."""
+    runs = total = 0
+    zeros = b"\0" * GAP_MIN
+    for root, _, names in os.walk(d):
+        for n in names:
+            path = os.path.join(root, n)
+            if n.lower().endswith((".par2", ".nzb", ".nfo", ".sfv", ".txt")) or os.path.getsize(path) < min_size:
+                continue
+            run = 0                                   # zeros carried over from the block before
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(8 << 20)
+                    if not chunk:
+                        break
+                    i = 0
+                    if run:                           # a run going on from the last block
+                        m = _NONZERO.search(chunk)
+                        if m is None:
+                            run += len(chunk)
+                            continue
+                        run += m.start()
+                        if run >= GAP_MIN:
+                            runs, total = runs + 1, total + run
+                        run, i = 0, m.start()
+                    while True:
+                        k = chunk.find(zeros, i)
+                        if k < 0:
+                            break
+                        m = _NONZERO.search(chunk, k)
+                        if m is None:                 # runs on into the next block
+                            run = len(chunk) - k
+                            break
+                        runs, total = runs + 1, total + (m.start() - k)
+                        i = m.start()
+                    if not run:                       # zeros at the very end may start a run
+                        tail = len(chunk) - len(chunk.rstrip(b"\0"))
+                        if tail and tail < GAP_MIN:
+                            run = tail
+            if run >= GAP_MIN:
+                runs, total = runs + 1, total + run
+    return runs, total
+
+
 def release_title(name: str) -> str:
     """A single-file torrent is named after its file ("...-GRP.mkv"); the release - and every
     Usenet post of it - is named without the extension."""
@@ -1234,6 +1297,7 @@ class Unit:
         self.seeded: list[Release] = []         # NZBs the person picked for exactly this unit
         self.tried: list[Release] = []
         self.searched = False
+        self.holed: tuple[str, str] | None = None   # a download with missing articles, kept as a last resort
         self.done = False
         videos = [f for f in files if f.length >= 1 << 20] or files
         groups = {g for g in (group_of(f.name) for f in videos) if g}
@@ -1598,6 +1662,13 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         while True:
             rel = next_candidate(u)
             if rel is None:
+                if u.holed:
+                    d, nzo = u.holed
+                    warn(f"{u.need.label}: no complete post found - using the incomplete one; the piece "
+                         "check finds what its missing articles left out")
+                    satisfied(u, d)
+                    resolve(u, d, nzo)
+                    return
                 if u.children:
                     split(u)
                     return
@@ -1691,6 +1762,23 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             u, rel = batch[nzo]
             if status in SAB_DONE:
                 d = job_dir(cfg, slot_info, rel.title)
+                # "Completed" without repair data can still be missing articles: SABnzbd
+                # writes zeros where they were. Such a post is the last resort, not the first
+                try:
+                    checked = repaired(sab.history_slot(nzo)) if hasattr(sab, "history_slot") else True
+                except ApiError:
+                    checked = False
+                gaps = (0, 0) if checked else article_gaps(d)
+                if gaps[0]:
+                    warn(f"{rel.title} ({rel.indexer}) is incomplete on your Usenet provider: about "
+                         f"{max(1, round(gaps[1] / 716800))} article(s) ({gb(gaps[1])}) missing, and it has no "
+                         "repair data to rebuild them - trying other posts first")
+                    verdicts.mark(t.infohash, u.need.label, rel,
+                                  f"it is incomplete on your Usenet provider ({gb(gaps[1])} missing)")
+                    if u.holed is None:
+                        u.holed = (d, nzo)
+                    advance(u)
+                    continue
                 if satisfied(u, d):
                     resolve(u, d, nzo)
                     continue
