@@ -522,3 +522,22 @@ def test_a_download_its_repair_data_checked_is_not_scanned(tmp_path):
     data[2_000_000:2_000_100] = b"\0" * 100                   # short zeros are ordinary data
     (d / "x.mkv").write_bytes(bytes(data))
     assert pipeline.article_gaps(str(d)) == (1, 700_000)
+
+
+@pytest.mark.parametrize("post,same", [
+    ("show.s06.bluray.1080p.x265-grpi", True),         # the group posted it without the year
+    ("show.2004.s06.1080p.web-grpi", True),            # the same year, without brackets
+    ("show.(2004).s06.1080p-grpi", True),
+    ("show.1987.s06.1080p-grpi", False),               # another year: another show
+    ("other.show.s06.1080p-grpi", False),
+])
+def test_a_year_the_tracker_added_does_not_hide_the_groups_posts(post, same):
+    assert pipeline.same_show(post, "show.(2004).") is same
+
+
+def test_a_season_with_a_year_in_its_name_searches_without_it():
+    t = parse(make_torrent("Show (2004) S06 Bluray 1080p x265-GRPI",
+                           {f"Show.S06E0{i}.1080p.Bluray.x265-GRPI.mkv": b"x" * (1000 + i) for i in (1, 2)}))
+    root = pipeline.build_units(t, t.name)
+    assert root.need.query == "show  s06" and "2004" not in root.children[0].need.query
+    assert pipeline.drop_year("1923.") == "1923."                 # a title that is a year stays
