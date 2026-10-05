@@ -1167,7 +1167,7 @@ def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
 def _fits(need: Need, r: Release) -> str | None:
     """Why ``r`` cannot be the alternative (None = it can)."""
     n = matching.norm(r.title)
-    if need.show and not n.startswith(need.show):
+    if need.show and not same_show(n, need.show):
         return "other title"
     if need.ep and not re.search(rf"(?<![a-z0-9]){need.ep}(?![0-9])", n):
         return "other episode"
@@ -1307,9 +1307,9 @@ class Unit:
         res = _RES.search(n) or next((m for m in (_RES.search(matching.norm(f.name)) for f in videos) if m), None)
         main = max(files, key=lambda f: f.length)
         if level == "episode":
-            label, query = ep.upper(), f"{show} {ep}"
+            label, query = ep.upper(), f"{drop_year(show)} {ep}"   # finds posts with the year or without
         elif level == "season":
-            label, query = f"S{season:02d}", f"{show} s{season:02d}"
+            label, query = f"S{season:02d}", f"{drop_year(show)} s{season:02d}"
         else:
             label, query = release_title(t.name), n
         self.need = Need(label=label, query=query.replace(".", " ").strip(), group=group,
@@ -1360,6 +1360,27 @@ def _season_episode(t: Torrent, f) -> tuple[int | None, str | None]:
         return int(re.match(r"s(\d+)", m.group(0)).group(1)), m.group(0)
     s = re.search(r"(?<![a-z0-9])(?:s|season\.?)(\d{1,4})(?![0-9e])", matching.norm(rel))
     return (int(s.group(1)) if s else None), None
+
+
+_SHOW_YEAR = re.compile(r"(?<=\.)\(?(?:19|20)\d\d\)?\.$")
+
+
+def drop_year(show: str) -> str:
+    """'entourage.(2004).' -> 'entourage.': trackers often add the year to a show's name
+    where the group's own posts have none. A name that is only a year is left as it is."""
+    return _SHOW_YEAR.sub("", show)
+
+
+def same_show(name: str, show: str) -> bool:
+    """Is normalised ``name`` of this show? Its own spelling, or without the year the
+    tracker added - but not with another year: that can be another show (a remake)."""
+    if name.startswith(show):
+        return True
+    bare = drop_year(show)
+    if bare == show or not name.startswith(bare):
+        return False
+    other = re.match(r"\(?((?:19|20)\d\d)\)?(?![0-9])", name[len(bare):])
+    return other is None or other.group(1) in show            # no year, or the same one
 
 
 def show_prefix(title: str) -> str:
