@@ -608,3 +608,49 @@ def test_a_build_left_stopped_says_seeding_once_it_is_started(server, monkeypatc
     wait(lambda: built.result == "100.0% (seeding)")
     wait(lambda: gone.result == "100.0% (no longer in qBittorrent)")
     wait(lambda: not app._watching)                       # nothing left to follow
+
+
+def test_a_job_ticked_via_another_tracker_goes_to_qbittorrent_as_that_torrent(server, monkeypatch, tmp_path):  # noqa: F811
+    """Not built from Usenet: that tracker's torrent, laid out from what is already on disk,
+    and qBittorrent downloads the rest from it - however much (more than it allows is tagged)."""
+    import dataclasses
+    from nzb2seed import pipeline
+    from nzb2seed.pipeline import Incomplete
+    app, url = server
+    app.cfg = dataclasses.replace(app.cfg, qbit_tags=["nzb2seed"], output_dir=str(tmp_path / "out"))
+    placed = tmp_path / "out" / "Film"
+    placed.mkdir(parents=True)
+    (placed / "film.mkv").write_bytes(b"x")
+    rec = pipeline.owned_record(app.cfg, type("T", (), {"infohash": H})())
+    rec.add_file(str(placed / "film.mkv")); rec.save()
+    other = {"title": "Film.2020.1080p-GRP", "protocol": "torrent", "indexer": "Other Tracker", "indexer_id": 2,
+             "size": 10, "guid": "tl1", "download_url": "", "info_url": "", "publish_date": "", "grabs": 0,
+             "seeders": 5, "files": None}
+    job = failed_part_way(app, have=0.80)
+    job.extra = {**job.extra, "others": [other]}
+    seen, started, tags = {}, [], []
+
+    class Q:
+        def info(self, h): return None
+        def start(self, h): started.append(h)
+        def add_tags(self, h, t): tags.append(("+", t))
+        def remove_tags(self, h, t): tags.append(("-", t))
+    monkeypatch.setattr(app, "_qbit", lambda: Q())
+    monkeypatch.setattr(app, "_sab", lambda: None)
+    monkeypatch.setattr(gui.Prowlarr, "fetch", lambda self, r: b"torrent")
+    monkeypatch.setattr(pipeline, "save_torrent", lambda cfg, data: (type("T", (), {"infohash": "c" * 40})(), "/t/x.torrent"))
+    monkeypatch.setattr(pipeline, "qbit_preflight", lambda qb, t: None)
+
+    def finish(cfg, opts, t, path, sources, out, qb, existing, **kw):
+        seen.update(sources=sources, kw=kw, opts=opts)
+        raise Incomplete("short", 0.80, "c" * 40, path, out, in_client=True, short=2 * 1024 ** 3)
+    monkeypatch.setattr(pipeline, "finish", finish)
+    status, r = call(url + "/api/jobs/add_via", *AUTH, body={"id": job.id, "guid": "tl1"})
+    assert status == 200
+    nj = app.jobs[r["id"]]
+    wait(lambda: nj.status == "done")
+    assert seen["sources"] == [str(placed)] and seen["opts"].no_cleanup           # from what is here, nothing deleted
+    assert started == ["c" * 40] and nj.extra["added"] and nj.extra["tracker"] == "Other Tracker"
+    assert tags == [("-", ["nzb2seed"]), ("+", ["Other Tracker (nzb)"])]           # 20%: more than it allows
+    assert job.extra["added_via"] == "Other Tracker"
+    assert call(url + "/api/jobs/add_via", *AUTH, body={"id": job.id, "guid": "nope"})[0] == 400

@@ -65,8 +65,16 @@ INTENDED = [
      lambda m: "Always add, for these trackers [" + ", ".join(
          re.findall(r"\[x\] (\S+)", m.group(1))) + "]"),
     # the Jobs tab tells you to abandon old jobs so their downloads can be cleared
-    (re.compile(r" ?Tip: abandoning old jobs allows nzb2seed to clear old downloads relating to those jobs - "
-                r"be sure to abandon old jobs on your jobs list after you're done with them\. ?"), " "),
+    (re.compile(r" ?Tip: clearing old jobs from the list lets nzb2seed clear the downloads they made - "
+                r"clear them once you are done with them \(Clear from list, delete files does it at once\)\. ?"), " "),
+    # ...and its confirmations name them so
+    (re.compile(r"^Clear (\d+) job\(s\) from the list\?"), r"Remove \1 job(s) from the list?"),
+    (re.compile(r"\(use Clear from list, delete files to clear them now\)"), "(use Remove and delete downloads to clear them now)"),
+    # the Jobs bar: Select: and Action:, actions named by what they do
+    (re.compile(r"Select: All Failed Nearly complete Running / queued Completed Automatic Manual None (?:\[Tracker.\] )?"
+                r"Action: Retry selected Cancel selected \(kept on list\) Add to torrent client \(download the rest\) "
+                r"Clear from list, keep files Clear from list, delete files"),
+     "Tick all that failed Try again Add to torrent client Abandon Remove from list Clear auto jobs from queue"),
     # removing a job from the list now frees its Usenet downloads (within the hour)
     (re.compile(r"Their Usenet downloads are cleared within the hour, once nothing else needs them "
                 r"\(use Remove and delete downloads to clear them now\)\. Nothing in qBittorrent and no file a build "
@@ -375,3 +383,12 @@ def test_a_resolution_folds_away_under_its_group(settings_file):
     assert seen["arrow"] == "▾" and seen["items"] >= 1
     assert seen["folded"] == "▸" and seen["foldedItems"] == 0 and seen["says"].endswith("torrent" + ("s" if seen["items"] > 1 else ""))
     assert seen["groupsStillOpen"] >= 1 and seen["again"] == seen["items"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_select_by_tracker_ticks_jobs_from_it_and_via_it(settings_file):
+    seen = run("new", "byTracker", settings_file)["seen"]
+    assert "TrackerSix" in seen["options"] and "TrackerOne" in seen["options"]
+    assert seen["ticked"] == ["Show.S04.1080p.BluRay-GRPV", "Show.S05.1080p.BluRay-GRPV via TrackerSix"]
+    assert seen["label"] == "Add to torrent client (download the rest) (1)"   # S04: TrackerSix has no limit set
+    assert seen["sent"] == [["/api/jobs/add_via", {"id": 96, "guid": "six1"}]]

@@ -137,6 +137,31 @@ export const SCENARIOS = {
     return { button: [...row.querySelectorAll("span.btn")].map(b => b.textContent).find(t => t.startsWith("Try whole posts")) };
   },
 
+  /* the new page only: Select by tracker - a job from it as itself, a job it was found on
+     by Look on other trackers via it; Add sends each the way it goes */
+  async byTracker({ act, doc, calls, server }) {
+    const base = { kind: "build", status: "failed", result: "short", started: 1_700_000_000, ended: 1_700_000_100,
+                   progress: "", question: null, can_retry: true };
+    const other = { title: "Show.S05.1080p.BluRay-GRPV", protocol: "torrent", indexer: "TrackerSix", guid: "six1", size: 10 };
+    server.jobs.unshift(
+      { ...base, id: 95, title: "Show.S04.1080p.BluRay-GRPV", extra: { have: 0.999, short: 900, infohash: "p".repeat(40), tracker: "TrackerSix", seeders: 3 } },
+      { ...base, id: 96, title: "Show.S05.1080p.BluRay-GRPV", extra: { have: 0.80, infohash: "q".repeat(40), tracker: "TrackerOne", seeders: 3, others: [other] } });
+    server.settingsLimit?.();
+    await act.go("jobs");
+    await act.settle();
+    const sel = doc.querySelector('select[aria-label="Select by tracker"]');
+    const options = [...sel.options].map(o => o.value).filter(Boolean);
+    sel.value = "TrackerSix"; sel.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+    await act.settle();
+    const ticked = [...doc.querySelectorAll(".jrow")].filter(r => r.querySelector("input").checked)
+      .map(r => r.querySelector(".t").textContent.replace(/\s+/g, " ").trim());
+    const add = [...doc.querySelectorAll("#jobbar button")].find(b => b.textContent.startsWith("Add to torrent client"));
+    const label = add.textContent;
+    const n = calls.length;
+    add.click(); await act.settle();
+    return { options, ticked, label, sent: calls.slice(n).filter(c => /add_via|add_to_client/.test(c.path)).map(c => [c.path, c.body]) };
+  },
+
   /* the new page only: a resolution folds away under its release group, like the group does */
   async resFold({ act, doc }) {
     await act.go("build");
@@ -304,9 +329,9 @@ export const SCENARIOS = {
     const row = [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Show.S02.1080p.WEB-GRPB"));
     row.querySelector("input[type=checkbox]").click();
     await act.settle();
-    const why = [...doc.querySelectorAll("#jobbar button")].find(b => b.textContent.startsWith("Remove from list")).title;
+    const why = [...doc.querySelectorAll("#jobbar button")].find(b => b.textContent.startsWith("Clear from list, keep files")).title;
     const n = calls.length;
-    await act.click("Cancel (1)", "button");
+    await act.click("Cancel selected (kept on list) (1)", "button");
     return { why, sent: calls.slice(n).map(c => c.path) };
   },
 
@@ -398,20 +423,25 @@ export const SCENARIOS = {
   },
 
 
-  async jobs({ act, calls }) {
+  async jobs({ act, calls, doc }) {
+    // the bar was redesigned (Select: / Action:) - compared here is what the page does, not
+    // its wording: the old name is clicked where it is, the new one where that is
+    const press = async (...labels) => {
+      const b = [...doc.querySelectorAll("#jobbar button")].find(x => labels.some(l => x.textContent.trim().startsWith(l)) && !x.disabled);
+      b.click(); await act.settle();
+    };
     await act.go("jobs");
-    const out = { list: act.text(act.view().querySelector("#joblist")), bar: act.text(act.view().querySelector("#jobbar")) };
+    const out = { list: act.text(act.view().querySelector("#joblist")) };
     await act.choose("Show only jobs of one kind", "nearly");
     out.nearly = act.text(act.view().querySelector("#joblist"));
     const n = calls.length;
-    await act.click("Tick all shown that failed");
-    out.ticked = act.text(act.view().querySelector("#jobbar"));
-    await act.click("Add to torrent client (1)", "button");
+    await press("Tick all shown that failed", "Failed");
+    await press("Add to torrent client");
     out.added = since(calls, n);
     await act.choose("Show only jobs of one kind", "all");
     const m = calls.length;
-    await act.click("Tick all that failed");
-    await act.click("Remove from list", "button");
+    await press("Tick all that failed", "Failed");
+    await press("Remove from list", "Clear from list, keep files");
     out.removed = since(calls, m);
     return out;
   },

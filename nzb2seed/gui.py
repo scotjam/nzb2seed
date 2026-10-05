@@ -547,6 +547,63 @@ class App:
             name = urlsplit(info["tracker"]).hostname or ""
         return f"{(name or 'tracker').replace(',', ' ')} (nzb)"
 
+    def add_via_tracker(self, job: "Job", r: dict) -> "Job":
+        """Add another tracker's torrent of a job's release to qBittorrent, laid out from what
+        is already on disk for the job (the files its build placed, and its downloads), and let
+        qBittorrent download the rest from that tracker - nothing is built from Usenet. Asked
+        for from the Jobs bar (Add to torrent client, ticked via a tracker); more than that
+        tracker's limit coming from it is tagged "<tracker> (nzb)", as with Override."""
+        x = dict(job.extra or {})
+        rel = _rel(r)
+
+        def run(cfg):
+            qb = self._qbit()
+            if qb is None:
+                raise Abort("no qBittorrent is set up")
+            report.step(f"Downloading .torrent from {rel.indexer}")
+            pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
+            t, path = pipeline_mod.save_torrent(cfg, pr.fetch(rel))
+            first = x.get("infohash") or ""
+            placed = pipeline_mod.owned_record(cfg, type("T", (), {"infohash": first})()) if first else None
+            placed_dirs = sorted({os.path.dirname(f) for f in (placed.files if placed else ()) if os.path.isfile(f)})
+            sab = self._sab()
+            disk_dirs = pipeline_mod.found_on_disk(cfg, sab, t, (first,) if first else ())[0] if sab else []
+            sources = placed_dirs + [d for d in disk_dirs if d not in placed_dirs]
+            if not sources:
+                raise Abort("nothing of it is on disk to start from")
+            # the first torrent in qBittorrent uses its files: they are linked, never moved
+            first_in_client = bool(first and qb.info(first))
+            existing = pipeline_mod.qbit_preflight(qb, t)
+            out_dir = cfg.output_dir or os.path.dirname(sources[0])
+            opts = pipeline_mod.Options(no_cleanup=True)          # nothing deleted on the way
+            try:
+                return pipeline_mod.finish(cfg, opts, t, path, sources, out_dir, qb, existing,
+                                           sources_are_ours=not first_in_client,
+                                           keep_dirs=placed_dirs if first_in_client else [], ours_dirs=[])
+            except pipeline_mod.Incomplete as e:
+                h, frac, short = e.infohash, e.have, e.short
+            rest = f"{math.ceil((1 - frac) * 1000000) / 10000:.4f}%"
+            report.info(f"{pipeline_mod.exact_pct(frac)} is already here; downloading the other {rest} "
+                        f"from {rel.indexer} over BitTorrent")
+            if not self.short_enough(1 - frac, short, rel.indexer):
+                tag = self.client_tag(rel.indexer)
+                try:
+                    qb.remove_tags(h, [t_ for t_ in cfg.qbit_tags if t_])
+                    qb.add_tags(h, [tag])
+                    report.info(f"tagged {tag!r} in qBittorrent: {rest} comes from {rel.indexer}, more than it "
+                                "allows - it may bring seeding obligations there")
+                except ApiError as err:
+                    report.warn(f"could not change its tags in qBittorrent: {err}")
+            qb.start(h)
+            job.extra = {**(job.extra or {}), "added_via": rel.indexer}
+            self.store.changed(urgent=True)
+            return {"result": f"in qBittorrent, downloading the last {rest} from {rel.indexer}",
+                    "extra": {"added": True, "infohash": h, "tracker": rel.indexer, "have": frac, "short": short}}
+
+        nj = self.start_job(f"Add via {rel.indexer}: {job.title}", "client", run)
+        self.watch_clients()
+        return nj
+
     def finish_in_client(self, job: "Job", why: str = "", override: bool = False) -> "Job":
         """Hand a nearly-built torrent to qBittorrent to download the rest - the one place
         nzb2seed starts a torrent that is not 100% complete, and only because the person
@@ -1277,6 +1334,15 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 config_mod.save(app.cfg)
                 return self._json({"tracker": name, "limit": config_mod.limit_text(app.cfg, name),
                                    "settings": self.settings_payload()})
+            if path == "/api/jobs/add_via":
+                # Add to torrent client for a job ticked via another tracker (the Jobs bar)
+                job = self._nearly(body)
+                if job is None:
+                    return
+                r = next((o for o in (job.extra or {}).get("others") or [] if o.get("guid") == body.get("guid")), None)
+                if r is None:
+                    return self._err("that tracker's torrent is not known for this job - Look on other trackers first")
+                return self._json({"id": app.add_via_tracker(job, r).id})
             if path == "/api/jobs/whole_posts":
                 return self.whole_posts(body)
             if path == "/api/jobs/remove":
@@ -1631,6 +1697,9 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                    if matching.norm(r.title) == want and app.tracker_key(r.indexer) != own]
             out.sort(key=lambda r: (not r["approved"], not (r["same_size"] or r["near_size"]),
                                     not r["same_size"], -(r["seeders"] or 0)))
+            # kept on the job: the Jobs tab can tick it "via" one of these trackers later
+            job.extra = {**(job.extra or {}), "others": out}
+            app.store.changed(urgent=True)
             return self._json({"name": name, "size": size, "releases": out})
 
         def add_to_client(self, body):

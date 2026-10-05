@@ -1,7 +1,8 @@
 // What the job buttons do: each asks first where something is changed for good, then
 // tells the server and refreshes the list. The list stays on screen throughout.
 import { api } from "../api.js";
-import { jobs, loadSettings, nearlyLimitText, openJobId, jobScreen, refreshJobs, toast } from "../store.js";
+import { jobs, loadSettings, nearlyLimitText, openJobId, jobScreen, refreshJobs, settings, toast } from "../store.js";
+import { defaultOptions } from "../components/options.js";
 import { gb, missText, shortSize, size, trackerName } from "../util.js";
 import { canAdd, canAbandon } from "./jobs-rules.js";
 
@@ -119,8 +120,8 @@ export function abandonMany(list, done) {
 export async function removeMany(list, done) {
   const all = jobs.get();
   const open = list.filter(j => canAdd(j, all) || canAbandon(j, all)).length;
-  if (!confirm(`Remove ${list.length} job(s) from the list?\n\nTheir Usenet downloads are cleared within the hour, once nothing else needs them `
-      + `(use Remove and delete downloads to clear them now). Nothing in qBittorrent and no file a build placed for its torrent is touched. `
+  if (!confirm(`Clear ${list.length} job(s) from the list?\n\nTheir Usenet downloads are cleared within the hour, once nothing else needs them `
+      + `(use Clear from list, delete files to clear them now). Nothing in qBittorrent and no file a build placed for its torrent is touched. `
       + `Automatic torrents stay on the Automatic tab, where they can still be tried again - downloading afresh.`
       + (open ? `\n\n${open} of them still have Add to torrent client or Abandon on them - those buttons go with them, `
         + `and anything such a build left behind stays where it is.` : ""))) return;
@@ -147,6 +148,51 @@ export async function removeAndDelete(list, done) {
     toast(`Removed ${r.removed} job(s) and deleted ${r.deleted || 0} download(s), freeing ${gb(r.bytes || 0)}`
       + (r.kept?.length ? `; kept ${r.kept.length}: ${r.kept[0]}` : "") + ".");
   } catch (err) { toast("Could not remove them: " + err.message); }
+}
+
+/* Add to torrent client for the ticked: jobs as themselves (each within its tracker's limit)
+   and jobs ticked via another tracker - whose torrent is built, as Build from this tracker
+   on the job does: the downloads already made are reused */
+export async function addFromTrackers(own, via, done) {
+  if (!via.length) return addMany(own, done);           // only jobs as themselves: as ever
+  const lines = [...own.map(j => `${j.title} (${trackerName(j.extra.tracker || "tracker unknown")}): ${missText(j.extra)} missing`),
+                 ...via.map(([j, r]) => `${j.title}: ${trackerName(r.indexer)}'s torrent, from what is already here`)];
+  if (!confirm(`Add to torrent client?\n\n${lines.slice(0, 15).join("\n")}${lines.length > 15 ? `\n...and ${lines.length - 15} more` : ""}\n\n`
+      + (own.length ? "Each is within what its tracker lets you download, as you set it. " : "")
+      + (via.length ? "A job ticked via another tracker goes to qBittorrent as that tracker's torrent, laid out from the files already here; "
+        + "qBittorrent downloads the rest from that tracker - however much it is. More than that tracker allows is tagged "
+        + "after it (it may bring seeding obligations there). Nothing is built from Usenet." : ""))) return;
+  let n = 0; const bad = [];
+  for (const j of own) {
+    try { await api("/api/jobs/add_to_client", { id: j.id }); n++; } catch (err) { bad.push(`${j.title}: ${err.message}`); }
+  }
+  for (const [j, r] of via) {
+    try { await api("/api/jobs/add_via", { id: j.id, guid: r.guid }); n++; } catch (err) { bad.push(`${j.title}: ${err.message}`); }
+  }
+  done?.();
+  await refreshJobs();
+  toast(`${n} handed over` + (bad.length ? `; could not ${bad.length}: ${bad[0]}` : "."));
+}
+
+/* Clear from list, delete files: what each ticked build placed (where nothing in qBittorrent
+   uses it) and its Usenet downloads go, then the jobs leave the list */
+export async function clearAndDelete(list, done) {
+  const all = jobs.get();
+  if (!confirm(`Clear ${list.length} job(s) from the list and delete their files?\n\n`
+      + `Their Usenet downloads are deleted, and the files the builds placed for their torrents - unless a torrent in `
+      + `qBittorrent uses them, a running build is using them, or they are shared with another download. `
+      + `Nothing in qBittorrent is changed. This cannot be undone.`)) return;
+  for (const j of list.filter(j => canAbandon(j, all))) {
+    try { await api("/api/jobs/abandon", { id: j.id }); } catch { /* still cleared below */ }
+  }
+  try {
+    const r = await api("/api/jobs/remove", { ids: list.map(j => j.id), delete_downloads: true });
+    if (list.some(j => j.id === openJobId.get())) { openJobId.set(null); jobScreen.set(false); }
+    done?.();
+    await refreshJobs();
+    toast(`Cleared ${r.removed} job(s) and deleted ${r.deleted || 0} download(s), freeing ${gb(r.bytes || 0)}`
+      + (r.kept?.length ? `; kept ${r.kept.length}: ${r.kept[0]}` : "") + ".");
+  } catch (err) { toast("Could not clear them: " + err.message); }
 }
 
 /* stop the ticked running builds - nothing is deleted, and each can be tried again */
