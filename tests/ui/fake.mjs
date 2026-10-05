@@ -82,6 +82,12 @@ export function makeServer(settingsPayload) {
     { ...TORRENTS[0], indexer: "TrackerFour", guid: "t8", seeders: 30, size: 21474836481, approved: false, same_size: false }] };
   const answer = (path, body) => {
     if (path === "/api/settings") return settingsPayload;
+    if (path === "/api/trackers/limit") {
+      const b = settingsPayload.settings.behaviour;
+      b.nearly_limits = [...(b.nearly_limits || []).filter(r => r.tracker !== body.tracker),
+                         { tracker: body.tracker, percent: body.percent, mb: body.mb }];
+      return { tracker: body.tracker, limit: `${body.percent}%`, settings: settingsPayload };
+    }
     if (path === "/api/trackers") return { trackers: ["TrackerFour", "TrackerOne", "TrackerThree (API)"] };
     if (path === "/api/jobs") return JOBS;
     const m = path.match(/^\/api\/jobs\/(\d+)(\?since=(\d+))?$/);

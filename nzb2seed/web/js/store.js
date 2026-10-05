@@ -63,20 +63,33 @@ export async function loadSettings() {
   settings.set(s);
   return s;
 }
-/* how short a failed build may be and still be offered to the torrent client */
-/* the megabytes limit that goes with it: whichever of the two is reached first */
-export function nearlyMb() {
-  const v = Number(settings.get()?.settings?.behaviour?.nearly_complete_mb);
-  return Number.isFinite(v) && v > 0 ? v : 200;
+/* how much each tracker lets you download - as the server keeps it (config.tracker_limit):
+   [percent, mb] (0 = that one does not limit), or null when none is set: nothing allowed */
+const trackerKey = (n) => { const k = (n || "").trim().toLowerCase(); return k.endsWith("(api)") ? k.slice(0, -5).trim() : k; };
+export function trackerLimit(tracker) {
+  const want = trackerKey(tracker);
+  const row = (settings.get()?.settings?.behaviour?.nearly_limits || []).find(r => want && trackerKey(r.tracker) === want);
+  const pct = Number(row?.percent) || 0, mb = Number(row?.mb) || 0;
+  return pct > 0 || mb > 0 ? [pct, mb] : null;
 }
-export const nearlyLimitText = () => `${nearlyLimit()}% or ${nearlyMb()} MB`;
-/* little enough to fetch over BitTorrent: under both limits (bytes unknown: the percentage) */
+export function nearlyLimitText(tracker) {
+  const lim = trackerLimit(tracker);
+  if (!lim) return "nothing (no limit set for this tracker)";
+  const [pct, mb] = lim;
+  return [pct && `${pct}%`, mb && `${mb} MB`].filter(Boolean).join(" or ") + (pct && mb ? " - whichever is less" : "");
+}
+/* little enough to download from its tracker: under that tracker's limits (bytes unknown: the %) */
 export function shortEnough(x) {
-  return x.have != null && (1 - x.have) * 100 < nearlyLimit() && (x.short == null || x.short < nearlyMb() * 1024 ** 2);
+  const lim = x && trackerLimit(x.tracker);
+  if (!lim || x.have == null) return false;
+  const [pct, mb] = lim;
+  return (!pct || (1 - x.have) * 100 < pct) && (!mb || x.short == null || x.short < mb * 1024 ** 2);
 }
-export function nearlyLimit() {
-  const v = Number(settings.get()?.settings?.behaviour?.nearly_complete_percent);
-  return Number.isFinite(v) && v > 0 ? v : 5;
+/* set (or, both blank, clear) how much a tracker lets you download */
+export async function setTrackerLimit(tracker, percent, mb) {
+  const r = await api("/api/trackers/limit", { tracker, percent, mb });
+  settings.set(r.settings);
+  return r;
 }
 
 /* ---- the jobs: the list stays live, and one of them can be open */

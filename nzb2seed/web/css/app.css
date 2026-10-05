@@ -70,6 +70,9 @@ textarea { font-family: var(--mono); font-size: .88rem; }
 label.check { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
 label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .ticks { display: flex; flex-wrap: wrap; gap: 2px 20px; margin: 4px 0; }
+table.limits { border-collapse: collapse; width: 100%; max-width: 560px; font-size: .9rem; }
+table.limits th, table.limits td { text-align: left; padding: 3px 8px 3px 0; }
+table.limits input[type=number] { width: 5.5em; }
 .field { display: grid; gap: 4px; }
 .field > span { font-weight: 700; font-size: .92rem; }
 .field small { color: var(--ink-2); }
@@ -162,6 +165,8 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .joblist .s { font-size: .86rem; color: var(--ink-2); }
 .joblist .jretry { margin-top: 6px; }
 .joblist .jretry { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.limitask { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; flex-basis: 100%; }
+.limitask input { width: 5.5em; }
 .joblist .jretry .btn { display: inline-block; padding: 3px 10px; font-size: .84rem; }
 .joblist .jretry .info { display: inline-grid; place-items: center; width: 20px; height: 20px;
   border-radius: 50%; border: 1px solid var(--ink-2); color: var(--ink-2); font-size: .75rem;
