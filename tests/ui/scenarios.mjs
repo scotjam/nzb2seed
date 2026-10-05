@@ -102,6 +102,29 @@ export const SCENARIOS = {
     return out;
   },
 
+  /* the new page only: a build that stopped short on a tracker with no limit set asks how much
+     it allows - nothing is offered for the torrent client until it is set */
+  async limitAsk({ act, doc, calls, server }) {
+    server.jobs.unshift({ id: 92, title: "Film.2021.1080p.BluRay-GRPN", kind: "build", status: "failed",
+      result: "short", started: 1_700_000_000, ended: 1_700_000_100, progress: "", question: null, can_retry: true,
+      extra: { have: 0.99999, infohash: "n".repeat(40), tracker: "TrackerNine", short: 900, seeders: 4 } });
+    await act.go("jobs");
+    await act.settle();
+    const row = () => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Film.2021.1080p.BluRay-GRPN"));
+    const buttons = () => [...row().querySelectorAll("span.btn")].map(b => b.textContent);
+    const out = { asks: !!row().querySelector(".limitask"), before: buttons() };
+    const pct = row().querySelector('input[aria-label="Percent TrackerNine allows"]');
+    pct.value = "1"; pct.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true }));
+    await act.settle();
+    const n = calls.length;
+    row().querySelector(".limitask button").click();
+    await act.settle();
+    out.sent = calls.slice(n).filter(c => c.path === "/api/trackers/limit").map(c => c.body);
+    out.after = buttons();
+    out.asksAfter = !!row().querySelector(".limitask");
+    return out;
+  },
+
   /* the new page only: Try whole posts says how much is missing, however little */
   async wholeSmall({ act, doc, server }) {
     server.jobs.unshift({ id: 91, title: "auto: Show.S02E06.1080p.BluRay-GRPQ", kind: "auto", status: "failed",
@@ -169,22 +192,34 @@ export const SCENARIOS = {
   /* the new page only: the always-added trackers are ticked in Prowlarr's list */
   async trackers({ act, doc, calls }) {
     await act.go("settings");
-    const boxes = () => [...doc.querySelectorAll(".ticks label")].map(l => (l.querySelector("input").checked ? "[x] " : "[ ] ") + l.textContent.trim());
-    const listed = boxes();
-    await act.click("TrackerFour", "input[type=checkbox]");
-    await act.click("TrackerThree (API)", "input[type=checkbox]");
-    const after = boxes();
+    const rows = () => [...doc.querySelectorAll("table.limits tbody tr")].map(tr => {
+      const [name, pct, mb, always] = tr.children;
+      return `${name.textContent.trim()} ${pct.querySelector("input").value || "-"}% ${mb.querySelector("input").value || "-"}MB ${always.querySelector("input").checked ? "[x]" : "[ ]"}`;
+    });
+    const listed = rows();
+    const field = (label) => doc.querySelector(`input[aria-label="${label}"]`);
+    field("Always add for TrackerFour").click(); await act.settle();
+    field("Always add for TrackerThree (API)").click(); await act.settle();
+    const pct = field("Percent TrackerFour allows");
+    pct.value = "2"; pct.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); await act.settle();
+    const one = field("Percent TrackerOne allows");
+    one.value = ""; one.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); await act.settle();
+    const onemb = field("Megabytes TrackerOne allows");
+    onemb.value = ""; onemb.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); await act.settle();
+    const after = rows();
     const n = calls.length;
     await act.click("Save settings", "button");
     const sent = calls.slice(n).filter(c => c.path === "/api/settings");
-    return { listed, after, saved: sent[0]?.body.settings.behaviour.nearly_auto_trackers };
+    const b = sent[0]?.body.settings.behaviour || {};
+    return { listed, after, saved: b.nearly_auto_trackers,
+             limits: (b.nearly_limits || []).map(r => `${r.tracker} ${r.percent || 0}% ${r.mb || 0}MB`).sort() };
   },
 
   /* the new page only: a number the browser thinks is "off step" never blocks saving */
   async oddnumbers({ act, calls }) {
     await act.go("settings");
     await act.type("0 = off", "7.3");                      // "Any other disk: below (% free)"
-    await act.type("…and less than (MB) - whichever is less", "205");
+    await act.type("…and less than (MB)", "205");
     const n = calls.length;
     await act.click("Save settings", "button");
     const sent = calls.slice(n).filter(c => c.path === "/api/settings");

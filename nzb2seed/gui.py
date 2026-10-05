@@ -518,31 +518,26 @@ class App:
 
     @staticmethod
     def tracker_key(name: str) -> str:
-        """"sometracker (API)" and "Sometracker" are the same tracker."""
-        n = (name or "").strip().lower()
-        return n[:-6].strip() if n.endswith("(api)") else n
+        return config_mod.tracker_key(name)
 
     def always_adds(self, tracker: str) -> bool:
         want = self.tracker_key(tracker)
         return bool(want) and any(self.tracker_key(t) == want
                                   for t in (self.cfg.nearly_auto_trackers or []))
 
-    def nearly_limit_text(self) -> str:
-        return f"{float(self.cfg.nearly_complete_percent or 5):g}% or {float(self.cfg.nearly_complete_mb or 200):g} MB"
+    def nearly_limit_text(self, tracker: str) -> str:
+        return config_mod.limit_text(self.cfg, tracker)
 
-    def short_enough(self, fraction_missing: float, bytes_missing: int | None) -> bool:
-        """Is this little enough to fetch over BitTorrent: less than the percentage AND less
-        than the megabytes - whichever limit comes first. Bytes unknown: the percentage only."""
-        if fraction_missing * 100 >= float(self.cfg.nearly_complete_percent or 5):
-            return False
-        return bytes_missing is None or bytes_missing < float(self.cfg.nearly_complete_mb or 200) * 1024 ** 2
+    def short_enough(self, fraction_missing: float, bytes_missing: int | None, tracker: str) -> bool:
+        """Little enough to download from this tracker - by its own limit (none set: nothing)."""
+        return config_mod.within_limit(self.cfg, tracker, fraction_missing, bytes_missing)
 
     def nearly_enough(self, extra: dict | None) -> bool:
         if not extra or extra.get("have") is None:
             return False
         if extra.get("seeders") == 0:
             return False            # nobody to download the rest from: it could never finish
-        return self.short_enough(1 - float(extra["have"]), extra.get("short"))
+        return self.short_enough(1 - float(extra["have"]), extra.get("short"), extra.get("tracker") or "")
 
     @staticmethod
     def client_tag(tracker: str, info: dict | None = None) -> str:
@@ -589,15 +584,16 @@ class App:
             info = qb.info(h) or {}
             total = info.get("total_size") or info.get("size")
             short = round(total * (1 - frac)) if total else None
-            if not override and not self.short_enough(1 - frac, short):
+            if not override and not self.short_enough(1 - frac, short, x.get("tracker") or ""):
                 job.extra = {**(job.extra or {}), "have": frac, "in_client": True, "short": short}
                 self.store.changed(urgent=True)
                 raise Abort(f"qBittorrent's check found only {have} here, so {rest} would have to "
-                            f"be downloaded - at or over your limit of {self.nearly_limit_text()}. Not "
+                            f"be downloaded - more than {x.get('tracker') or 'the tracker'} allows: "
+                            f"{self.nearly_limit_text(x.get('tracker') or '')}. Not "
                             "started: the torrent stays stopped in qBittorrent (nothing deleted)")
             report.info(f"{have} is already here from Usenet; downloading the other "
                         f"{rest} over BitTorrent")
-            if not self.short_enough(1 - frac, short):
+            if not self.short_enough(1 - frac, short, x.get("tracker") or ""):
                 # added by Override, outside your limit: what comes from the tracker may bring
                 # seeding obligations there - tagged after the tracker, not as an nzb2seed build.
                 # (Within the limit - Add, Always add - it is taken to be safe and keeps its tag.)
@@ -825,7 +821,7 @@ class App:
                                 f"qBittorrent to download the missing {miss:.4f}%")
                     job.extra = {**job.extra, "auto": True}
                     self.finish_in_client(job, why=f"{e.tracker} is set to always add builds "
-                                                   f"missing less than {self.nearly_limit_text()}")
+                                                   f"missing less than {self.nearly_limit_text(e.tracker)}")
             except (Abort, ApiError, ValueError, OSError) as e:
                 job.status, job.result = "failed", str(e)
                 report.warn(str(e))
@@ -1181,6 +1177,27 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self.other_trackers(body)
             if path == "/api/jobs/add_to_client":
                 return self.add_to_client(body)
+            if path == "/api/trackers/limit":
+                # how much one tracker lets you download - set from a job that stopped short
+                # on it, or from Settings. Both blank: nothing (the tracker is forgotten)
+                name = (body.get("tracker") or "").strip()
+                if not name:
+                    return self._err("no tracker given")
+                try:
+                    pct = float(body.get("percent") or 0)
+                    mb = float(body.get("mb") or 0)
+                except (TypeError, ValueError):
+                    return self._err("the limit is a number")
+                if pct < 0 or pct > 100 or mb < 0:
+                    return self._err("a percentage from 0 to 100, and megabytes from 0")
+                key = config_mod.tracker_key(name)
+                rows = [r for r in (app.cfg.nearly_limits or []) if config_mod.tracker_key(r.get("tracker", "")) != key]
+                if pct or mb:
+                    rows.append({"tracker": name, "percent": pct, "mb": mb})
+                app.cfg = dataclasses.replace(app.cfg, nearly_limits=rows)
+                config_mod.save(app.cfg)
+                return self._json({"tracker": name, "limit": config_mod.limit_text(app.cfg, name),
+                                   "settings": self.settings_payload()})
             if path == "/api/jobs/whole_posts":
                 return self.whole_posts(body)
             if path == "/api/jobs/remove":
@@ -1554,10 +1571,14 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._err("Prowlarr reported no seeders for it, so the missing part could "
                                  "never come over BitTorrent")
             if not override and not app.nearly_enough(x):
-                return self._err(f"it is missing more than your limit of {app.nearly_limit_text()} - "
+                return self._err(f"it is missing more than {x.get('tracker') or 'its tracker'} allows: "
+                                 f"{app.nearly_limit_text(x.get('tracker') or '')} - "
                                  "use Override to add it anyway")
             if override and body.get("always"):
                 return self._err("an override is for this build only")
+            if body.get("always") and x.get("tracker") and config_mod.tracker_limit(app.cfg, x["tracker"]) is None:
+                return self._err(f"set how much {x['tracker']} lets you download first - with none set, "
+                                 "nothing of its builds is ever added")
             if body.get("always") and x.get("tracker"):
                 # from now on, every build from this tracker that stops this close is
                 # handed over without asking

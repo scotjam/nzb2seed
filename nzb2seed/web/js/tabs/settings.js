@@ -56,7 +56,7 @@ export function SettingsTab({ active }) {
 
   function readSettings() {
     const out = JSON.parse(JSON.stringify(loaded.settings));
-    for (const [k, type] of FIELDS) put(out, k, type === "bool" ? !!form[k] : parse(show(form[k]), type));
+    for (const [k, type] of FIELDS) put(out, k, type === "bool" ? !!form[k] : type === "raw" ? (form[k] || []) : parse(show(form[k]), type));
     const clean = (rows) => rows.map(r => r.map(x => x.trim())).filter(([a, b]) => a && b);
     out.paths.sab_to_local = clean(maps.sab); out.paths.local_to_qbit = clean(maps.qb);
     return out;
@@ -198,12 +198,13 @@ export function SettingsTab({ active }) {
       </fieldset>
       <fieldset>
         <h2>Builds that stop a few percent short</h2>
-        <p class="status">A build missing less than this much can be handed to qBittorrent to download the rest - many trackers let you download a few percent without it counting towards a hit-and-run. For the trackers listed below it is done without asking; everywhere else you are asked each time.</p>
-        ${grid(N("behaviour.nearly_complete_percent", "Offer it when less than (%) is missing", { min: "0", max: "50", step: "0.5" }),
-               N("behaviour.nearly_complete_mb", "…and less than (MB) - whichever is less", { min: "1", step: "1", title: "On a big torrent a percentage is a lot of data: 5% of a 20 GB season is 1 GB. The build has to be under both limits." }),
-)}
-        <${Trackers} prowlarr=${trackers} chosen=${form["behaviour.nearly_auto_trackers"] || []}
-          set=${(v) => setForm({ ...form, "behaviour.nearly_auto_trackers": v })} />
+        <p class="status">A build missing a little can be handed to qBittorrent to download the rest from the tracker - many trackers let you download some without it counting towards a hit-and-run, each its own amount.</p>
+        <${Trackers} prowlarr=${trackers} limits=${form["behaviour.nearly_limits"] || []}
+          setLimits=${(v) => setForm({ ...form, "behaviour.nearly_limits": v })}
+          chosen=${form["behaviour.nearly_auto_trackers"] || []}
+          setChosen=${(v) => setForm({ ...form, "behaviour.nearly_auto_trackers": v })} />
+        ${grid(N("behaviour.nearly_complete_percent", "Stop looking for more posts when less than (%) is missing", { min: "0", max: "50", step: "0.5", title: "With only this little missing (a sample, an .nfo), a build does not download another whole post for it - Try whole posts on the job does." }),
+               N("behaviour.nearly_complete_mb", "…and less than (MB)", { min: "1", step: "1" }))}
       </fieldset>
       <fieldset>
         <h2>Free space</h2>
@@ -250,6 +251,7 @@ const FIELDS = [
   ["behaviour.episode_source"], ["behaviour.retry_bad_pieces", "bool"], ["behaviour.peek_archives", "bool"],
   ["demand.min_sample", "int"], ["demand.age_days", "float"],
   ["behaviour.nearly_complete_percent", "float"], ["behaviour.nearly_complete_mb", "float"], ["behaviour.nearly_auto_trackers", "names"],
+  ["behaviour.nearly_limits", "raw"],
   ["space.downloads_min_percent", "float"], ["space.downloads_min_gb", "float"], ["space.output_min_percent", "float"],
   ["space.output_min_gb", "float"], ["space.min_percent", "float"], ["space.min_gb", "float"], ["space.pause_torrents", "bool"],
   ["retention.enabled", "bool"], ["retention.days", "int"],
@@ -260,18 +262,35 @@ const trackerKey = (n) => { const k = (n || "").trim().toLowerCase(); return k.e
 
 /* the trackers nearly complete builds are always added for: every torrent indexer in
    Prowlarr, ticked if it is approved - plus any approved name Prowlarr does not list */
-function Trackers({ prowlarr, chosen, set }) {
+/* how much each tracker lets you download, and whether its builds go over without asking:
+   every torrent indexer in Prowlarr, plus any tracker with a limit Prowlarr does not list */
+function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
   const known = prowlarr && (prowlarr.trackers || []), err = prowlarr?.error || "";
   const on = new Set(chosen.map(trackerKey));
   const listed = new Set((known || []).map(trackerKey));
-  const names = [...(known || []), ...chosen.filter(n => !listed.has(trackerKey(n)))];
-  const flip = (name, yes) => set(yes ? [...chosen, name] : chosen.filter(n => trackerKey(n) !== trackerKey(name)));
-  return html`<div class="field"><span>Always add, for these trackers</span>
-    ${known === null ? html`<small class="status">Asking Prowlarr for its trackers…</small>`
-      : html`<div class="ticks">${names.map(n => html`<label class="check"><input type="checkbox"
-          checked=${on.has(trackerKey(n))} onChange=${(e) => flip(n, e.target.checked)} /> ${n}</label>`)}</div>`}
-    <small class="status">${err ? `Prowlarr's trackers could not be listed (${err}) - only the approved ones are shown. `
-      : ""}Ticked: a build from that tracker that stops this close is added without asking. Unticked: you are asked each time.</small></div>`;
+  const extra = [...limits.map(r => r.tracker), ...chosen].filter(n => n && !listed.has(trackerKey(n)));
+  const names = [...(known || []), ...extra.filter((n, i) => extra.findIndex(m => trackerKey(m) === trackerKey(n)) === i)];
+  const row = (n) => limits.find(r => trackerKey(r.tracker) === trackerKey(n)) || {};
+  const setRow = (n, k, v) => {
+    const rest = limits.filter(r => trackerKey(r.tracker) !== trackerKey(n));
+    const next = { ...row(n), tracker: row(n).tracker || n, [k]: v === "" ? 0 : Number(v) };
+    setLimits(next.percent || next.mb ? [...rest, next] : rest);
+  };
+  const flip = (name, yes) => setChosen(yes ? [...chosen, name] : chosen.filter(n => trackerKey(n) !== trackerKey(name)));
+  const show = (v) => (v ? String(v) : "");
+  return html`<div class="field"><span>What each tracker lets you download</span>
+    ${known === null ? html`<small class="status">Asking Prowlarr for its trackers…</small>` : html`
+      <table class="limits"><thead><tr><th>tracker</th><th>%</th><th>MB</th><th title="Builds from it within its limit go to qBittorrent without asking">always add</th></tr></thead>
+        <tbody>${names.map(n => html`<tr>
+          <td>${n}</td>
+          <td><input type="number" min="0" max="100" step="0.1" placeholder="-" aria-label=${`Percent ${n} allows`}
+            value=${show(row(n).percent)} onInput=${(e) => setRow(n, "percent", e.target.value)} /></td>
+          <td><input type="number" min="0" step="1" placeholder="-" aria-label=${`Megabytes ${n} allows`}
+            value=${show(row(n).mb)} onInput=${(e) => setRow(n, "mb", e.target.value)} /></td>
+          <td><input type="checkbox" aria-label=${`Always add for ${n}`} checked=${on.has(trackerKey(n))}
+            onChange=${(e) => flip(n, e.target.checked)} /></td></tr>`)}</tbody></table>`}
+    <small class="status">${err ? `Prowlarr's trackers could not be listed (${err}) - only the ones with a limit are shown. `
+      : ""}Left blank, a tracker lets you download nothing: its builds that stop short go to the torrent client only by Override. With a % and/or MB set, a build missing less than that can be added - by itself, with always add ticked. A build that stops short on a tracker with nothing set asks you on the Jobs tab.</small></div>`;
 }
 
 function Maps({ label, rows, set }) {

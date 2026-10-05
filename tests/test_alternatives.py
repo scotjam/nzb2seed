@@ -424,7 +424,7 @@ def test_a_build_that_stops_short_says_why_and_what_next(tmp_path, monkeypatch):
     film = "Film 2022 1080p BluRay REMUX-GRP"
     t = parse(make_torrent(film, {f"{film}.mkv": rnd(200_000, 7), f"{film}.mkv.nfo": b"n" * 800}))
     nfo = next(f for f in t.real_files if f.name.endswith(".nfo"))
-    cfg = Config(path=str(tmp_path / "c.toml"))
+    cfg = Config(path=str(tmp_path / "c.toml"), nearly_limits=[{"tracker": "TrackerOne", "percent": 5, "mb": 200}])
     pipeline._this_build.tracker, pipeline._this_build.seeders, pipeline._this_build.settled = "TrackerOne", 3, []
     lines = pipeline.explain_missing(cfg, t, [nfo], [], 800, 200_800)
     assert "made by the group for this upload" in lines[0] and "in no pre database" in lines[0]
@@ -434,7 +434,10 @@ def test_a_build_that_stops_short_says_why_and_what_next(tmp_path, monkeypatch):
     pipeline._this_build.seeders, pipeline._this_build.settled = 3, [{"label": film, "missing": 800, "post": 1}]
     assert "Try whole posts first" in pipeline.explain_missing(cfg, t, [nfo], [], 800, 200_800)[-1]
     big = pipeline.explain_missing(cfg, t, [nfo], [], 150_000, 200_800)[-1]
-    assert "more than your limit" in big and "Override" in big
+    assert "more than TrackerOne allows" in big and "Override" in big
+    pipeline._this_build.tracker = "OtherTracker"                 # no limit set for it
+    assert "you have not set how much OtherTracker lets you download" in \
+        pipeline.explain_missing(cfg, t, [nfo], [], 800, 200_800)[-1]
 
 
 def test_a_single_file_torrent_named_after_its_file_finds_its_posts():

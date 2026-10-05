@@ -29,6 +29,19 @@ def wait(pred, timeout=5):
     assert pred()
 
 
+# the trackers these tests use let you download 5% or 200 MB - each tracker has its own
+# limit, and one with none set allows nothing (that is tested on its own, below)
+TEST_LIMITS = [{"tracker": t, "percent": 5, "mb": 200} for t in ("Some Tracker", "sometracker", "ElseTracker")]
+
+
+@pytest.fixture(autouse=True)
+def _tracker_limits(request):
+    if "server" in request.fixturenames:
+        import dataclasses
+        app, _ = request.getfixturevalue("server")
+        app.cfg = dataclasses.replace(app.cfg, nearly_limits=list(TEST_LIMITS))
+
+
 def failed_part_way(app, have=0.97, in_client=False, tracker="Some Tracker (API)"):
     def run(cfg):
         raise Incomplete(f"stopped at {have * 100:.1f}%", have, H, "/t/x.torrent", "/data",
@@ -407,16 +420,32 @@ def test_other_trackers_with_the_same_release_are_offered(server, monkeypatch, t
 
 # ---------------------------------------------------------------- 5% or 200 MB
 
-def test_nearly_complete_is_under_both_the_percentage_and_the_megabytes(server):  # noqa: F811
-    """5% of a 50 GB torrent is 2.5 GB - far too much to download on most trackers' grace,
-    so the default is 5% or 200 MB, whichever is less."""
+def test_nearly_complete_is_under_the_trackers_percentage_and_megabytes(server):  # noqa: F811
+    """Each tracker has its own limit: under both its percentage and its megabytes."""
     app, _ = server
     mb = 1024 ** 2
-    assert app.nearly_enough({"have": 0.99, "short": 50 * mb})            # 1% of 5 GB: 50 MB
-    assert not app.nearly_enough({"have": 0.99, "short": 500 * mb})       # 1% of 50 GB: 500 MB
-    assert not app.nearly_enough({"have": 0.94, "short": 10 * mb})        # 6%: over the percentage
-    assert app.nearly_enough({"have": 0.99})                              # size not known: the percentage
-    assert app.nearly_limit_text() == "5% or 200 MB"
+    t = "SomeTracker"
+    assert app.nearly_enough({"have": 0.99, "short": 50 * mb, "tracker": t})        # 1% of 5 GB: 50 MB
+    assert not app.nearly_enough({"have": 0.99, "short": 500 * mb, "tracker": t})   # 1% of 50 GB: 500 MB
+    assert not app.nearly_enough({"have": 0.94, "short": 10 * mb, "tracker": t})    # 6%: over the percentage
+    assert app.nearly_enough({"have": 0.99, "tracker": t})                          # size not known
+    assert app.nearly_limit_text(t) == "5% or 200 MB - whichever is less"
+
+
+def test_a_tracker_with_no_limit_set_allows_nothing(server, monkeypatch):  # noqa: F811
+    """Blank: nothing may be downloaded from it - however little is missing - until you
+    say how much it allows; set from the job, Add to torrent client then appears."""
+    app, url = server
+    tiny = {"have": 0.99999, "short": 900, "tracker": "Strict Tracker (API)"}
+    assert not app.nearly_enough(tiny) and "no limit set" in app.nearly_limit_text("Strict Tracker")
+    job = failed_part_way(app, have=0.99999, tracker="Strict Tracker (API)")
+    assert call(url + "/api/jobs/add_to_client", *AUTH, body={"id": job.id})[0] == 400
+    assert call(url + "/api/jobs/add_to_client", *AUTH, body={"id": job.id, "always": True})[0] == 400
+    status, r = call(url + "/api/trackers/limit", *AUTH, body={"tracker": "Strict Tracker (API)", "percent": 1, "mb": 0})
+    assert status == 200 and r["limit"] == "1%"
+    assert app.nearly_enough(tiny)                                 # now it may
+    call(url + "/api/trackers/limit", *AUTH, body={"tracker": "strict tracker", "percent": "", "mb": ""})
+    assert not app.nearly_enough(tiny)                             # blank again: nothing
 
 
 def test_a_tracker_set_to_always_add_is_not_sent_a_build_over_the_megabytes(server, monkeypatch):  # noqa: F811

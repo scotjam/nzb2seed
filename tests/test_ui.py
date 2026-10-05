@@ -39,6 +39,19 @@ INTENDED = [
     (re.compile(r" \[[x ]\] Complete seasons or films only \[[x ]\] Only with NZBs found Language \[[^\]]*\]"), ""),
     # automatic builds only take torrents the tracker posted recently (2 days by default)
     (re.compile(r" Only if the tracker posted it within \(days, 0 = any age\) \[[\d.]*\]"), ""),
+    # each tracker has its own limit: the confirmation for several says so...
+    (re.compile(r"Each is within what its tracker lets you download, as you set it\."),
+     "Only do this if TrackerOne lets you download up to 5% without a hit-and-run."),
+    # ...and Settings has a table of trackers, with the global numbers for when to stop
+    # looking for more posts (the classic page's single limit and tick list read back as it)
+    (re.compile(r"A build missing a little can be handed to qBittorrent.*?What each tracker lets you download tracker % MB "
+                r"always add (.*?) Left blank, a tracker lets you download nothing.*?asks you on the Jobs tab\. "
+                r"Stop looking for more posts when less than \(%\) is missing \[(\d*)\] …and less than \(MB\) \[\d*\]"),
+     lambda m: "A build missing less than this much can be handed to qBittorrent to download the rest - many trackers "
+               "let you download a few percent without it counting towards a hit-and-run. For the trackers listed below "
+               "it is done without asking; everywhere else you are asked each time. Offer it when less than (%) is "
+               f"missing [{m.group(2)}] Always add, for these trackers ["
+               + ", ".join(re.findall(r"(\S+)(?: \(API\))? \[[\d.]*\] \[[\d.]*\] \[x\]", m.group(1))) + "]"),
     # the Build tab opens on a summary by release group; the full list links back to it
     (re.compile(r" ?← Summary by release group"), ""),
     # a build outside the limit (or with no seeders) can be added anyway, by override
@@ -77,7 +90,7 @@ INTENDED = [
 ]
 
 
-NEW_SETTINGS = {"skip_unposted", "max_age_days"}          # settings the new page sends that the classic one had not
+NEW_SETTINGS = {"skip_unposted", "max_age_days", "nearly_limits"}          # settings the new page sends that the classic one had not
 
 
 def without_new_settings(value):
@@ -118,6 +131,9 @@ def settings_file(tmp_path_factory):
     httpd.shutdown()
     data["exists"] = True
     data["settings"]["behaviour"]["nearly_auto_trackers"] = ["TrackerThree"]
+    # each tracker has its own limit; the test trackers allow what the old global limit did
+    data["settings"]["behaviour"]["nearly_limits"] = [{"tracker": t, "percent": 5, "mb": 200}
+                                                      for t in ("TrackerOne", "TrackerTwo", "TrackerThree")]
     path = d / "settings.json"
     path.write_text(json.dumps(data))
     return str(path)
@@ -253,10 +269,15 @@ def test_the_torrents_found_are_summarised_by_release_group(settings_file):
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
 def test_the_always_added_trackers_are_ticked_in_prowlarrs_list(settings_file):
     seen = run("new", "trackers", settings_file)["seen"]
-    # the saved "TrackerThree" is Prowlarr's "TrackerThree (API)": ticked, not listed twice
-    assert seen["listed"] == ["[ ] TrackerFour", "[ ] TrackerOne", "[x] TrackerThree (API)"]
-    assert seen["after"] == ["[x] TrackerFour", "[ ] TrackerOne", "[ ] TrackerThree (API)"]
+    # each of Prowlarr's trackers with its own limit; the saved "TrackerThree" is Prowlarr's
+    # "TrackerThree (API)" (ticked, not listed twice); TrackerTwo is not in Prowlarr's list
+    assert seen["listed"] == ["TrackerFour -% -MB [ ]", "TrackerOne 5% 200MB [ ]",
+                              "TrackerThree (API) 5% 200MB [x]", "TrackerTwo 5% 200MB [ ]"]
+    assert seen["after"] == ["TrackerFour 2% -MB [x]", "TrackerOne -% -MB [ ]",
+                             "TrackerThree (API) 5% 200MB [ ]", "TrackerTwo 5% 200MB [ ]"]
     assert seen["saved"] == ["TrackerFour"]
+    # TrackerOne cleared: blank, so it lets you download nothing (and is no longer listed)
+    assert seen["limits"] == ["TrackerFour 2% 0MB", "TrackerThree 5% 200MB", "TrackerTwo 5% 200MB"]
 
 
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
@@ -322,3 +343,12 @@ def test_back_from_a_job_goes_to_the_jobs_list(settings_file):
     assert seen["opened"] == [True, True]
     assert seen["afterBack"] == ["#jobs", False]
     assert seen["afterTwo"] == ["#jobs", False]          # one job to another: still one Back to the list
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_tracker_without_a_limit_is_asked_about_on_the_job(settings_file):
+    seen = run("new", "limitAsk", settings_file)["seen"]
+    assert seen["asks"] and not any(b.startswith("Add to torrent client") for b in seen["before"])
+    assert any(b.startswith("Override") for b in seen["before"])           # still possible, knowingly
+    assert seen["sent"] == [{"tracker": "TrackerNine", "percent": 1, "mb": 0}]
+    assert any(b.startswith("Add to torrent client (TrackerNine)") for b in seen["after"]) and not seen["asksAfter"]

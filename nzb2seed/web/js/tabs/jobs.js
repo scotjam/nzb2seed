@@ -2,7 +2,7 @@
 // its piece map, steps and log. Both follow the server live.
 import { html, useEffect, useLayoutEffect, useRef, useState } from "../lib.js";
 import { api, onChange } from "../api.js";
-import { backToJobs, jobs, jobScreen, nearlyLimitText, openJob, openJobId, shortEnough, toast, useStore } from "../store.js";
+import { backToJobs, jobs, jobScreen, nearlyLimitText, openJob, openJobId, setTrackerLimit, settings, shortEnough, toast, trackerLimit, useStore } from "../store.js";
 import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName } from "../util.js";
 import { SortSelect } from "../components/sort.js";
 import { BADLY_ENDED, JOB_KINDS, builtLater, canAbandon, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf } from "./jobs-rules.js";
@@ -71,7 +71,7 @@ function JobBar({ all, shown, ticked, kind, counts, choose, tickAll, untick }) {
       ${ticked.length > 0 && html`<button type="button" class="btn" title="Untick every job (the jobs are not changed)" onClick=${untick}>Untick all</button>`}
       ${btn("Cancel", ticked.filter(isLive), cancelMany, "Stop each ticked running build after its current step - nothing is deleted")}
       ${btn("Try again", ticked.filter(canRetry), retryMany, "Run each ticked job again, exactly as it was started")}
-      ${btn("Add to torrent client", ticked.filter(j => canAdd(j, all)), addMany, `Hand each ticked build that is less than ${nearlyLimitText()} short to qBittorrent`)}
+      ${btn("Add to torrent client", ticked.filter(j => canAdd(j, all)), addMany, "Hand each ticked build that is within what its tracker lets you download to qBittorrent")}
       ${btn("Abandon", ticked.filter(j => canAbandon(j, all)), abandonMany, "Delete every temporary file the ticked builds left")}
       ${btn("Remove from list", ticked.filter(canRemove), removeMany, "Take the ticked finished jobs off this list. Their Usenet downloads are cleared within the hour, once nothing else needs them")}
       ${btn("Remove and delete downloads", ticked.filter(canRemove), removeAndDelete, "Take the ticked finished jobs off this list and delete the Usenet downloads they made - never one a torrent in qBittorrent uses")}
@@ -104,15 +104,34 @@ function Act({ label, title, onPress }) {
     onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); run(e); } }}>${label}</span>`;
 }
 
+/* a build that stopped short on a tracker with no limit set: say how much it allows, here */
+function LimitPrompt({ tracker, where }) {
+  const [pct, setPct] = useState(""), [mb, setMb] = useState(""), [busy, setBusy] = useState(false);
+  const save = async (e) => {
+    e.preventDefault(); e.stopPropagation();
+    if (!pct && !mb) return toast("Give a percentage, megabytes, or both.");
+    setBusy(true);
+    try { const r = await setTrackerLimit(tracker, Number(pct) || 0, Number(mb) || 0); toast(`${where} lets you download ${r.limit}.`); }
+    catch (err) { toast("Could not save it: " + err.message); }
+    finally { setBusy(false); }
+  };
+  return html`<form class="limitask" onSubmit=${save} onClick=${(e) => e.stopPropagation()}>
+    <small class="status">How much does ${where} let you download without it counting against you? None is set, so nothing goes to the torrent client yet.</small>
+    <label>% <input type="number" min="0" max="100" step="0.1" value=${pct} aria-label=${`Percent ${where} allows`} onInput=${(e) => setPct(e.target.value)} /></label>
+    <label>MB <input type="number" min="0" step="1" value=${mb} aria-label=${`Megabytes ${where} allows`} onInput=${(e) => setMb(e.target.value)} /></label>
+    <button class="btn" disabled=${busy}>Save for ${where}</button></form>`;
+}
+
 function JobActions({ j, all }) {
   const x = j.extra || {};
   const [starting, setStarting] = useState(false);
+  useStore(settings);                      // a tracker's limit set here (or in Settings) shows at once
   if (x.abandoned) return html`<div class="jretry"></div>`;
   if (builtLater(j, all)) {
     return html`<div class="jretry"><small class="status">built when tried again, as job ${finalOf(j, all).id}</small></div>`;
   }
   if (x.added) return html`<div class="jretry"><small class="status">in qBittorrent, downloading the rest</small></div>`;
-  const limit = nearlyLimitText();
+  const limit = nearlyLimitText(x.tracker);
   // the tracker is always named: whether downloading the rest risks a hit-and-run depends on it
   const where = x.tracker ? trackerName(x.tracker) : "tracker unknown";
   const why = `Many trackers let you download a little of a torrent (here: less than ${limit}) without it counting `
@@ -124,9 +143,11 @@ function JobActions({ j, all }) {
       ${nearly && x.seeders === 0 && html`<small class="status">Not offered for the torrent client: Prowlarr reported no seeders
         for it on ${trackerName(x.tracker || "its tracker")}, so the missing ${missText(x)} could never come over BitTorrent.</small>
         <${OtherTrackers} j=${j} Act=${Act} />`}
+      ${x.have != null && x.tracker && !trackerLimit(x.tracker) && html`<${LimitPrompt} tracker=${x.tracker} where=${where} />`}
       ${x.have != null && !(nearly && x.seeders !== 0) && html`<${Act} label=${`Override: add to torrent client (${where})`}
-        title=${`Outside your limit of ${limit}${x.seeders === 0 ? ", and no seeders were reported" : ""}: add it anyway, knowing the missing ${missText(x)} would be downloaded over BitTorrent`}
-        onPress=${() => overrideAdd(j, where)} />`}
+        title=${`More than ${where} allows (${limit})${x.seeders === 0 ? ", and no seeders were reported" : ""}: add it anyway, knowing the missing ${missText(x)} would be downloaded over BitTorrent`}
+        onPress=${() => overrideAdd(j, where)} />
+        ${x.seeders !== 0 && !approved(x.tracker) && html`<${OtherTrackers} j=${j} Act=${Act} />`}`}
       ${nearly && x.seeders !== 0 && html`
         <${Act} label=${`Add to torrent client (${where}): ${havePct(x.have)}%`} title=${why} onPress=${() => addToClient(j, where)} />
         <span class="info" role="button" tabindex="0" aria-label=${why} title=${why}
