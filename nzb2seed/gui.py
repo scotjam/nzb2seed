@@ -910,6 +910,10 @@ def build_job(app: "App", body: dict):
     groups = group_selection([_rel(n) for n in body.get("nzbs", [])])   # empty: the build finds them
     opts = _opts(body.get("options", {}))
     data = uploaded_data(app.cfg, torrent)   # None: download it through Prowlarr
+    # built from another tracker: the downloads made for the first one are this build's to use
+    first = app.jobs.get(int(body["other_tracker"])) if str(body.get("other_tracker") or "").isdigit() else None
+    if first is not None and (first.extra or {}).get("infohash"):
+        opts = dataclasses.replace(opts, related=(first.extra["infohash"],))
     # a release that already stopped nearly complete - built again from another tracker,
     # or tried again: its Usenet downloads are already made, so it is only placing files
     # and handing the torrent over - not waiting behind a queue of builds that download
