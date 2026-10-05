@@ -584,3 +584,27 @@ def test_a_build_handed_to_qbittorrent_turns_complete_from_its_change_feed(serve
     wait(lambda: job.extra.get("complete"))
     assert "complete in qBittorrent" in job.result and asked[:3] == [0, 1, 2]
     wait(lambda: not app._watching)                       # nothing left to follow: it stops
+
+
+def test_a_build_left_stopped_says_seeding_once_it_is_started(server, monkeypatch):  # noqa: F811
+    """Its result is kept current from qBittorrent's change feed - and one removed from
+    qBittorrent says so, rather than being followed for ever."""
+    app, _ = server
+    real_sleep = time.sleep
+    monkeypatch.setattr(gui.time, "sleep", lambda s: real_sleep(0.01))
+    other = "b" * 40
+    feed = [{"rid": 1, "full_update": True, "torrents": {H: {"state": "stoppedUP"}, other: {"state": "stoppedUP"}}},
+            {"rid": 2, "torrents": {H: {"state": "stalledUP"}}, "torrents_removed": [other]}]
+
+    class Q:
+        def sync_maindata(self, rid):
+            return feed.pop(0) if feed else {"rid": rid, "torrents": {}}
+    monkeypatch.setattr(app, "_qbit", lambda: Q())
+    built = app.start_job("Show.S06.1080p-GRP", "build", lambda cfg: {"result": "100.0% (stopped)"})
+    gone = app.start_job("Show.S07.1080p-GRP", "build", lambda cfg: {"result": "100.0% (stopped)"})
+    wait(lambda: built.status == "done" and gone.status == "done")
+    built.infohash, gone.infohash = H, other
+    app.watch_clients()
+    wait(lambda: built.result == "100.0% (seeding)")
+    wait(lambda: gone.result == "100.0% (no longer in qBittorrent)")
+    wait(lambda: not app._watching)                       # nothing left to follow

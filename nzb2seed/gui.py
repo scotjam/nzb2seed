@@ -669,10 +669,33 @@ class App:
         threading.Thread(target=loop, name="cleaner", daemon=True).start()
 
     def _waiting_in_client(self) -> dict[str, "Job"]:
-        """Builds handed to qBittorrent that are still downloading the rest, by infohash."""
-        return {(j.extra["infohash"] or "").lower(): j for j in list(self.jobs.values())
-                if (j.extra or {}).get("added") and not (j.extra or {}).get("complete")
-                and (j.extra or {}).get("infohash")}
+        """What qBittorrent can still change about a job, by infohash: builds handed to it that
+        are downloading the rest, and builds that finished 100% but were left stopped."""
+        out = {}
+        for j in list(self.jobs.values()):
+            x = j.extra or {}
+            if x.get("added") and not x.get("complete") and x.get("infohash"):
+                out[x["infohash"].lower()] = j
+            elif j.status == "done" and j.infohash and (j.result or "").endswith("(stopped)"):
+                out[j.infohash.lower()] = j
+        return out
+
+    def _client_changed(self, job: "Job", change: dict | None):
+        """One torrent's change in qBittorrent's feed (None: it is no longer in qBittorrent)."""
+        x = job.extra or {}
+        if change is None:
+            if not x.get("added"):
+                job.result = job.result[:-len("(stopped)")] + "(no longer in qBittorrent)"
+                self.store.changed(urgent=True)
+            return
+        if x.get("added"):
+            if float(change.get("progress", 0) or 0) >= 1:
+                self._complete_in_client(job)
+            return
+        state = change.get("state") or ""
+        if state and not state.startswith(("stopped", "paused")) and state not in ("error", "missingFiles"):
+            job.result = job.result[:-len("(stopped)")] + "(seeding)"
+            self.store.changed(urgent=True)       # reaches the page through the live feed
 
     def _complete_in_client(self, job: "Job"):
         job.extra = {**job.extra, "complete": True}
@@ -683,9 +706,10 @@ class App:
 
     def watch_clients(self):
         """Follow qBittorrent's own change feed (sync/maindata: only what changed since the
-        last call) while a handed-over build is still downloading the rest, and mark it
-        complete the moment qBittorrent has all of it. Started when one is handed over (and at
-        start-up if any are); it stops by itself when none is left."""
+        last call) while a job's state there can still change: a handed-over build is marked
+        complete the moment qBittorrent has all of it, and a finished build left stopped says
+        "seeding" once it is started. Started when there is one (and at start-up); it stops
+        by itself when none is left."""
         with self.lock:
             if self._watching or not self._waiting_in_client():
                 return
@@ -709,10 +733,12 @@ class App:
                         rid = 0
                         continue
                     rid = data.get("rid", rid)
-                    for h, change in (data.get("torrents") or {}).items():
-                        job = waiting.get(h.lower())
-                        if job is not None and float(change.get("progress", 0) or 0) >= 1:
-                            self._complete_in_client(job)
+                    torrents = {h.lower(): c for h, c in (data.get("torrents") or {}).items()}
+                    for h, job in waiting.items():
+                        if h in torrents:
+                            self._client_changed(job, torrents[h])
+                        elif data.get("full_update") or h in {r.lower() for r in data.get("torrents_removed") or []}:
+                            self._client_changed(job, None)
                     time.sleep(10)
             finally:
                 with self.lock:
@@ -885,6 +911,7 @@ class App:
                 job.ended = time.time()
                 self.store.changed(urgent=True)
                 self._clean_now.set()            # a build ended: clear what is done
+                self.watch_clients()             # left stopped: say "seeding" once it is started
                 self._learn(job)
         threading.Thread(target=run, name=f"job-{job.id}", daemon=True).start()
 
