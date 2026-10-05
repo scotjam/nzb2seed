@@ -2,7 +2,7 @@
 // its piece map, steps and log. Both follow the server live.
 import { html, useEffect, useLayoutEffect, useRef, useState } from "../lib.js";
 import { api, onChange } from "../api.js";
-import { jobs, jobScreen, nearlyLimitText, openJob, openJobId, shortEnough, toast, useStore } from "../store.js";
+import { backToJobs, jobs, jobScreen, nearlyLimitText, openJob, openJobId, shortEnough, toast, useStore } from "../store.js";
 import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName } from "../util.js";
 import { SortSelect } from "../components/sort.js";
 import { BADLY_ENDED, JOB_KINDS, builtLater, canAbandon, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf } from "./jobs-rules.js";
@@ -197,7 +197,7 @@ function JobView({ id }) {
   return html`
     <div class="job" id="job">
       <div class="top">
-        <div><button type="button" class="btn jback" onClick=${() => { jobScreen.set(false); window.scrollTo({ top: 0 }); }}>← All jobs</button>
+        <div><button type="button" class="btn jback" onClick=${backToJobs}>← All jobs</button>
           <h2>${job.title}</h2><p class=${"result " + job.status}>${result}</p></div>
         ${isLive(job) && html`<button class="btn danger" onClick=${cancel}>Cancel build</button>`}
       </div>

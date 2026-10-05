@@ -25,11 +25,19 @@ export function useStore(store) {
   return value;
 }
 
-/* ---- the tab on screen: the page's address (#jobs, #settings, ...) */
+/* ---- the tab on screen: the page's address (#jobs, #settings, ...) - and an open job is
+   #jobs/<id>, so the browser's (or Android's) Back goes from the job to the jobs list */
 export const TABS = ["build", "jobs", "seasons", "assemble", "auto", "demand", "settings"];
-const tabOf = () => TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : "build";
+const hashParts = () => location.hash.slice(1).split("/");
+const tabOf = () => TABS.includes(hashParts()[0]) ? hashParts()[0] : "build";
+const jobOf = () => hashParts()[0] === "jobs" && /^\d+$/.test(hashParts()[1] || "") ? Number(hashParts()[1]) : null;
 export const tab = createStore(tabOf());
-window.addEventListener("hashchange", () => tab.set(tabOf()));
+window.addEventListener("hashchange", () => {
+  tab.set(tabOf());
+  if (tabOf() !== "jobs") return;
+  const id = jobOf();
+  if (id != null) { openJobId.set(id); jobScreen.set(true); } else jobScreen.set(false);
+});
 export function go(name) { if (location.hash !== "#" + name) location.hash = "#" + name; }
 
 /* ---- the toast: a short message in the corner, gone after a few seconds */
@@ -85,10 +93,26 @@ export async function refreshJobs() {
 }
 onChange("jobs", refreshJobs);
 
-export const openJobId = createStore(null);
-export const jobScreen = createStore(false);     // on a phone: the job instead of the list
+export const openJobId = createStore(jobOf());
+export const jobScreen = createStore(jobOf() != null);     // on a phone: the job instead of the list
+let listBehind = false;                          // the jobs list is the page before this job's
 export function openJob(id, navigate = true) {
   openJobId.set(id);
-  if (navigate) { go("jobs"); jobScreen.set(true); window.scrollTo({ top: 0, behavior: "auto" }); }
+  if (navigate) {
+    const target = "#jobs/" + id;
+    if (jobOf() != null) location.replace(target);          // one job to another: Back still goes to the list
+    else {
+      if (location.hash !== "#jobs") location.hash = "#jobs"; // from another tab: the list goes in between
+      location.hash = target;
+      listBehind = true;
+    }
+    jobScreen.set(true); window.scrollTo({ top: 0, behavior: "auto" });
+  }
   refreshJobs();
+}
+/* "All jobs": the same as Back when the list is the page behind */
+export function backToJobs() {
+  if (listBehind && jobOf() != null) { listBehind = false; window.history.back(); }
+  else { location.replace("#jobs"); jobScreen.set(false); }
+  window.scrollTo({ top: 0 });
 }
