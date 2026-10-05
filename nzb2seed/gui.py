@@ -544,6 +544,14 @@ class App:
             return False            # nobody to download the rest from: it could never finish
         return self.short_enough(1 - float(extra["have"]), extra.get("short"))
 
+    @staticmethod
+    def client_tag(tracker: str, info: dict | None = None) -> str:
+        """The qBittorrent tag of a build finished over BitTorrent: "<tracker> (nzb)"."""
+        name = re.sub(r"\s*\(API\)$", "", (tracker or "").strip(), flags=re.I)
+        if not name and info and info.get("tracker"):
+            name = urlsplit(info["tracker"]).hostname or ""
+        return f"{(name or 'tracker').replace(',', ' ')} (nzb)"
+
     def finish_in_client(self, job: "Job", why: str = "", override: bool = False) -> "Job":
         """Hand a nearly-built torrent to qBittorrent to download the rest - the one place
         nzb2seed starts a torrent that is not 100% complete, and only because the person
@@ -589,6 +597,19 @@ class App:
                             "started: the torrent stays stopped in qBittorrent (nothing deleted)")
             report.info(f"{have} is already here from Usenet; downloading the other "
                         f"{rest} over BitTorrent")
+            if not self.short_enough(1 - frac, short):
+                # added by Override, outside your limit: what comes from the tracker may bring
+                # seeding obligations there - tagged after the tracker, not as an nzb2seed build.
+                # (Within the limit - Add, Always add - it is taken to be safe and keeps its tag.)
+                tag = self.client_tag(x.get("tracker") or "", info)
+                try:
+                    qb.remove_tags(h, [t for t in cfg.qbit_tags if t])
+                    qb.add_tags(h, [tag])
+                    report.info(f"tagged {tag!r} in qBittorrent instead of {', '.join(cfg.qbit_tags) or 'its tags'}: "
+                                f"{rest} comes from the tracker, more than your limit - it may bring seeding "
+                                "obligations there")
+                except ApiError as e:
+                    report.warn(f"could not change its tags in qBittorrent: {e}")
             qb.start(h)
             job.extra = {**(job.extra or {}), "added": True}
             self.store.changed(urgent=True)
