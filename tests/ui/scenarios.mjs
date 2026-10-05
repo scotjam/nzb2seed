@@ -236,6 +236,18 @@ export const SCENARIOS = {
     return { listed, sent: calls.slice(n).filter(c => c.path === "/api/build") };
   },
 
+  /* the new page only: a pre-approved copy that only lacks a small file (an .nfo the first
+     tracker added) is the same video - built from at once too */
+  async othersNear({ act, doc, calls, server }) {
+    Object.assign(server.others.releases[0], { same_size: false, near_size: true, size_diff: -920 });
+    await act.go("jobs");
+    const row = () => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Film.2020.1080p.BluRay-GRPA"));
+    const n = calls.length;
+    row().querySelector("span.btn[title^='Find this release']").click();
+    await act.settle();
+    return { sent: calls.slice(n).filter(c => c.path === "/api/build").map(c => c.body.torrent.indexer) };
+  },
+
   /* the new page only: a pre-approved tracker with the same files and a seeder - built
      from at once, nothing offered */
   async othersAuto({ act, doc, calls }) {
