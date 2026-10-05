@@ -359,3 +359,11 @@ def test_a_build_in_qbittorrent_is_orange_then_green(settings_file):
     seen = run("new", "clientDots", settings_file)["seen"]
     assert seen["downloading"] == "dot client" and seen["complete"] == "dot done"
     assert seen["says"] == "complete in qBittorrent - seeding"
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_search_with_no_nzbs_says_why_and_offers_the_torrents_name(settings_file):
+    seen = run("new", "noNzbs", settings_file)["seen"]
+    assert "No NZBs at all were found for “Flim 2020”" in seen["tip"] and "Film 2020" in seen["tip"]
+    assert seen["searched"] == ["Film 2020"]
+    assert "No NZBs at all" not in seen["after"]
