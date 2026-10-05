@@ -104,3 +104,21 @@ def test_trying_again_a_release_that_stopped_nearly_complete_does_not_wait_eithe
     assert started == ["Show.Name.S01.1080p.WEB-DL.DDP5.1.H.264-GRPA"]   # the abandoned one queues
     for j in app.jobs.values():
         j.cancel.set()
+
+
+def test_a_build_from_another_tracker_knows_the_first_torrent(server, monkeypatch):  # noqa: F811
+    """Its downloads are looked for on disk before anything is searched for."""
+    import dataclasses
+    app, url = server
+    first = app.start_job("Film.2020.1080p.BluRay-GRPA", "auto", lambda cfg: None)
+    first.extra = {"have": 0.9999, "infohash": "f" * 40}
+    seen = threading.Event()
+    got = {}
+    monkeypatch.setattr(gui, "execute_run", lambda cfg, opts, t, g, torrent_data=None:
+                        got.update(related=opts.related) or seen.set() or {"result": "ok"})
+    monkeypatch.setattr(gui, "uploaded_data", lambda cfg, t: None)
+    t = dataclasses.asdict(Release("Film.2020.1080p.BluRay-GRPA", "torrent", "TrackerTwo", 1, 10, "g",
+                                   "http://prowlarr.local/1/download", "", "", 0, 3, None))
+    status, _ = call(url + "/api/build", *AUTH, body={"torrent": t, "nzbs": [], "options": {},
+                                                      "other_tracker": first.id})
+    assert status == 200 and seen.wait(5) and got["related"] == ("f" * 40,)
