@@ -367,3 +367,11 @@ def test_a_search_with_no_nzbs_says_why_and_offers_the_torrents_name(settings_fi
     assert "No NZBs at all were found for “Flim 2020”" in seen["tip"] and "Film 2020" in seen["tip"]
     assert seen["searched"] == ["Film 2020"]
     assert "No NZBs at all" not in seen["after"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_resolution_folds_away_under_its_group(settings_file):
+    seen = run("new", "resFold", settings_file)["seen"]
+    assert seen["arrow"] == "▾" and seen["items"] >= 1
+    assert seen["folded"] == "▸" and seen["foldedItems"] == 0 and seen["says"].endswith("torrent" + ("s" if seen["items"] > 1 else ""))
+    assert seen["groupsStillOpen"] >= 1 and seen["again"] == seen["items"]
