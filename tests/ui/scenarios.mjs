@@ -137,6 +137,24 @@ export const SCENARIOS = {
     return { button: [...row.querySelectorAll("span.btn")].map(b => b.textContent).find(t => t.startsWith("Try whole posts")) };
   },
 
+  /* the new page only: a misspelt search finds torrents but no NZBs - the tip says why and
+     offers the name the torrents go by */
+  async noNzbs({ act, doc, calls, server }) {
+    server.others.noUsenet = true;
+    await act.go("build");
+    await act.type("Search Prowlarr", "Flim 2020");
+    await act.submit("Search Prowlarr");
+    await act.settle();
+    const tip = () => doc.querySelector(".rtip")?.textContent.replace(/\s+/g, " ").trim() || "";
+    const out = { tip: tip() };
+    const n = calls.length;
+    [...doc.querySelectorAll(".rtip button")].find(b => b.textContent.includes("Film 2020"))?.click();
+    await act.settle();
+    out.searched = calls.slice(n).filter(c => c.path === "/api/search").map(c => c.body.query);
+    out.after = tip();
+    return out;
+  },
+
   /* the new page only: a build handed to qBittorrent is orange while it downloads the rest,
      green once qBittorrent has it complete */
   async clientDots({ act, doc, server }) {
