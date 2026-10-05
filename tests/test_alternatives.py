@@ -40,6 +40,10 @@ def rel(title, size, guid=None, grabs=0, indexer="idx"):
     ("Show (2022) S02 (Part 1 - Heat B) Extras", None),                     # a description inside
     # the same as posted on Usenet: dots for spaces, and the poster's -xpost after it
     ("Show.(2022).S01E01.(1080p.ATVP.WEB-DL.H265.SDR.DDP.Atmos.5.1.English.-.GRPH).mkv-xpost", "grph"),
+    # named the way Sonarr/Radarr do: the group is the last bracketed word
+    ("Show (2004) (74543) - S04E01 - The Title - [Bluray-1080p] [GRPD]", "grpd"),
+    ("Show (2020) - S01E01 - Pilot - [WEBDL-1080p][x264] [ENG]", None),
+    ("Show (2020) - S01E01 - Pilot - [Bluray-1080p] [x265]", None),
 ])
 def test_group_of(name, group):
     assert group_of(name) == group
@@ -442,3 +446,16 @@ def test_a_single_file_torrent_named_after_its_file_finds_its_posts():
     assert "mkv" not in need.query and need.label == name
     assert pipeline._fits(need, rel(name, 2000, "p")) is None
     assert pipeline.need_for(t, t.name, True).label == name
+
+
+
+def test_the_question_says_what_stopping_would_mean(tmp_path, monkeypatch):
+    t, files = pack_torrent()
+    need = need_for(t, "Show.2016.S03E02.720p.HDTV.x264-GRPA", False)
+    asked = []
+    monkeypatch.setattr(pipeline, "report_ask", lambda prompt, choices: asked.append(prompt))
+    from test_usenet import FakeProwlarr
+    pipeline.ask_for_post(Config(path=str(tmp_path / "c.toml")),
+                          FakeProwlarr({}, [rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", need.min_size + 5, "x")]),
+                          need, [], note="Or stop the build here: about 472.0000 MB (4.8%) would be missing.")
+    assert asked and asked[0].endswith("Or stop the build here: about 472.0000 MB (4.8%) would be missing.")
