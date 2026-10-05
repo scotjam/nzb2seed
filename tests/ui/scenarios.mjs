@@ -137,6 +137,26 @@ export const SCENARIOS = {
     return { button: [...row.querySelectorAll("span.btn")].map(b => b.textContent).find(t => t.startsWith("Try whole posts")) };
   },
 
+  /* the new page only: a resolution folds away under its release group, like the group does */
+  async resFold({ act, doc }) {
+    await act.go("build");
+    await act.type("Search Prowlarr", "Film.2020");
+    await act.submit("Search Prowlarr");
+    await act.settle();
+    for (const box of doc.querySelectorAll(".tfilters input[type=checkbox]")) { if (box.checked) { box.click(); await act.settle(); } }
+    const res = () => doc.querySelector(".dres");
+    const toggle = () => res().querySelector("h4 .dtoggle");
+    const items = () => res().querySelectorAll(".ditem").length;
+    const out = { arrow: toggle().querySelector(".arrow").textContent, items: items() };
+    toggle().click(); await act.settle();
+    Object.assign(out, { folded: toggle().querySelector(".arrow").textContent, foldedItems: items(),
+                         says: res().querySelector("h4").textContent.replace(/\s+/g, " ").trim(),
+                         groupsStillOpen: doc.querySelectorAll(".digest section .dres").length });
+    toggle().click(); await act.settle();
+    out.again = items();
+    return out;
+  },
+
   /* the new page only: a misspelt search finds torrents but no NZBs - the tip says why and
      offers the name the torrents go by */
   async noNzbs({ act, doc, calls, server }) {

@@ -90,7 +90,7 @@ export function sortDigest(groups, how) {
 
 export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full, tip }) {
   const groups = sortDigest(digest(torrents, usenet), how);
-  const [shut, setShut] = useState(() => new Set());        // groups folded away
+  const [shut, setShut] = useState(() => new Set());        // groups (and group|resolution) folded away
   const fold = (key) => setShut(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; });
   const tv = groups.some(g => g.tv);
   return html`
@@ -108,10 +108,16 @@ export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full
             `${g.resolutions.length} resolution${g.resolutions.length === 1 ? "" : "s"}`,
             `${g.count} torrent${g.count === 1 ? "" : "s"}`,
             g.nzb ? `NZBs found for ${g.nzb}` : "no matching NZBs found"].filter(Boolean).join(" · ")}</small></h3>
-          ${!shut.has(g.key) && g.resolutions.map(r => html`
+          ${!shut.has(g.key) && g.resolutions.map(r => {
+            const rk = `${g.key}|${r.res}`, label = r.res === "other" ? "resolution not in the name" : r.res;
+            const n = r.items.reduce((k, item) => k + item.torrents.length, 0);
+            return html`
             <div class="dres">
-              <h4>${r.res === "other" ? "resolution not in the name" : r.res}</h4>
-              ${r.items.map(item => item.torrents.map(t => html`
+              <h4><button type="button" class="dtoggle" aria-expanded=${String(!shut.has(rk))}
+                  title=${shut.has(rk) ? `Show ${g.name}'s ${label} torrents` : `Hide ${g.name}'s ${label} torrents`} onClick=${() => fold(rk)}>
+                <span class="arrow" aria-hidden="true">${shut.has(rk) ? "▸" : "▾"}</span>${label}</button>
+                ${shut.has(rk) && html` <small>${n} torrent${n === 1 ? "" : "s"}</small>`}</h4>
+              ${!shut.has(rk) && r.items.map(item => item.torrents.map(t => html`
                 <label class=${"ditem" + (chosen.has(t.guid) ? " on" : "")} key=${t.guid} title=${t.title}
                   onClick=${(ev) => { if (ev.target.tagName !== "INPUT" && chosen.has(t.guid)) { ev.preventDefault(); edit(t); } }}>
                   <input type="checkbox" checked=${chosen.has(t.guid)} aria-label=${t.title}
@@ -121,7 +127,7 @@ export function Digest({ torrents, usenet, how, setHow, chosen, pick, edit, full
                   ${item.nzb && html`<span class="dnzb" title="An NZB of the same release group, resolution and season was found on Usenet">NZBs found</span>`}
                   <small class="status">${[t.indexer, t.seeders != null ? `${t.seeders} seeders` : null].filter(Boolean).join(" · ")}</small>
                 </label>`))}
-            </div>`)}
+            </div>`; })}
         </section>`)}
       ${tip}
       <button type="button" class="btn dfull" onClick=${full}>Full list</button>
