@@ -130,7 +130,7 @@ function JobActions({ j, all }) {
   if (builtLater(j, all)) {
     return html`<div class="jretry"><small class="status">built when tried again, as job ${finalOf(j, all).id}</small></div>`;
   }
-  if (x.added) return html`<div class="jretry"><small class="status">in qBittorrent, downloading the rest</small></div>`;
+  if (x.added) return html`<div class="jretry"><small class="status">${x.complete ? "complete in qBittorrent - seeding" : "in qBittorrent, downloading the rest"}</small></div>`;
   const limit = nearlyLimitText(x.tracker);
   // the tracker is always named: whether downloading the rest risks a hit-and-run depends on it
   const where = x.tracker ? trackerName(x.tracker) : "tracker unknown";

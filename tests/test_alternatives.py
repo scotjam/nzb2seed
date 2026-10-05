@@ -462,3 +462,63 @@ def test_the_question_says_what_stopping_would_mean(tmp_path, monkeypatch):
                           FakeProwlarr({}, [rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", need.min_size + 5, "x")]),
                           need, [], note="Or stop the build here: about 472.0000 MB (4.8%) would be missing.")
     assert asked and asked[0].endswith("Or stop the build here: about 472.0000 MB (4.8%) would be missing.")
+
+
+# ---------------------------------------------------------------- posts missing articles
+
+class HoledSAB(VideoOnlySAB):
+    """Like VideoOnlySAB, but the posts named in ``holed`` come down with an article missing
+    (zeros where it was) - and none of them had repair data."""
+
+    def __init__(self, root, video, holed):
+        super().__init__(root, video)
+        self.holed = set(holed)
+
+    def add_nzb(self, nzb, name, cat, pp, prio):
+        nzo = super().add_nzb(nzb, name, cat, pp, prio)
+        if self.n in self.holed:
+            p = os.path.join(self.root, f"{name}.{self.n}", name.replace(" ", ".") + ".mkv")
+            data = bytearray(open(p, "rb").read())
+            data[100_000:100_000 + 300_000] = b"\0" * 300_000
+            open(p, "wb").write(data)
+        return nzo
+
+    def history_slot(self, nzo):
+        return {"stage_log": [{"name": "Source", "actions": ["No par2 sets"]}]}
+
+
+def holed_film(tmp_path):
+    film = "Film 2022 1080p BluRay REMUX-GRP"
+    video = rnd(2_000_000, 7)
+    t = parse(make_torrent(film, {f"{film}.mkv": video}))
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
+    return film, video, t, cfg
+
+
+def test_a_post_missing_articles_is_passed_over_for_a_complete_one(tmp_path):
+    film, video, t, cfg = holed_film(tmp_path)
+    posts = [rel(film.replace(" ", "."), len(video) + 900, "holed", grabs=9, indexer="idx1"),
+             rel(film.replace(" ", ".") + "-xpost", len(video) + 950, "whole", indexer="idx2")]
+    sab = HoledSAB(str(tmp_path), video, holed={1})
+    dirs, _ = pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, posts, 2)
+    assert len(sab.added) == 2 and dirs == [os.path.join(str(tmp_path), f"{sab.added[1]}.2")]
+
+
+def test_with_no_other_post_the_incomplete_one_is_still_used(tmp_path):
+    film, video, t, cfg = holed_film(tmp_path)
+    posts = [rel(film.replace(" ", "."), len(video) + 900, "holed", indexer="idx1")]
+    sab = HoledSAB(str(tmp_path), video, holed={1})
+    dirs, _ = pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, posts, 2)
+    assert dirs == [os.path.join(str(tmp_path), f"{sab.added[0]}.1")]      # the piece check does the rest
+
+
+def test_a_download_its_repair_data_checked_is_not_scanned(tmp_path):
+    assert pipeline.repaired({"stage_log": [{"name": "Repair", "actions": ["[x] Quick Check OK"]}]})
+    assert not pipeline.repaired({"stage_log": [{"name": "Source", "actions": ["No par2 sets"]}]})
+    d = tmp_path / "dl"
+    d.mkdir()
+    data = bytearray(rnd(3_000_000, 3))
+    data[10:10 + 700_000] = b"\0" * 700_000
+    data[2_000_000:2_000_100] = b"\0" * 100                   # short zeros are ordinary data
+    (d / "x.mkv").write_bytes(bytes(data))
+    assert pipeline.article_gaps(str(d)) == (1, 700_000)
