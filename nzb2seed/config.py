@@ -44,11 +44,14 @@ class Config:
     cleanup: bool = True
     local_verify: bool = False
     build_parallel: int = 2           # builds running at once (the rest wait their turn)
-    nearly_complete_mb: float = 200.0     # ...and less than this much (whichever is less)
-    nearly_complete_percent: float = 5.0  # a failed build missing less than this is
-                                          # offered to the torrent client to finish
-    nearly_auto_trackers: list = field(default_factory=list)  # ...and for these trackers
-                                          # it is handed over without asking each time
+    nearly_complete_mb: float = 200.0     # with less than this missing (and the % below)
+    nearly_complete_percent: float = 5.0  # a build stops looking for more whole posts
+    # how much each tracker lets you download without it counting against you:
+    # [{tracker, percent, mb}] - a tracker not listed (or left blank) allows nothing, so
+    # nothing of its builds goes to the torrent client except by Override
+    nearly_limits: list = field(default_factory=list)
+    nearly_auto_trackers: list = field(default_factory=list)  # within their limit: handed
+                                          # over without asking each time
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
     demand_rules: list = field(default_factory=list)   # priority rules, best first
     demand_block: list = field(default_factory=list)   # anything matching is not built
@@ -124,6 +127,7 @@ LAYOUT = [
     ("behaviour", "nearly_complete_percent", "nearly_complete_percent"),
     ("behaviour", "nearly_complete_mb", "nearly_complete_mb"),
     ("behaviour", "nearly_auto_trackers", "nearly_auto_trackers"),
+    ("behaviour", "nearly_limits", "nearly_limits"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("behaviour", "peek_archives", "peek_archives"),
     ("demand", "rules", "demand_rules"),
@@ -257,3 +261,43 @@ def save(cfg: Config):
     except OSError:
         pass
     os.replace(tmp, cfg.path)
+
+
+# ---------------------------------------------------------------- what a tracker lets you download
+
+def tracker_key(name: str) -> str:
+    """"sometracker (API)" and "Sometracker" are the same tracker."""
+    n = (name or "").strip().lower()
+    return n[:-5].strip() if n.endswith("(api)") else n
+
+
+def tracker_limit(cfg: "Config", tracker: str) -> tuple[float, float] | None:
+    """(percent, MB) the tracker lets you download - 0 for either means that one does not
+    limit. None: no limit set for it, so nothing may be downloaded from it."""
+    want = tracker_key(tracker)
+    for row in cfg.nearly_limits or []:
+        if want and tracker_key(row.get("tracker", "")) == want:
+            pct, mb = float(row.get("percent") or 0), float(row.get("mb") or 0)
+            return (pct, mb) if pct > 0 or mb > 0 else None
+    return None
+
+
+def within_limit(cfg: "Config", tracker: str, fraction_missing: float, bytes_missing: int | None) -> bool:
+    """Little enough to download from this tracker: under its percentage and its MB, where
+    set (bytes unknown: the percentage only). A tracker with no limit set allows nothing."""
+    lim = tracker_limit(cfg, tracker)
+    if lim is None:
+        return False
+    pct, mb = lim
+    if pct and fraction_missing * 100 >= pct:
+        return False
+    return not mb or bytes_missing is None or bytes_missing < mb * 1024 ** 2
+
+
+def limit_text(cfg: "Config", tracker: str) -> str:
+    lim = tracker_limit(cfg, tracker)
+    if lim is None:
+        return "nothing (no limit set for this tracker)"
+    pct, mb = lim
+    return " or ".join(x for x in (pct and f"{pct:g}%", mb and f"{mb:g} MB") if x) + \
+        (" - whichever is less" if pct and mb else "")

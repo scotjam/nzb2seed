@@ -62,7 +62,7 @@ export async function addToClient(j, where, always = false) {
   const all = jobs.get();
   const waiting = always ? all.filter(o => o.id !== j.id && canAdd(o, all) && key(o.extra.tracker) === key(j.extra.tracker)) : [];
   const ask = always
-    ? `Always add builds from ${where} that stop less than ${nearlyLimitText()} short?\n\n`
+    ? `Always add builds from ${where} that stop less than ${nearlyLimitText(j.extra.tracker)} short?\n\n`
       + `This one is ${missText(j.extra)} short. It, and every one after it, goes to qBittorrent and downloads the missing part over `
       + `BitTorrent without asking you. Only do this if ${where} lets you download that much without `
       + `a hit-and-run. You can undo it in Settings.`
@@ -84,7 +84,7 @@ export async function overrideAdd(j, where) {
   const x = j.extra;
   const why = x.seeders === 0
     ? `Prowlarr reported no seeders for it on ${where}, so the missing part may never arrive.`
-    : `That is more than your limit of ${nearlyLimitText()}.`;
+    : `That is more than ${where} allows: ${nearlyLimitText(x.tracker)}.`;
   if (!confirm(`Override: add this to qBittorrent anyway?\n\nIt is missing ${missText(x)}. ${why}\n\n`
       + `All of the missing part would be downloaded from ${where} over BitTorrent - downloading that much `
       + `may count towards a hit-and-run there. Only do this if you are sure ${where} allows it.`)) return;
@@ -105,8 +105,7 @@ export function addMany(list, done) {
     .concat(list.length > 15 ? [`...and ${list.length - 15} more`] : []).join("\n");
   if (!confirm(`Add ${list.length} build(s) to qBittorrent and download the missing part of each over BitTorrent?\n\n`
       + `${lines}\n\n`
-      + `Only do this if ${where.join(", ")} let${where.length > 1 ? "" : "s"} you download up to `
-      + `${nearlyLimitText()} without a hit-and-run.`)) return;
+      + `Each is within what its tracker lets you download, as you set it.`)) return;
   return each(list, "/api/jobs/add_to_client", "handed to qBittorrent", "could not add", done);
 }
 

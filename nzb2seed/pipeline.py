@@ -1984,17 +1984,16 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
 
     def stop_note() -> str:
         """What stopping now means - so the question is not only "which NZB"."""
+        from .config import limit_text, within_limit
         short = len(pending) * t.piece_length
         pct = short / (t.total_size or 1) * 100
-        cfg = rt.cfg
-        within = pct < float(cfg.nearly_complete_percent or 5) and short < float(cfg.nearly_complete_mb or 200) * 1024 ** 2
         tracker = getattr(_this_build, "tracker", "") or "the tracker"
-        return (f"Or stop the build here: about {exact_gb(short)} ({pct:.1f}%) would be missing, "
-                + ("within your nearly-complete limit - Add to torrent client then downloads it"
-                   if within else
-                   f"more than your limit of {float(cfg.nearly_complete_percent or 5):g}% or "
-                   f"{float(cfg.nearly_complete_mb or 200):g} MB - Override can still add it to download")
-                + f" from {tracker}.")
+        within = within_limit(rt.cfg, tracker, pct / 100, short)
+        return (f"Or stop the build here: about {exact_gb(short)} ({pct:.1f}%) would be missing - "
+                + (f"within what {tracker} allows ({limit_text(rt.cfg, tracker)}), so Add to torrent client "
+                   "then downloads it" if within else
+                   f"more than {tracker} allows ({limit_text(rt.cfg, tracker)}); Override can still add it "
+                   "to download") + " over BitTorrent.")
 
     def fetch_copy(f) -> tuple[str, Release] | None:
         slot = file_slot[f.relpath]
@@ -2160,10 +2159,10 @@ def explain_missing(cfg: Config, t: Torrent, missing: list, wrong_size: list, sh
     for f, size in wrong_size:
         out.append(f"why {f.name} is wrong: the Usenet copy is {size} bytes, the torrent's {f.length} - "
                    "another version of that file")
-    pct = short / (total or 1) * 100
-    within = pct < float(cfg.nearly_complete_percent or 5) and short < float(cfg.nearly_complete_mb or 200) * 1024 ** 2
+    from .config import limit_text, tracker_limit, within_limit
     seeders = getattr(_this_build, "seeders", None)
     tracker = getattr(_this_build, "tracker", "") or "the tracker"
+    within = within_limit(cfg, tracker, short / (total or 1), short)
     tried_all = not getattr(_this_build, "settled", None)
     if seeders == 0:
         nxt = (f"Prowlarr reported no seeders on {tracker}, so the missing {exact_gb(short)} cannot come "
@@ -2171,9 +2170,13 @@ def explain_missing(cfg: Config, t: Torrent, missing: list, wrong_size: list, sh
     elif within:
         nxt = (f"Add to torrent client downloads just the missing {exact_gb(short)} over BitTorrent from "
                f"{tracker}" + ("" if tried_all else " - or Try whole posts first, to look inside other posts"))
+    elif tracker_limit(cfg, tracker) is None:
+        nxt = (f"you have not set how much {tracker} lets you download, so it does not go to the torrent "
+               "client - set it on the job (a % and MB), or " + ("Try whole posts, " if not tried_all else "")
+               + "Look on other trackers, or use Override")
     else:
-        nxt = (f"the missing {exact_gb(short)} is more than your limit of {float(cfg.nearly_complete_percent or 5):g}% "
-               f"or {float(cfg.nearly_complete_mb or 200):g} MB - " + ("Try whole posts, " if not tried_all else "")
+        nxt = (f"the missing {exact_gb(short)} is more than {tracker} allows ({limit_text(cfg, tracker)}) - "
+               + ("Try whole posts, " if not tried_all else "")
                + "Look on other trackers, or use Override to add it to the torrent client anyway")
     out.append("Next: " + nxt)
     return out
