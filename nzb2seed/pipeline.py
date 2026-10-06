@@ -2099,6 +2099,12 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
     def file_pieces(f) -> range:
         return range(f.offset // t.piece_length, (f.offset + max(f.length, 1) - 1) // t.piece_length + 1)
 
+    def edges(f) -> set[int]:
+        """The pieces a file shares with its neighbours - the only ones copy_verifies leaves
+        unchecked (a pooled copy's inside pieces are known good)."""
+        ps = file_pieces(f)
+        return {ps[0], ps[-1]}
+
     def patch(r: str, src: str, i: int, used: Release | None = None):
         """Write only piece ``i``'s bytes of file ``r`` from ``src`` into the placed file."""
         f = by_rel[r]
@@ -2159,6 +2165,25 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
         return {f.relpath for i in pending for f in suspects(i)
                 if f.relpath in file_slot and owned.owns(res.placed.get(f.relpath, ""))}
 
+    def take_all(good: dict[str, str], rel: Release):
+        """Swap in every copy from one post that verifies inside, in one go - one check of
+        the shared edge pieces instead of a full pass per file. A copy whose edge piece
+        would break goes to the pool for the piece-by-piece pass."""
+        nonlocal pending
+        if not good:
+            return
+        swapped, touched, inside = 0, set(), set()
+        for r, src in good.items():
+            if all(piece_ok(j, good) for j in edges(by_rel[r]) if j not in pending):
+                swap(r, src, rel)
+                swapped += 1
+                touched |= edges(by_rel[r])
+                inside |= set(file_pieces(by_rel[r]))     # verified by copy_verifies
+            else:
+                pool.setdefault(r, []).append((src, rel))
+        pending = sorted(j for j in (set(pending) - (inside - touched)) | touched if not piece_ok(j, {}))
+        info(f"took {swapped} file(s) from {rel.title} at once; {len(pending)} failing piece(s) left")
+
     def next_whole() -> bool:
         """Download the next other post of the season (or the whole release) holding failing
         files, and keep every failing file's copy in it that verifies. False = none left.
@@ -2189,13 +2214,13 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                 for r, src in found.items():
                     if r in by_rel:
                         seen(r, src)
-                got = 0
+                good = {}
                 for r in mine:
                     src = found.get(r)
                     if src and copy_verifies(t, by_rel[r], src, res.placed):
-                        pool.setdefault(r, []).append((src, rel))
-                        got += 1
-                info(f"{rel.title} ({rel.indexer}): {got} of the {len(mine)} failing file(s) verify in it")
+                        good[r] = src
+                info(f"{rel.title} ({rel.indexer}): {len(good)} of the {len(mine)} failing file(s) verify in it")
+                take_all(good, rel)
                 return True
         return False
 
@@ -2279,10 +2304,10 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
             paths = {r: c[0] for r, c in found.items()}
             touched = set()
             for rel, (path, used) in found.items():
-                touched.update(file_pieces(by_rel[rel]))
+                touched.update(edges(by_rel[rel]))
                 # a whole-file swap only when it breaks no piece that verifies now - a copy
                 # missing articles elsewhere gives just this piece
-                if all(piece_ok(j, paths) for j in file_pieces(by_rel[rel]) if j not in pending):
+                if all(piece_ok(j, paths) for j in edges(by_rel[rel]) if j not in pending):
                     swap(rel, path, used)
                     pool[rel] = [c for c in pool.get(rel, []) if c[0] != path]
                 else:
