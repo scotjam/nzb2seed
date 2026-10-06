@@ -40,13 +40,16 @@ class SAB:
         self.added.append(guid)
         d = os.path.join(self.root, nzo)
         os.makedirs(d)
-        ep = pipeline._EP.search(name.lower()).group(0)
-        fname = next(f for f in self.files if ep in f)
-        data = self.files[fname]
-        if guid in self.remuxed:
-            data = b"REMUXED-HEADER!!" + data[16:]           # same size, different start
-        with open(os.path.join(d, name + ".mkv"), "wb") as fh:
-            fh.write(data)
+        m = pipeline._EP.search(name.lower())
+        for fname, data in self.files.items():
+            if m and m.group(0) not in fname:
+                continue                                  # an episode post: just that episode
+            if guid in self.remuxed or (guid, fname) in self.remuxed:
+                data = b"REMUXED-HEADER!!" + data[16:]       # same size, different start
+            if (guid, fname, "end") in self.remuxed:
+                data = data[:-16] + bytes(16)                # missing articles: zeros at the end
+            with open(os.path.join(d, (name + ".mkv") if m else fname), "wb") as fh:
+                fh.write(data)
         return nzo
 
     def ensure_pp(self, nzo, pp):
@@ -64,7 +67,10 @@ class PR:
         return f"<?xml version='1.0'?><nzb/><!--guid={r.guid}-->".encode()
 
     def search(self, query, *a):
-        ep = pipeline._EP.search(query.replace(" ", ".")).group(0)
+        m = pipeline._EP.search(query.replace(" ", "."))
+        if m is None:                     # a season search
+            return [r for r in self.results if not pipeline._EP.search(r.title.lower())]
+        ep = m.group(0)
         return [r for r in self.results if ep in r.title.lower()]
 
 
@@ -99,6 +105,74 @@ def test_bad_copies_are_replaced_until_every_piece_verifies(tmp_path):
             assert fh.read() == data
     # only the suspects were re-downloaded: E02 twice (first alternative was bad too), E04 once
     assert sab.added[4:] == ["alt20", "alt21", "alt40"]
+
+
+def season_setup(tmp_path, remuxed, extra):
+    t, raw, files = pack()
+    tfile = tmp_path / "pack.torrent"
+    tfile.write_bytes(raw)
+    total = sum(len(v) for v in files.values())
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]],
+                 torrent_dir=str(tmp_path / "torrents"))
+    sab = SAB(str(tmp_path / "dl"), files, remuxed)
+    pr = PR(extra)
+    slots = []
+    dirs, _ = pipeline.usenet_multi(cfg, pr, sab, t, [[rel(PACK, total + 100, "seasA")]], 2, slots)
+    return t, str(tfile), cfg, sab, pr, slots, dirs, files, total
+
+
+def test_a_damaged_season_post_is_replaced_by_another_season_post_first(tmp_path):
+    """Every episode of the season post is bad (missing articles all through): the other
+    season posts are tried before any episode post - one download replaces them all."""
+    def extra(total):
+        return [rel(PACK + ".repost", total + 300, "seasB", grabs=9), rel(PACK + ".v2", total + 200, "seasC", grabs=5)]
+    _, raw, files = pack()
+    total = sum(len(v) for v in files.values())
+    eps = [rel(f"Show.2016.S03E0{i}.720p.HDTV.x264-GRPA", 50_000, f"ep{i}") for i in range(1, 5)]
+    t, tfile, cfg, sab, pr, slots, dirs, files, _ = season_setup(tmp_path, {"seasA", "seasB"}, extra(total) + eps)
+    out = str(tmp_path / "complete")
+    result = pipeline.finish(cfg, Options(no_qbit=True), t, tfile, dirs, out, None, None,
+                             retry=Retry(cfg, pr, sab, 2, slots))
+    assert result["result"] == "files ready"
+    for name, data in files.items():
+        with open(os.path.join(out, PACK, name), "rb") as fh:
+            assert fh.read() == data
+    assert sab.added == ["seasA", "seasB", "seasC"]            # no episode post needed
+
+
+def test_every_season_and_episode_post_is_tried_before_giving_up(tmp_path, monkeypatch):
+    """Only one file is bad, so episode posts come first - but when they run out, the other
+    season posts are still tried before saying no NZB has it."""
+    monkeypatch.setattr(pipeline, "report_ask", lambda p, c: None)
+    _, raw, files = pack()
+    total = sum(len(v) for v in files.values())
+    e2 = next(f for f in files if "s03e02" in f)
+    posts = [rel(f"Show.2016.S03E02.720p.HDTV.x264-GRPA", len(files[e2]) + 200, "ep2"),
+             rel(PACK + ".repost", total + 300, "seasB")]
+    t, tfile, cfg, sab, pr, slots, dirs, files, _ = season_setup(tmp_path, {("seasA", e2), "ep2"}, posts)
+    out = str(tmp_path / "complete")
+    result = pipeline.finish(cfg, Options(no_qbit=True), t, tfile, dirs, out, None, None,
+                             retry=Retry(cfg, pr, sab, 2, slots))
+    assert result["result"] == "files ready"
+    assert sab.added == ["seasA", "ep2", "seasB"]
+
+
+def test_pieces_are_taken_from_whichever_copy_has_them_when_no_post_is_whole(tmp_path, monkeypatch):
+    """Both season posts miss articles of E02, in different places: no single post is whole,
+    but every piece is intact in one of them - the build is completed from the two."""
+    monkeypatch.setattr(pipeline, "report_ask", lambda p, c: None)
+    _, raw, files = pack()
+    total = sum(len(v) for v in files.values())
+    e2 = next(f for f in files if "s03e02" in f)
+    t, tfile, cfg, sab, pr, slots, dirs, files, _ = season_setup(
+        tmp_path, {("seasA", e2), ("seasB", e2, "end")}, [rel(PACK + ".repost", total + 300, "seasB")])
+    out = str(tmp_path / "complete")
+    result = pipeline.finish(cfg, Options(no_qbit=True), t, tfile, dirs, out, None, None,
+                             retry=Retry(cfg, pr, sab, 2, slots))
+    assert result["result"] == "files ready"
+    for name, data in files.items():
+        with open(os.path.join(out, PACK, name), "rb") as fh:
+            assert fh.read() == data
 
 
 def test_retry_switched_off_stops_the_build(tmp_path):
