@@ -2071,6 +2071,11 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                 file_slot.setdefault(f.relpath, sl)
     pool: dict[str, list] = {}            # relpath -> [(path, release)] copies whose insides verify
     exhausted: set[str] = set()
+    every: dict[str, list[str]] = {}      # relpath -> every downloaded copy of the right size, good or not
+
+    def seen(rel: str, path: str | None):
+        if path and os.path.getsize(path) == by_rel[rel].length and path not in every.setdefault(rel, []):
+            every[rel].append(path)
     by_rel = {f.relpath: f for f in t.real_files}
 
     def piece_ok(i: int, choice: dict) -> bool:
@@ -2091,6 +2096,22 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
         owned.save()
         info(f"replaced {by_rel[rel].name} with the copy from {used.title} ({used.indexer})")
 
+    def file_pieces(f) -> range:
+        return range(f.offset // t.piece_length, (f.offset + max(f.length, 1) - 1) // t.piece_length + 1)
+
+    def patch(r: str, src: str, i: int, used: Release | None = None):
+        """Write only piece ``i``'s bytes of file ``r`` from ``src`` into the placed file."""
+        f = by_rel[r]
+        start, end = t.piece_span(i)
+        lo, hi = max(start, f.offset), min(end, f.offset + f.length)
+        with open(src, "rb") as fi, open(res.placed[r], "r+b") as fo:
+            fi.seek(lo - f.offset)
+            fo.seek(lo - f.offset)
+            fo.write(fi.read(hi - lo))
+        if used is not None:
+            info(f"took piece {i} of {f.name} from {used.title} ({used.indexer}) - the rest of that "
+                 "copy differs, so the file itself was kept")
+
     def stop_note() -> str:
         """What stopping now means - so the question is not only "which NZB"."""
         from .config import limit_text, within_limit
@@ -2104,6 +2125,80 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                    f"more than {tracker} allows ({limit_text(rt.cfg, tracker)}); Override can still add it "
                    "to download") + " over BitTorrent.")
 
+    def download(rel: Release, holds) -> str | None:
+        """The post's download folder - an earlier download of it reused - or None."""
+        again = reuse(rt.cfg, rt.sab, rel, holds)
+        if again and again[1]:
+            d = again[1]
+        else:
+            try:
+                if again:
+                    nzo = again[0]
+                else:
+                    data = rt.pr.fetch(rel)
+                    prev = earlier_post(rt.cfg, rt.sab, rel, data)
+                    if prev and prev[0] != "downloading":
+                        info(f"{prev[3]} - skipping it")
+                        _drop(rt.pr, rel)
+                        return None
+                    nzo = prev[1] if prev else sab_submit(rt.cfg, rt.pr, rt.sab, rel, data, rt.pp)
+            except ApiError as e:
+                warn(f"{rel.indexer}: {e}")
+                return None
+            status, slot_info = sab_wait(rt.sab, {nzo: rel.title})[nzo]
+            if status not in SAB_DONE:
+                return None
+            d = job_dir(rt.cfg, slot_info, rel.title)
+        if d not in job_dirs:
+            job_dirs.append(d)            # ours: cleaned up with the rest
+        return d
+
+    big_done: set[int] = set()            # season / whole slots with no posts left
+
+    def failing_files() -> set[str]:
+        return {f.relpath for i in pending for f in suspects(i)
+                if f.relpath in file_slot and owned.owns(res.placed.get(f.relpath, ""))}
+
+    def next_whole() -> bool:
+        """Download the next other post of the season (or the whole release) holding failing
+        files, and keep every failing file's copy in it that verifies. False = none left.
+        Every post is tried before saying no NZB has the files; what is missing only decides
+        the order (many files failing: these first - one download can replace them all)."""
+        bad_files = failing_files()
+        for sl in sorted((x for x in rt.slots if x.level in ("season", "whole") and id(x) not in big_done),
+                         key=lambda x: order.get(x.level, 3)):
+            mine = sorted(r for r in bad_files if sl.covers(by_rel[r]))
+            if not mine:
+                continue
+            while True:
+                check_cancel()
+                rel = next_post(rt.cfg, rt.pr, sl, False)
+                if rel is None:
+                    big_done.add(id(sl))
+                    info(f"no more posts of {sl.need.label} to try")
+                    break
+                sl.tried.append(rel)
+                if failed_before(rt.cfg, rt.sab, rel):
+                    continue
+                step(f"{len(mine)} file(s) have failing pieces - trying another post of {sl.need.label}: "
+                     f"{rel.title} ({rel.indexer})")
+                d = download(rel, lambda d: True)
+                if d is None:
+                    continue
+                found = asm.find_sources(t, [d])
+                for r, src in found.items():
+                    if r in by_rel:
+                        seen(r, src)
+                got = 0
+                for r in mine:
+                    src = found.get(r)
+                    if src and copy_verifies(t, by_rel[r], src, res.placed):
+                        pool.setdefault(r, []).append((src, rel))
+                        got += 1
+                info(f"{rel.title} ({rel.indexer}): {got} of the {len(mine)} failing file(s) verify in it")
+                return True
+        return False
+
     def fetch_copy(f) -> tuple[str, Release] | None:
         slot = file_slot[f.relpath]
         while True:
@@ -2114,41 +2209,58 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
             if failed_before(rt.cfg, rt.sab, rel):
                 continue
             step(f"Trying another copy of {f.name}: {rel.title} ({rel.indexer})")
-            again = reuse(rt.cfg, rt.sab, rel, lambda d: supplies(t, d, f.name))
-            if again and again[1]:
-                d = again[1]
-            else:
-                try:
-                    if again:
-                        nzo = again[0]
-                    else:
-                        data = rt.pr.fetch(rel)
-                        prev = earlier_post(rt.cfg, rt.sab, rel, data)
-                        if prev and prev[0] != "downloading":
-                            info(f"{prev[3]} - skipping it")
-                            _drop(rt.pr, rel)
-                            continue
-                        nzo = prev[1] if prev else sab_submit(rt.cfg, rt.pr, rt.sab, rel, data, rt.pp)
-                except ApiError as e:
-                    warn(f"{rel.indexer}: {e}")
-                    continue
-                status, slot_info = sab_wait(rt.sab, {nzo: rel.title})[nzo]
-                if status not in SAB_DONE:
-                    continue
-                d = job_dir(rt.cfg, slot_info, rel.title)
-            if d not in job_dirs:
-                job_dirs.append(d)        # ours: cleaned up with the rest
+            d = download(rel, lambda d: supplies(t, d, f.name))
+            if d is None:
+                continue
             src = asm.find_sources(t, [d]).get(f.relpath)
             if src is None and supplies(t, d, f.name):
                 src = asm.find_sources(t, [d]).get(f.relpath)
             if src is None:
                 warn(f"{rel.title} does not hold {f.name}")
                 continue
+            seen(f.relpath, src)
             if not copy_verifies(t, f, src, res.placed):
                 warn(f"the copy of {f.name} in {rel.title} differs inside the file too")
                 continue
             info(f"the copy of {f.name} in {rel.title} verifies inside the file")
             return src, rel
+
+    def splice() -> bool:
+        """Every post tried and pieces still fail: posts missing articles have their holes in
+        different places, so each failing piece is taken from whichever downloaded copy has
+        it whole - copies rejected as whole files included. Only the piece's own bytes are
+        written into the placed file. True = every piece verifies."""
+        nonlocal pending
+        copies = {r: [c for c in v if os.path.exists(c)] for r, v in every.items()}
+        if not any(copies.values()):
+            return False
+        step(f"Every post has been tried - taking each of the {len(pending)} failing piece(s) from "
+             "whichever downloaded copy has it intact")
+        before = len(pending)
+        for n, i in enumerate(pending):
+            check_cancel()
+            progress(f"piece {n + 1}/{len(pending)}")
+            start, end = t.piece_span(i)
+            fs = suspects(i)
+            options = [[None] + copies.get(f.relpath, [])
+                       if f.relpath in file_slot and owned.owns(res.placed.get(f.relpath, "")) else [None]
+                       for f in fs]
+            fixed = None
+            for k, combo in enumerate(itertools.product(*options)):
+                if k >= 5000:
+                    break
+                choice = {f.relpath: c for f, c in zip(fs, combo) if c}
+                if choice and piece_ok(i, choice):
+                    fixed = choice
+                    break
+            if fixed is None:
+                continue
+            for r, src in fixed.items():
+                patch(r, src, i)
+        end_progress()
+        pending = [j for j in pending if not piece_ok(j, {})]
+        info(f"{before - len(pending)} piece(s) now verify, taken from other copies; {len(pending)} still fail")
+        return not pending
 
     pending = sorted(set(bad))
     while pending:
@@ -2164,16 +2276,31 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                 found = choice
                 break
         if found:
+            paths = {r: c[0] for r, c in found.items()}
+            touched = set()
             for rel, (path, used) in found.items():
-                swap(rel, path, used)
-                pool[rel] = [c for c in pool.get(rel, []) if c[0] != path]
-            pending = [j for j in pending if not piece_ok(j, {})]
+                touched.update(file_pieces(by_rel[rel]))
+                # a whole-file swap only when it breaks no piece that verifies now - a copy
+                # missing articles elsewhere gives just this piece
+                if all(piece_ok(j, paths) for j in file_pieces(by_rel[rel]) if j not in pending):
+                    swap(rel, path, used)
+                    pool[rel] = [c for c in pool.get(rel, []) if c[0] != path]
+                else:
+                    patch(rel, path, i, used)
+            pending = sorted(j for j in set(pending) | touched if not piece_ok(j, {}))
             info(f"piece {i} verifies now; {len(pending)} failing piece(s) left")
             continue
+        if len(failing_files()) >= 3 and next_whole():
+            continue                      # many files failing: whole-season posts first
         todo = [f for f in changeable if f.relpath not in exhausted]
+        if not todo and next_whole():
+            continue                      # episode posts used up: the season posts before giving up
+        if not todo and splice():
+            break                         # every piece taken from a copy that has it
         if not todo:
             names = ", ".join(f.name for f in fs)
-            warn(f"piece {i} still fails and there are no more copies of {names} to try")
+            warn(f"piece {i} still fails: every post of {names} - season and episode posts alike - "
+                 "has been tried")
             return False
         target = min(todo, key=lambda f: (len(pool.get(f.relpath, [])), changeable.index(f)))
         got = fetch_copy(target)
