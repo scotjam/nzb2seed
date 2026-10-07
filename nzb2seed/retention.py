@@ -95,10 +95,40 @@ def mark_automatic(cfg: Config, infohash: str):
     os.replace(tmp, path)
 
 
+def record_of(cfg: Config, infohash: str) -> str:
+    return os.path.join(cfg.torrent_dir, infohash.lower() + SUFFIX)
+
+
+def removable(cfg: Config, infohash: str) -> bool | None:
+    """Whether a build is removed after the retention days (None: no record of its files,
+    so it never is)."""
+    path = record_of(cfg, infohash)
+    if not os.path.exists(path):
+        return None
+    return made_automatically(cfg, infohash.lower(), path, automatic(cfg))
+
+
+def set_removable(cfg: Config, infohash: str, on: bool):
+    """Chosen per job: removed after the retention days or kept, whoever built it. Only
+    that choice is written; the recorded sizes and times are left as they are."""
+    path = record_of(cfg, infohash)
+    with open(path, encoding="utf-8") as fh:
+        d = json.load(fh)
+    d["auto_remove"] = bool(on)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(d, fh)
+    os.replace(tmp, path)
+
+
 def made_automatically(cfg: Config, infohash: str, record: str, seen: set[str]) -> bool:
-    """Only what the Automatic tab built is ever removed again. A build, season or assemble
-    you asked for yourself is never swept away, however old it is."""
-    source = asm.Owned(record).source
+    """Only what the Automatic tab built is removed again - unless chosen otherwise for the
+    job. A build, season or assemble you asked for yourself is never swept away, however
+    old it is, unless you ticked it to be."""
+    owned = asm.Owned(record)
+    if owned.auto_remove is not None:
+        return bool(owned.auto_remove)
+    source = owned.source
     if source:
         return source == "auto"
     return infohash in seen        # older records: the inbox still lists what it built
