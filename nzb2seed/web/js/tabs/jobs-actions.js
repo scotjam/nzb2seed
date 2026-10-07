@@ -120,9 +120,10 @@ export function abandonMany(list, done) {
 export async function removeMany(list, done) {
   const all = jobs.get();
   const open = list.filter(j => canAdd(j, all) || canAbandon(j, all)).length;
-  if (!confirm(`Clear ${list.length} job(s) from the list?\n\nTheir Usenet downloads are cleared within the hour, once nothing else needs them `
-      + `(use Clear from list, delete files to clear them now). Nothing in qBittorrent and no file a build placed for its torrent is touched. `
-      + `Automatic torrents stay on the Automatic tab, where they can still be tried again - downloading afresh.`
+  if (!confirm(`Clear ${list.length} job(s) from the list and keep their files?\n\nNo file is deleted: not the torrents' files, `
+      + `and not their downloads in your Usenet downloads folder - temporary files may be left there for you to delete `
+      + `(Clear from list, delete files removes those). Nothing in qBittorrent is touched. `
+      + `Automatic torrents stay on the Automatic tab, where they can still be tried again.`
       + (open ? `\n\n${open} of them still have Add to torrent client or Abandon on them - those buttons go with them, `
         + `and anything such a build left behind stays where it is.` : ""))) return;
   try {
@@ -181,7 +182,7 @@ export async function clearAndDelete(list, done) {
   if (!confirm(`Clear ${list.length} job(s) from the list and delete their files?\n\n`
       + `Their Usenet downloads are deleted, and the files the builds placed for their torrents - unless a torrent in `
       + `qBittorrent uses them, a running build is using them, or they are shared with another download. `
-      + `Nothing in qBittorrent is changed. This cannot be undone.`)) return;
+      + `A torrent in qBittorrent and its files are never deleted. This cannot be undone.`)) return;
   for (const j of list.filter(j => canAbandon(j, all))) {
     try { await api("/api/jobs/abandon", { id: j.id }); } catch { /* still cleared below */ }
   }
