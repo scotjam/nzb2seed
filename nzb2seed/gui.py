@@ -1442,14 +1442,14 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     return self._err("that tracker's torrent is not known for this job - Look on other trackers first")
                 return self._json({"id": app.add_via_tracker(job, r).id})
             if path == "/api/jobs/auto_remove":
-                # per job: removed after the retention days, or kept - whoever built it
+                # per automatic build: follow the removal rules (the default), or be kept
                 try:
                     job = app.jobs.get(int(body.get("id")))
                 except (TypeError, ValueError):
                     job = None
                 h = app.torrent_of(job) if job else ""
                 if not h or retention_mod.removable(app.cfg, h) is None:
-                    return self._err("nzb2seed has no record of this build's files, so it is never removed")
+                    return self._err("only automatic builds are ever removed - this one is kept")
                 retention_mod.set_removable(app.cfg, h, bool(body.get("on")))
                 app.store.changed(urgent=True)
                 return self._json({"auto_remove": retention_mod.removable(app.cfg, h)})
