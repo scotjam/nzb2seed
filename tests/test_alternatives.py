@@ -571,3 +571,39 @@ def test_an_encoder_and_group_run_together_is_read_as_the_group(tmp_path, monkey
     monkeypatch.setattr(pipeline, "_JOINED", {})                            # a restart: read back from disk
     pipeline.configure_groups(str(tmp_path / "nzb2seed.toml"))
     assert group_of(dotted) == "grpq"
+
+
+def test_posts_that_cannot_hold_the_file_by_size_are_not_offered(tmp_path, monkeypatch):
+    """Far larger with the same episode in its name: another encode (a disc of the episode,
+    say). Far smaller: cannot hold it. Neither is offered; with only those, nothing is asked."""
+    t, files = pack_torrent()
+    size2 = len(next(v for k, v in files.items() if "s03e02" in k))
+    failing = "Show.2016.S03E02.720p.HDTV.x264-GRPA-xRePo"
+    disc = rel("Show.2016.S03E02.720p.Blu-ray", size2 * 19 + (300 << 20), "disc")
+    tiny = rel("Show.2016.S03E02.720p.HDTV", size2 // 2, "tiny")
+    asked = []
+    monkeypatch.setattr(pipeline, "report_ask", lambda p, c: asked.append(c) or None)
+    sab = PackSAB(str(tmp_path), files, failing={failing})
+    with pytest.raises(Abort):
+        pipeline.usenet_multi(Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]]),
+                              NZBsOK([disc, tiny]), sab, t, with_others(files, [rel(failing, size2 + 100)]), 2)
+    assert asked == []                                         # nothing it could be: not asked
+
+
+def test_the_picker_says_how_each_size_compares():
+    need = pipeline.Need(label="S03E02", query="show s03e02", group="grpa", res="720p", ep="s03e02",
+                         min_size=1000 << 20, target="x.mkv")
+    ok, fits = pipeline.size_verdict(need, rel("Show.S03E02.720p.HDTV", 1100 << 20, "a"))
+    assert fits and ok == "1.10× the 1000.0 MB file"
+    say, fits = pipeline.size_verdict(need, rel("Show.S03E02.720p.Blu-ray", 19000 << 20, "b"))
+    assert not fits and "different encode" in say
+    # a season post holds more than the episode: larger is fine
+    assert pipeline.size_verdict(need, rel("Show.S03.720p.HDTV", 19000 << 20, "c"))[1]
+
+
+def test_another_codec_is_another_encode():
+    need = pipeline.Need(label="S03E03", query="show s03e03", group="grpa", res="1080p", ep="s03e03",
+                         min_size=1000 << 20, target="Show.S03E03.1080p.AMZN.WEB-DL.DDP5.1.H.265-GRPA.mkv")
+    assert pipeline._fits(need, rel("Show.S03E03.1080p.AMZN.WEB-DL.DDP5.1.H.264-GRPA", 1100 << 20, "a")) == "other codec"
+    assert pipeline._fits(need, rel("Show.S03E03.1080p.AMZN.WEB-DL.DDP5.1.HEVC-GRPA", 1100 << 20, "b")) is None
+    assert pipeline._fits(need, rel("Show.S03E03.1080p.AMZN.WEB-DL-GRPA", 1100 << 20, "c")) is None   # names none

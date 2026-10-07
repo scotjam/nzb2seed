@@ -417,3 +417,10 @@ def test_a_job_built_again_from_another_tracker_is_replaced(settings_file):
     assert seen["says"] == "replaced by job 99: being built from TrackerTwo"
     assert seen["dot"] == "dot skipped"
     assert seen["buttons"] == ["Clear from list, keep files", "Clear from list, delete files"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_the_jobs_list_can_be_filtered_by_keyword(settings_file):
+    seen = run("new", "jobSearch", settings_file)["seen"]
+    assert seen["narrowed"] and all("Show.S02" in t for t in seen["narrowed"])
+    assert len(seen["narrowed"]) < seen["before"] and seen["after"] == seen["before"]
