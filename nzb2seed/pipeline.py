@@ -1009,7 +1009,51 @@ MAX_INCOMPLETE = 3   # completed posts that turned out to lack files, before ask
 _NOT_GROUP = {"dl", "rip", "ray", "hd", "ma", "es", "x", "hr", "lq", "dvd", "tv", "tc", "ts"}
 
 
+# encoder + group run together when a name is reposted with dots: "(... - Enc)[Grp]" becomes
+# "....Enc.Grp" -> "encgrp". Learnt only from a name showing both parts, and kept on disk
+_JOINED: dict[str, str] = {}
+_JOINED_PATH: str | None = None
+_JOINED_LOCK = threading.Lock()
+
+
+def configure_groups(config_path: str):
+    """Keep the encoder + group pairs learnt next to the config, so they last."""
+    global _JOINED_PATH
+    _JOINED_PATH = os.path.join(os.path.dirname(os.path.abspath(config_path)), "group_pairs.json")
+    try:
+        with open(_JOINED_PATH, encoding="utf-8") as fh:
+            d = json.load(fh)
+        with _JOINED_LOCK:
+            _JOINED.update({str(k): str(v) for k, v in d.items()} if isinstance(d, dict) else {})
+    except (OSError, ValueError):
+        pass
+
+
+def _learn_joined(encoder: str, group: str):
+    key = (encoder + group).lower()
+    with _JOINED_LOCK:
+        if _JOINED.get(key) == group.lower():
+            return
+        _JOINED[key] = group.lower()
+        if not _JOINED_PATH:
+            return
+        try:
+            tmp = _JOINED_PATH + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(_JOINED, fh, indent=1, sort_keys=True)
+            os.replace(tmp, _JOINED_PATH)
+        except OSError:
+            pass
+
+
 def group_of(name: str) -> str | None:
+    """Release group - an encoder and group run together by a repost ("encgrp") read as the
+    group, once a name showing both has been seen (see _JOINED)."""
+    g = _group_of(name)
+    return _JOINED.get(g, g) if g else g
+
+
+def _group_of(name: str) -> str | None:
     """Release group: the first real dash-token after the episode/resolution part, where a
     scene dash has no spaces around it and tech tags like WEB-DL are skipped.
     'Show.S03E02.720p.WEB-DL.AAC2.0.H.264-GRP-xpost' -> 'grp', '...-grp.mkv' -> 'grp',
@@ -1067,6 +1111,10 @@ def _group_without_dash(s: str) -> str | None:
 
     m = re.search(r"\)\s*\[" + _GROUPWORD + r"\]$", s)                    # (...)[Grpc]
     if m and ok(m.group(1)):
+        # "(... - Enc)[Grpc]": the encoder, then the group - a dotted repost runs them together
+        enc = re.search(r"[\s.]-[\s.]([A-Za-z0-9]{2,20})\)\s*\[[^\]]+\]$", s)
+        if enc and ok(enc.group(1)):
+            _learn_joined(enc.group(1), m.group(1))
         return m.group(1).lower()
     m = re.search(r"\)\s+-\s+" + _GROUPWORD + r"$", s)                    # (...) - Grpd
     if m and ok(m.group(1)):
