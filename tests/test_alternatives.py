@@ -44,6 +44,18 @@ def rel(title, size, guid=None, grabs=0, indexer="idx"):
     ("Show (2004) (74543) - S04E01 - The Title - [Bluray-1080p] [GRPD]", "grpd"),
     ("Show (2020) - S01E01 - Pilot - [WEBDL-1080p][x264] [ENG]", None),
     ("Show (2020) - S01E01 - Pilot - [Bluray-1080p] [x265]", None),
+    # named without the scene dash, after the tech tags
+    ("Show.2022.S03E03.Title.1080p.AMZN.WEB-DL.x265.Grpg", "grpg"),
+    ("Show.2022.S03E03.Title.1080p.AMZN.Webrip.x265.10bit.EAC3.5.1.Atmos.GRPZ", "grpz"),
+    ("Show.2022.S03E03.Title.1080p.AMZN.Webrip.x265.10bit.EAC3.5.1.Atmos.GRPZ]", "grpz"),
+    ("show.s03e03.title.1080p.web.dl.hevc.x265.grpteam", "grpteam"),
+    ("Show (2022) S03E03 Title (1080p AMZN Webrip x265 10bit EAC3 5.1 Atmos - ENC)[GRPQ]", "grpq"),
+    ("Show (2022) S03E03 (1080p DS4K AMZN Webrip DV HDR10+ DDP5.1 x265) - Grpv", "grpv"),
+    ("Show (2016) - S03E03 - Title (1080p BluRay x265 Grps)", "grps"),
+    ("Show (2022) - S03E03 - Title (1080p AMZN WEB-DL x265 Grpg)", "grpg"),
+    ("Show.S03E03.Title.1080p.Blu-ray", None),                              # no group named
+    ("Show.S03E03.Title.1080p.AMZN.WEB-DL.DDP5.1.x265", None),              # ends in a tag
+    ("Show.S03E03.The.Long.Road.Home", None),                               # a title, not a group
 ])
 def test_group_of(name, group):
     assert group_of(name) == group
