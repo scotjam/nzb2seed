@@ -38,8 +38,8 @@ export function JobsTab({ active }) {
       <div class="jobside">
         <${JobBar} all=${all} shown=${shown} ticked=${ticked} picked=${picked} kind=${kind} counts=${counts}
           choose=${choose} select=${select} untick=${untick} />
-        <p class="status jobtip">Tip: clearing old jobs from the list lets nzb2seed clear the downloads they made -
-          clear them once you are done with them (Clear from list, delete files does it at once).</p>
+        <p class="status jobtip">Tip: a job's Usenet downloads stay while it is on the list. Clear from list, delete files
+          removes them; Clear from list, keep files leaves them in your Usenet downloads folder for good.</p>
         <div class="joblist" id="joblist">
           ${shown.length ? shown.map(j => html`
             <${JobRow} key=${j.id} j=${j} all=${all} on=${picked.has(j.id)} via=${picked.get(j.id)} current=${j.id === current}
@@ -93,7 +93,7 @@ function JobBar({ all, shown, ticked, picked, kind, counts, choose, select, unti
         ${btn("Cancel selected (kept on list)", ticked.filter(isLive), cancelMany, "Stop each ticked running or queued build after its current step - nothing is deleted, and it can be tried again")}
         ${btn("Add to torrent client (download the rest)", [...addable, ...viaOther], add,
           "Hand each ticked build that is within what its tracker lets you download to qBittorrent - and build the torrent of the tracker a job is ticked via, reusing what was downloaded")}
-        ${btn("Clear from list, keep files", ticked.filter(canRemove), removeMany, "Take the ticked finished jobs off this list. The files they placed and anything in qBittorrent stay; their unused Usenet downloads are cleared within the hour")}
+        ${btn("Clear from list, keep files", ticked.filter(canRemove), removeMany, "Take the ticked finished jobs off this list. The files they placed, their Usenet downloads and anything in qBittorrent all stay")}
         ${btn("Clear from list, delete files", ticked.filter(canRemove), clearAndDelete, "Take the ticked finished jobs off this list and delete their Usenet downloads and the files they placed - never anything a torrent in qBittorrent uses")}
       </div>
     </div>`;
@@ -147,7 +147,7 @@ function JobActions({ j, all }) {
   useStore(settings);                      // a tracker's limit set here (or in Settings) shows at once
   // the same as the Jobs bar's actions, for this one job
   const clear = canRemove(j) && html`
-    <${Act} label="Clear from list, keep files" title="Take this job off the list. The files it placed and anything in qBittorrent stay; its unused Usenet downloads are cleared within the hour"
+    <${Act} label="Clear from list, keep files" title="Take this job off the list. The files it placed, its Usenet downloads and anything in qBittorrent all stay"
       onPress=${() => removeMany([j])} />
     <${Act} label="Clear from list, delete files" title="Take this job off the list and delete its Usenet downloads and the files it placed - never anything a torrent in qBittorrent uses"
       onPress=${() => clearAndDelete([j])} />`;

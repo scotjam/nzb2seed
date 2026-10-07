@@ -69,24 +69,21 @@ INTENDED = [
     (re.compile(r"Always add, for these trackers ((?:\[[x ]\] \S+(?: \(API\))? )*)Ticked: .*? you are asked each time\."),
      lambda m: "Always add, for these trackers [" + ", ".join(
          re.findall(r"\[x\] (\S+)", m.group(1))) + "]"),
-    # the Jobs tab tells you to abandon old jobs so their downloads can be cleared
-    (re.compile(r" ?Tip: clearing old jobs from the list lets nzb2seed clear the downloads they made - "
-                r"clear them once you are done with them \(Clear from list, delete files does it at once\)\. ?"), " "),
-    # ...and its confirmations name them so
-    (re.compile(r"^Clear (\d+) job\(s\) from the list\?"), r"Remove \1 job(s) from the list?"),
-    (re.compile(r"\(use Clear from list, delete files to clear them now\)"), "(use Remove and delete downloads to clear them now)"),
+    # the Jobs tab says what each Clear from list does with the downloads
+    (re.compile(r" ?Tip: a job's Usenet downloads stay while it is on the list\. Clear from list, delete files "
+                r"removes them; Clear from list, keep files leaves them in your Usenet downloads folder for good\. ?"), " "),
+    # ...and its "keep files" confirmation says no file is deleted, and what may be left behind
+    (re.compile(r"^Clear (\d+) job\(s\) from the list and keep their files\?\n\nNo file is deleted: not the torrents' "
+                r"files, and not their downloads in your Usenet downloads folder - temporary files may be left there "
+                r"for you to delete \(Clear from list, delete files removes those\)\. Nothing in qBittorrent is touched\. "
+                r"Automatic torrents stay on the Automatic tab, where they can still be tried again\."),
+     r"Remove \1 job(s) from the list?\n\nOnly the list entries go: no file, download or torrent is touched, and "
+     r"automatic torrents stay on the Automatic tab where they can still be tried again."),
     # the Jobs bar: Select: and Action:, actions named by what they do
     (re.compile(r"Select: All Failed Nearly complete Running / queued Completed Automatic Manual None (?:\[Tracker.\] )?"
                 r"Action: Retry selected Cancel selected \(kept on list\) Add to torrent client \(download the rest\) "
                 r"Clear from list, keep files Clear from list, delete files"),
      "Tick all that failed Try again Add to torrent client Abandon Remove from list Clear auto jobs from queue"),
-    # removing a job from the list now frees its Usenet downloads (within the hour)
-    (re.compile(r"Their Usenet downloads are cleared within the hour, once nothing else needs them "
-                r"\(use Remove and delete downloads to clear them now\)\. Nothing in qBittorrent and no file a build "
-                r"placed for its torrent is touched\. Automatic torrents stay on the Automatic tab, where they can "
-                r"still be tried again - downloading afresh\."),
-     "Only the list entries go: no file, download or torrent is touched, and automatic torrents stay on the "
-     "Automatic tab where they can still be tried again."),
     (re.compile(r"Add to torrent client \([^)]*\): "), "Add to torrent client: "),
     (re.compile(r" \((?:TrackerOne|TrackerTwo|tracker unknown)\): (\S+%)"), r": \1"),
     # a build already in qBittorrent can be abandoned too (qBittorrent is left alone), so the

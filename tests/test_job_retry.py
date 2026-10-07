@@ -189,3 +189,25 @@ def test_what_the_jobs_still_need(server):  # noqa: F811
         assert "2" * 40 not in app.downloads_in_use()[0]
     finally:
         hold.set()
+
+
+def test_cleared_with_keep_files_its_downloads_are_never_cleared(server):  # noqa: F811
+    """Clear from list, keep files: its Usenet downloads stay for good - the hourly clean-up
+    leaves them alone, after a restart too. Clear from list, delete files lets them go."""
+    import time
+    from nzb2seed import gui
+    from nzb2seed.pipeline import release_key
+    app, url = server
+    job = app.start_job("Film.2020.1080p-GRP", "build", lambda cfg: (_ for _ in ()).throw(ValueError("no")))
+    end = time.time() + 5
+    while time.time() < end and job.status == "running":
+        time.sleep(0.05)
+    job.infohash = "4" * 40
+    status, _ = call(url + "/api/jobs/remove", *AUTH, body={"ids": [job.id]})
+    assert status == 200 and job.id not in app.jobs
+    keep, _, names = app.downloads_in_use()
+    assert "4" * 40 in keep and release_key("Film.2020.1080p-GRP") in names
+    again = gui.App(app.cfg.path)                          # remembered across a restart
+    assert "4" * 40 in again.downloads_in_use()[0]
+    app.forget_kept({"4" * 40}, {release_key("Film.2020.1080p-GRP")})
+    assert "4" * 40 not in app.downloads_in_use()[0]
