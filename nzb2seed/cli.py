@@ -16,6 +16,7 @@ import re
 import sys
 
 from . import matching
+from . import pipeline as pipeline_mod
 from .clients import ApiError, Prowlarr, Release
 from .config import Config, load
 from .pipeline import (Abort, Options, execute_assemble, execute_run, gb, group_selection,
@@ -197,6 +198,7 @@ def cmd_season(cfg: Config, args) -> int:
     metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
     from . import episodes as episodes_mod
     episodes_mod.configure_cache(cfg.path)
+    pipeline_mod.configure_groups(cfg.path)
     shows = metadata.tvmaze_search(args.show)
     if args.year:
         shows = [s for s in shows if s["premiered"].startswith(str(args.year))] or shows

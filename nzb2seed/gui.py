@@ -280,6 +280,7 @@ class App:
         self.cfg = config_mod.load_or_default(config_path)
         metadata.configure(self.cfg.flaresolverr_url, self.cfg.outbound_proxy)
         episodes_mod.configure_cache(self.cfg.path)
+        pipeline_mod.configure_groups(self.cfg.path)
         self.jobs: dict[int, Job] = {}
         self.lock = threading.Lock()
         self._cleaning = threading.Lock()        # one download clean-up at a time

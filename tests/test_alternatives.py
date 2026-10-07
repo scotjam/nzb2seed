@@ -553,3 +553,21 @@ def test_a_season_with_a_year_in_its_name_searches_without_it():
     root = pipeline.build_units(t, t.name)
     assert root.need.query == "show  s06" and "2004" not in root.children[0].need.query
     assert pipeline.drop_year("1923.") == "1923."                 # a title that is a year stays
+
+
+
+def test_an_encoder_and_group_run_together_is_read_as_the_group(tmp_path, monkeypatch):
+    """'(... - Enc)[Grpq]' teaches that a dotted repost's 'encgrpq' is Grpq - kept on disk;
+    nothing is merged before a name showing both parts has been seen."""
+    from nzb2seed import pipeline
+    monkeypatch.setattr(pipeline, "_JOINED", {})
+    pipeline.configure_groups(str(tmp_path / "nzb2seed.toml"))
+    dotted = "Show.2022.S03E03.Title.1080p.AMZN.Webrip.x265.10bit.EAC3.5.1.Atmos.EncGrpq"
+    assert group_of(dotted) == "encgrpq"
+    assert group_of("Show (2022) S03E03 Title (1080p AMZN Webrip x265 10bit EAC3 5.1 Atmos - Enc)[Grpq]") == "grpq"
+    assert group_of(dotted) == "grpq"
+    assert group_of(dotted + "]") == "grpq"
+    assert group_of("Show.S03E03.1080p.WEB.x265-Grpq") == "grpq"              # the group itself is unchanged
+    monkeypatch.setattr(pipeline, "_JOINED", {})                            # a restart: read back from disk
+    pipeline.configure_groups(str(tmp_path / "nzb2seed.toml"))
+    assert group_of(dotted) == "grpq"
