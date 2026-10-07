@@ -288,6 +288,9 @@ class App:
         self.store = JobStore(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "jobs.json"),
                               lambda: list(self.jobs.values()))
         self.store.on_change = lambda: self.events.publish("jobs")
+        # downloads of jobs cleared from the list with "keep files": never cleared by nzb2seed
+        self._kept_path = os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "kept_downloads.json")
+        self.kept_downloads = self._load_kept()
         for d in self.store.load():
             job = Job.from_dict(d, self.store.changed)
             self.jobs[job.id] = job
@@ -772,13 +775,44 @@ class App:
             _, more = pipeline_mod.remove_stray_peeks(self.cfg, sab)
             return n + m, freed + also + more
 
+    def _load_kept(self) -> dict[str, set[str]]:
+        try:
+            with open(self._kept_path, encoding="utf-8") as fh:
+                d = json.load(fh)
+            return {"hashes": set(d.get("hashes") or []), "names": set(d.get("names") or [])}
+        except (OSError, ValueError, AttributeError):
+            return {"hashes": set(), "names": set()}
+
+    def _save_kept(self):
+        tmp = self._kept_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({k: sorted(v) for k, v in self.kept_downloads.items()}, fh)
+        os.replace(tmp, self._kept_path)
+
+    def keep_downloads_of(self, jobs: list["Job"]):
+        """Cleared from the list with "keep files": what the jobs downloaded from Usenet stays
+        where it is - the hourly clean-up leaves it alone from now on."""
+        name = lambda t: t[len("auto: "):] if t.startswith("auto: ") else t
+        for j in jobs:
+            h = self.torrent_of(j)
+            if h:
+                self.kept_downloads["hashes"].add(h)
+            self.kept_downloads["names"].add(pipeline_mod.release_key(name(j.title)))
+        self._save_kept()
+
+    def forget_kept(self, hashes: set[str], names: set[str]):
+        self.kept_downloads["hashes"] -= hashes
+        self.kept_downloads["names"] -= names
+        self._save_kept()
+
     def downloads_in_use(self) -> tuple[set[str], set[str], set[str]]:
         """What still needs Usenet downloads: the torrents being built or queued to be (live),
         those a job on the list can still be retried for (keep: failed, cancelled or
         interrupted - not abandoned, and not already tried again), and the releases of both
         (names, see pipeline.release_key: for old records, which may name another torrent).
-        A job taken off the list needs nothing - even if the Automatic tab could try it again."""
-        keep, live, names = set(), set(), set()
+        A job taken off the list with "delete files" needs nothing; one taken off with "keep
+        files" keeps its downloads for good."""
+        keep, live, names = set(self.kept_downloads["hashes"]), set(), set(self.kept_downloads["names"])
         name = lambda t: t[len("auto: "):] if t.startswith("auto: ") else t
         for j in list(self.jobs.values()):
             h = self.torrent_of(j)
@@ -1471,6 +1505,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                         out = pipeline_mod.delete_downloads_of(app.cfg, app._sab(), app._qbit(), hashes - busy)
                     except (ApiError, Abort, OSError) as e:
                         return self._err(f"nothing was removed: {e}")
+                    name = lambda t: t[len("auto: "):] if t.startswith("auto: ") else t
+                    app.forget_kept(hashes, {pipeline_mod.release_key(name(app.jobs[i].title)) for i in gone})
+                else:
+                    # "keep files": nothing of it is cleared - not now, not later
+                    app.keep_downloads_of([app.jobs[i] for i in gone if app.jobs[i].status != "done"])
                 with app.lock:
                     for i in gone:
                         app.jobs.pop(i, None)
