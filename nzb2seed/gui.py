@@ -553,7 +553,7 @@ class App:
                if matching.norm(r.title) == want and self.tracker_key(r.indexer) != own]
         out.sort(key=lambda r: (not r["approved"], not (r["same_size"] or r["near_size"]),
                                 not r["same_size"], -(r["seeders"] or 0)))
-        job.extra = {**(job.extra or {}), "others": out}
+        job.extra = {**(job.extra or {}), "others": out, "others_size": size}
         self.store.changed(urgent=True)
         return name, size, out
 

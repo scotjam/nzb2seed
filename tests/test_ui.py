@@ -30,6 +30,9 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # the differences made on purpose: the new page always names the tracker a nearly complete
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
+    # the Seasons tab says it works from Usenet alone
+    (re.compile(r"Grab a season, or the whole series, from Usenet"), "Grab a season, or the whole series"),
+    (re.compile(r"folder next to the season, without searching for or downloading any torrent files\."), "folder next to the season."),
     # removal can be chosen per job, which the retention text mentions
     (re.compile(r"Only automatic builds are removed - your own never are - and an automatic build can be taken out of these rules on its job's page\. "), ""),
     # what is found on Usenet, by group and resolution - and not trying groups never found
@@ -394,3 +397,11 @@ def test_select_by_tracker_ticks_jobs_from_it_and_via_it(settings_file):
     assert seen["ticked"] == ["Show.S04.1080p.BluRay-GRPV", "Show.S05.1080p.BluRay-GRPV via TrackerSix"]
     assert seen["label"] == "Add to torrent client (download the rest) (1)"   # S04: TrackerSix has no limit set
     assert seen["sent"] == [["/api/jobs/add_via", {"id": 96, "guid": "six1"}]]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_what_was_found_on_other_trackers_by_itself_shows_on_the_job(settings_file):
+    seen = run("new", "savedOthers", settings_file)["seen"]
+    assert "1 other tracker has it:" in seen["text"] and "TrackerSix" in seen["text"]
+    assert "not pre-approved" in seen["text"] and "different size - not the same files" in seen["text"]
+    assert "Build from this tracker" in seen["buttons"] and "Look on other trackers" not in seen["buttons"]
