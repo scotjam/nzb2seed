@@ -35,6 +35,9 @@ export function kindOf(j) { const k = JOB_KINDS.find(([, , fits]) => fits(j)); r
 
 export const canRetry = (j) => BADLY_ENDED.includes(j.status) && j.can_retry;
 
+/* automatic: started by the Automatic tab, or carrying one on from another tracker */
+export const isAuto = (j) => j.kind === "auto" || (j.title || "").startsWith("auto: ");
+
 /* the Jobs bar's "Select:" choices - each ticks the jobs (shown) it fits */
 export const SELECT = [
   ["all", "All", () => true],
@@ -43,8 +46,8 @@ export const SELECT = [
     && !(j.extra || {}).added && !(j.extra || {}).abandoned],
   ["live", "Running / queued", j => isLive(j)],
   ["done", "Completed", j => j.status === "done"],
-  ["auto", "Automatic", j => j.kind === "auto"],
-  ["manual", "Manual", j => j.kind !== "auto"],
+  ["auto", "Automatic", j => isAuto(j)],
+  ["manual", "Manual", j => !isAuto(j)],
 ];
 const tkey = (n) => { const k = (n || "").trim().toLowerCase(); return k.endsWith("(api)") ? k.slice(0, -5).trim() : k; };
 /* every tracker a job is from, or was found on by Look on other trackers - for the Tracker choice */

@@ -270,6 +270,10 @@ class _Sink:
         self.job.on_change()
 
 
+# a build that stops at least this complete looks on your other trackers by itself
+AUTO_OTHERS_AT = 0.9
+
+
 class App:
     def __init__(self, config_path: str | None):
         self.config_path = config_path
@@ -524,6 +528,88 @@ class App:
         want = self.tracker_key(tracker)
         return bool(want) and any(self.tracker_key(t) == want
                                   for t in (self.cfg.nearly_auto_trackers or []))
+
+    def find_other_trackers(self, job: "Job") -> tuple[str, int | None, list[dict]]:
+        """The same release on your other trackers, best first (pre-approved, same files,
+        seeders). Prowlarr is asked; no tracker is contacted by nzb2seed. Kept on the job:
+        the Jobs tab can tick it "via" one of these trackers later."""
+        x = job.extra or {}
+        name = job.title[len("auto: "):] if job.title.startswith("auto: ") else job.title
+        size = None
+        try:
+            with open(x.get("torrent_path") or "", "rb") as fh:
+                size = torrent_mod.parse(fh.read()).total_size
+        except (OSError, ValueError, torrent_mod.TorrentError):
+            pass
+        torrents, _ = search(self.cfg, name)
+        own, want = self.tracker_key(x.get("tracker", "")), matching.norm(name)
+        # within 1 MB: the same video, one torrent with a small file the other lacks (some
+        # trackers add their own .nfo) - built from the one without it, it is complete
+        out = [{**dataclasses.asdict(r), "approved": self.always_adds(r.indexer),
+                "same_size": size is not None and r.size == size,
+                "near_size": size is not None and 0 < abs((r.size or 0) - size) <= 1 << 20,
+                "size_diff": None if size is None else (r.size or 0) - size}
+               for r in torrents
+               if matching.norm(r.title) == want and self.tracker_key(r.indexer) != own]
+        out.sort(key=lambda r: (not r["approved"], not (r["same_size"] or r["near_size"]),
+                                not r["same_size"], -(r["seeders"] or 0)))
+        job.extra = {**(job.extra or {}), "others": out}
+        self.store.changed(urgent=True)
+        return name, size, out
+
+    @staticmethod
+    def other_pick(size: int | None, out: list[dict]) -> dict | None:
+        """Pre-approved, seeded, and the same files (same size, when the size is known)."""
+        return next((r for r in out if r["approved"] and (r["seeders"] or 0) > 0
+                     and (size is None or r["same_size"] or r["near_size"])), None)
+
+    def build_from_other(self, job: "Job", r: dict) -> "Job":
+        """Build a stopped job's release from another tracker's torrent - the Usenet
+        downloads already made are reused, so nothing is downloaded twice."""
+        torrent = {k: v for k, v in r.items() if k not in ("approved", "same_size", "near_size", "size_diff")}
+        c = self.cfg
+        body = {"torrent": torrent, "nzbs": [], "other_tracker": job.id,
+                "options": {"pp": c.post_processing or "auto", "local_verify": bool(c.local_verify),
+                            "retry_bad": c.retry_bad_pieces is not False,
+                            "start": bool(c.start_when_complete), "no_cleanup": c.cleanup is False}}
+        title, run = build_job(self, body)
+        self.request.asked = {"path": "/api/build", "body": body}      # carried on after a restart
+        try:
+            return self.start_job(title, "build", run)
+        finally:
+            self.request.asked = None
+
+    def look_on_other_trackers(self, job: "Job", e) -> None:
+        """A build that stopped over 90% complete and is not added where it is: look for the
+        release on the other trackers by itself, and build it from a pre-approved, seeded one
+        with the same files - as Look on other trackers does when pressed."""
+        if e.have < AUTO_OTHERS_AT:
+            return
+        if str(((job.repeat or {}).get("body") or {}).get("other_tracker") or ""):
+            return          # already built from another tracker: never hops on by itself
+        report.step(f"{pipeline_mod.exact_pct(e.have)} is here - looking for it on your other trackers")
+        try:
+            _, size, out = self.find_other_trackers(job)
+        except (ApiError, OSError) as err:
+            report.warn(f"Prowlarr could not be searched: {err}")
+            return
+        pick = self.other_pick(size, out)
+        if pick is None:
+            if not out:
+                report.info("not found on any other tracker")
+            else:
+                report.info("found on " + ", ".join(
+                    f"{r['indexer']} ({'pre-approved' if r['approved'] else 'not pre-approved'}, "
+                    f"{r['seeders'] or 0} seeders"
+                    + ("" if size is None or r["same_size"] or r["near_size"] else ", different files") + ")"
+                    for r in out[:6]) + " - none to build from by itself; choose in the Jobs tab")
+            return
+        if self.active_build(pick["title"]):
+            return
+        nj = self.build_from_other(job, pick)
+        job.extra = {**(job.extra or {}), "built_from_other": pick["indexer"]}
+        report.info(f"building it from {pick['indexer']} (pre-approved, {pick['seeders']} seeders) "
+                    f"as job {nj.id} - the Usenet downloads already made are reused")
 
     def nearly_limit_text(self, tracker: str) -> str:
         return config_mod.limit_text(self.cfg, tracker)
@@ -957,6 +1043,11 @@ class App:
                     job.extra = {**job.extra, "auto": True}
                     self.finish_in_client(job, why=f"{e.tracker} is set to always add builds "
                                                    f"missing less than {self.nearly_limit_text(e.tracker)}")
+                else:
+                    try:
+                        self.look_on_other_trackers(job, e)
+                    except Exception as err:       # never lose the job over the lookup
+                        report.warn(f"could not look on the other trackers: {err}")
             except (Abort, ApiError, ValueError, OSError) as e:
                 job.status, job.result = "failed", str(e)
                 report.warn(str(e))
@@ -1071,6 +1162,11 @@ def build_job(app: "App", body: dict):
     # or tried again: its Usenet downloads are already made, so it is only placing files
     # and handing the torrent over - not waiting behind a queue of builds that download
     finishing = bool(body.get("other_tracker")) or app.nearly_built(torrent.title)
+    # carrying on an automatic build (found on another tracker): still automatic - labelled
+    # so, never stopping to ask, and its files counted as automatic ones
+    auto = first is not None and (first.kind == "auto" or first.title.startswith("auto: "))
+    if auto:
+        opts = dataclasses.replace(opts, unattended=True)
 
     def run(cfg):
         if finishing:
@@ -1083,7 +1179,7 @@ def build_job(app: "App", body: dict):
             return execute_run(cfg, opts, torrent, groups, torrent_data=data)
         finally:
             give_slot()          # not held if it was waiting on you when it ended
-    return torrent.title, run
+    return ("auto: " if auto else "") + torrent.title, run
 
 
 def _opts(d: dict) -> Options:
@@ -1674,32 +1770,10 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             job = self._nearly(body)
             if job is None:
                 return
-            x = job.extra
-            name = job.title[len("auto: "):] if job.title.startswith("auto: ") else job.title
-            size = None
             try:
-                with open(x.get("torrent_path") or "", "rb") as fh:
-                    size = torrent_mod.parse(fh.read()).total_size
-            except (OSError, ValueError, torrent_mod.TorrentError):
-                pass
-            try:
-                torrents, _ = search(app.cfg, name)
+                name, size, out = app.find_other_trackers(job)
             except (ApiError, OSError) as e:
                 return self._err(f"Prowlarr could not be searched: {e}", 502)
-            own, want = app.tracker_key(x.get("tracker", "")), matching.norm(name)
-            # within 1 MB: the same video, one torrent with a small file the other lacks (some
-            # trackers add their own .nfo) - built from the one without it, it is complete
-            out = [{**dataclasses.asdict(r), "approved": app.always_adds(r.indexer),
-                    "same_size": size is not None and r.size == size,
-                    "near_size": size is not None and 0 < abs((r.size or 0) - size) <= 1 << 20,
-                    "size_diff": None if size is None else (r.size or 0) - size}
-                   for r in torrents
-                   if matching.norm(r.title) == want and app.tracker_key(r.indexer) != own]
-            out.sort(key=lambda r: (not r["approved"], not (r["same_size"] or r["near_size"]),
-                                    not r["same_size"], -(r["seeders"] or 0)))
-            # kept on the job: the Jobs tab can tick it "via" one of these trackers later
-            job.extra = {**(job.extra or {}), "others": out}
-            app.store.changed(urgent=True)
             return self._json({"name": name, "size": size, "releases": out})
 
         def add_to_client(self, body):

@@ -501,6 +501,9 @@ class Inbox:
     def forget(self, h: str):
         if h in self.running:
             raise ValueError("stop its job first")
+        # removing it from the list never changes what automatic removal may delete later
+        from . import retention
+        retention.mark_automatic(self.app.cfg, h)
         with self.state.lock:
             self.state.items.pop(h, None)
         self.state.save()

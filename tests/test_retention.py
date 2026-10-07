@@ -341,6 +341,21 @@ def test_an_older_record_counts_as_automatic_only_if_the_inbox_built_it(setup, t
     assert [b.infohash for b in retention.builds(cfg, qb)] == ["a" * 40]
 
 
+def test_removing_it_from_the_automatic_list_keeps_it_automatic(setup, tmp_path):
+    """Older records relied on the inbox's list: before an item leaves it, its record is
+    marked automatic - so automatic removal still applies, and nothing else changes."""
+    cfg, qb, data, rec = setup()
+    _source(rec, None)
+    before = json.loads(rec.read_text())
+    retention.mark_automatic(cfg, "A" * 40)
+    after = json.loads(rec.read_text())
+    assert after["source"] == "auto" and {k: v for k, v in after.items() if k != "source"} == before
+    assert [b.infohash for b in retention.builds(cfg, qb)] == ["a" * 40]
+    _source(rec, "manual")
+    retention.mark_automatic(cfg, "a" * 40)              # a manual build stays manual
+    assert json.loads(rec.read_text())["source"] == "manual"
+
+
 def test_state_counts_only_automatic_builds(setup):
     cfg, qb, _, rec = setup()
     _source(rec, "manual")
