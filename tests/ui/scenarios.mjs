@@ -162,6 +162,21 @@ export const SCENARIOS = {
     return { options, ticked, label, sent: calls.slice(n).filter(c => /add_via|add_to_client/.test(c.path)).map(c => [c.path, c.body]) };
   },
 
+  /* the new page only: what Look on other trackers found by itself is shown on the job
+     straight away - no button to press first */
+  async savedOthers({ act, doc, server }) {
+    const other = { title: "Film.2021.1080p.BluRay-GRPA", protocol: "torrent", indexer: "TrackerSix", guid: "six2",
+                    size: 21_000_000_000, seeders: 13, approved: false, same_size: false, near_size: false, size_diff: 900_000_000 };
+    server.jobs.unshift({ id: 97, kind: "auto", title: "auto: Film.2021.1080p.BluRay-GRPA", status: "failed", result: "short",
+      started: 1_700_000_000, ended: 1_700_000_100, progress: "", question: null, can_retry: true,
+      extra: { have: 0.9999999, short: 900, infohash: "r".repeat(40), tracker: "TrackerOne", seeders: 3, others: [other] } });
+    await act.go("jobs");
+    await act.settle();
+    const row = [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Film.2021.1080p.BluRay-GRPA"));
+    return { text: row.textContent.replace(/\s+/g, " "),
+             buttons: [...row.querySelectorAll("span.btn, button")].map(b => b.textContent.trim()) };
+  },
+
   /* the new page only: a resolution folds away under its release group, like the group does */
   async resFold({ act, doc }) {
     await act.go("build");
