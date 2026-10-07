@@ -76,6 +76,25 @@ def automatic(cfg: Config) -> set[str]:
         return set()
 
 
+def mark_automatic(cfg: Config, infohash: str):
+    """Write "made by the Automatic tab" into a build's record, when the record predates
+    that being recorded - before the inbox forgets the build, which older records relied
+    on. Only the source is added; the recorded sizes and times are left as they are."""
+    path = os.path.join(cfg.torrent_dir, infohash.lower() + SUFFIX)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        return
+    if not isinstance(d, dict) or d.get("source"):
+        return
+    d["source"] = "auto"
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(d, fh)
+    os.replace(tmp, path)
+
+
 def made_automatically(cfg: Config, infohash: str, record: str, seen: set[str]) -> bool:
     """Only what the Automatic tab built is ever removed again. A build, season or assemble
     you asked for yourself is never swept away, however old it is."""

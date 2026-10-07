@@ -122,3 +122,51 @@ def test_a_build_from_another_tracker_knows_the_first_torrent(server, monkeypatc
     status, _ = call(url + "/api/build", *AUTH, body={"torrent": t, "nzbs": [], "options": {},
                                                       "other_tracker": first.id})
     assert status == 200 and seen.wait(5) and got["related"] == ("f" * 40,)
+
+
+def test_a_build_carrying_on_an_automatic_one_stays_automatic(server, monkeypatch):  # noqa: F811
+    """Built from another tracker for an automatic job: labelled automatic, never stops to
+    ask, and its files count as automatic ones."""
+    import dataclasses
+    app, url = server
+    first = app.start_job("auto: Film.2020.1080p.BluRay-GRPA", "auto", lambda cfg: None)
+    first.extra = {"have": 0.9999, "infohash": "f" * 40}
+    seen = threading.Event()
+    got = {}
+    monkeypatch.setattr(gui, "execute_run", lambda cfg, opts, t, g, torrent_data=None:
+                        got.update(unattended=opts.unattended) or seen.set() or {"result": "ok"})
+    monkeypatch.setattr(gui, "uploaded_data", lambda cfg, t: None)
+    t = dataclasses.asdict(Release("Film.2020.1080p.BluRay-GRPA", "torrent", "TrackerTwo", 1, 10, "g",
+                                   "http://prowlarr.local/1/download", "", "", 0, 3, None))
+    status, r = call(url + "/api/build", *AUTH, body={"torrent": t, "nzbs": [], "options": {},
+                                                      "other_tracker": first.id})
+    assert status == 200 and seen.wait(5) and got["unattended"] is True
+    assert app.jobs[r["id"]].title == "auto: Film.2020.1080p.BluRay-GRPA"
+
+
+def test_a_build_over_90_percent_looks_on_the_other_trackers_by_itself(server, monkeypatch):  # noqa: F811
+    """Stopped nearly complete where nothing may be downloaded: the release is found on a
+    pre-approved, seeded tracker and built from it - without anyone pressing anything."""
+    import dataclasses
+    from nzb2seed.pipeline import Incomplete
+    app, url = server
+    app.cfg.nearly_auto_trackers = ["TrackerTwo"]
+    other = Release("Film.2020.1080p.BluRay-GRPA", "torrent", "TrackerTwo", 2, 10, "g2",
+                    "http://prowlarr.local/2/download", "", "", 0, 4, None)
+    monkeypatch.setattr(gui, "search", lambda cfg, name: ([other], []))
+    started = threading.Event()
+    got = {}
+    monkeypatch.setattr(gui, "execute_run", lambda cfg, opts, t, g, torrent_data=None:
+                        got.update(t=t, related=opts.related) or started.set() or {"result": "ok"})
+    monkeypatch.setattr(gui, "uploaded_data", lambda cfg, t: None)
+
+    def stops(cfg):
+        raise Incomplete("not every file", 0.999999, "f" * 40, "", "/x", False, tracker="TrackerOne", short=1200)
+    first = app.start_job("auto: Film.2020.1080p.BluRay-GRPA", "auto", stops)
+    assert started.wait(5)
+    assert got["t"].indexer == "TrackerTwo" and got["related"] == ("f" * 40,)
+    assert first.extra["built_from_other"] == "TrackerTwo"
+    new = max(app.jobs.values(), key=lambda j: j.id)
+    assert new.title.startswith("auto: ") and new.repeat["body"]["other_tracker"] == first.id
+    for j in app.jobs.values():
+        j.cancel.set()
