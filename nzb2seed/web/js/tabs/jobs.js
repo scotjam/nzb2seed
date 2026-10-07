@@ -152,6 +152,11 @@ function JobActions({ j, all }) {
     <${Act} label="Clear from list, delete files" title="Take this job off the list and delete its Usenet downloads and the files it placed - never anything a torrent in qBittorrent uses"
       onPress=${() => clearAndDelete([j])} />`;
   if (x.abandoned) return html`<div class="jretry">${clear}</div>`;
+  if (x.built_from_other && j.retried_as) {
+    const nj = all.find(o => o.id === j.retried_as);
+    return html`<div class="jretry"><small class="status">replaced by job ${j.retried_as}: ${
+      nj?.status === "done" ? "built" : isLive(nj || {}) ? "being built" : "built again"} from ${trackerName(x.built_from_other)}</small>${clear}</div>`;
+  }
   if (builtLater(j, all)) {
     return html`<div class="jretry"><small class="status">built when tried again, as job ${finalOf(j, all).id}</small>${clear}</div>`;
   }

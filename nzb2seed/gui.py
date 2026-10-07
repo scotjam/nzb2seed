@@ -582,6 +582,15 @@ class App:
         finally:
             self.request.asked = None
 
+    def replaced(self, old: "Job", new: "Job", tracker: str):
+        """A job built again from another tracker: the old one is done with - cancelled,
+        pointing at the new one, with nothing left to offer but clearing it."""
+        old.retried_as = new.id
+        old.status = "cancelled"
+        old.result = f"replaced by job {new.id}: built from {tracker}"
+        old.extra = {**(old.extra or {}), "built_from_other": tracker}
+        self.store.changed(urgent=True)
+
     def look_on_other_trackers(self, job: "Job", e) -> None:
         """A build that stopped over 90% complete and is not added where it is: look for the
         release on the other trackers by itself, and build it from a pre-approved, seeded one
@@ -610,7 +619,7 @@ class App:
         if self.active_build(pick["title"]):
             return
         nj = self.build_from_other(job, pick)
-        job.extra = {**(job.extra or {}), "built_from_other": pick["indexer"]}
+        job.extra = {**(job.extra or {}), "replaced_by": nj.id, "replaced_via": pick["indexer"]}
         report.info(f"building it from {pick['indexer']} (pre-approved, {pick['seeders']} seeders) "
                     f"as job {nj.id} - the Usenet downloads already made are reused")
 
@@ -1082,6 +1091,9 @@ class App:
                         self.look_on_other_trackers(job, e)
                     except Exception as err:       # never lose the job over the lookup
                         report.warn(f"could not look on the other trackers: {err}")
+                    nid = (job.extra or {}).get("replaced_by")
+                    if nid in self.jobs:
+                        self.replaced(job, self.jobs[nid], job.extra.get("replaced_via", ""))
             except (Abort, ApiError, ValueError, OSError) as e:
                 job.status, job.result = "failed", str(e)
                 report.warn(str(e))
@@ -2153,6 +2165,9 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._err(f"{torrent.title} is already being built (job {busy.id})", 409)
             title, run = build_job(app, body)
             job = app.start_job(title, "build", run)
+            first = app.jobs.get(int(body["other_tracker"])) if str(body.get("other_tracker") or "").isdigit() else None
+            if first is not None and first is not job and first.status not in ("running", "waiting"):
+                app.replaced(first, job, torrent.indexer)
             return self._json({"id": job.id})
 
         def assemble(self, body):

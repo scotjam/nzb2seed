@@ -409,3 +409,11 @@ def test_what_was_found_on_other_trackers_by_itself_shows_on_the_job(settings_fi
     assert "1 other tracker has it:" in seen["text"] and "TrackerSix" in seen["text"]
     assert "not pre-approved" in seen["text"] and "different size - not the same files" in seen["text"]
     assert "Build from this tracker" in seen["buttons"] and "Look on other trackers" not in seen["buttons"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_job_built_again_from_another_tracker_is_replaced(settings_file):
+    seen = run("new", "replacedJob", settings_file)["seen"]
+    assert seen["says"] == "replaced by job 99: being built from TrackerTwo"
+    assert seen["dot"] == "dot skipped"
+    assert seen["buttons"] == ["Clear from list, keep files", "Clear from list, delete files"]
