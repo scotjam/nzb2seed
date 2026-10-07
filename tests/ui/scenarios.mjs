@@ -177,6 +177,23 @@ export const SCENARIOS = {
              buttons: [...row.querySelectorAll("span.btn, button")].map(b => b.textContent.trim()) };
   },
 
+  /* the new page only: a job built again from another tracker is replaced - grey, saying so,
+     with nothing left on it but clearing it */
+  async replacedJob({ act, doc, server }) {
+    const base = { result: "", started: 1_700_000_000, ended: 1_700_000_100, progress: "", question: null, steps: [] };
+    server.jobs.unshift(
+      { ...base, id: 99, kind: "build", title: "auto: Film.2022.1080p.BluRay-GRPA", status: "running", can_retry: false, extra: null },
+      { ...base, id: 98, kind: "auto", title: "auto: Film.2022.1080p.BluRay-GRPA", status: "cancelled", can_retry: false,
+        retried_as: 99, result: "replaced by job 99: built from TrackerTwo",
+        extra: { have: 0.9999999, short: 900, infohash: "s".repeat(40), tracker: "TrackerOne", seeders: 3, built_from_other: "TrackerTwo" } });
+    await act.go("jobs");
+    await act.settle();
+    const row = [...doc.querySelectorAll(".jrow")].find(r => r.querySelector(".jretry")?.textContent.includes("replaced by job 99"));
+    return { says: row.querySelector(".jretry .status").textContent.replace(/\s+/g, " ").trim(),
+             dot: row.querySelector(".dot").className,
+             buttons: [...row.querySelectorAll(".jretry span.btn, .jretry button")].map(b => b.textContent.trim()) };
+  },
+
   /* the new page only: a resolution folds away under its release group, like the group does */
   async resFold({ act, doc }) {
     await act.go("build");
