@@ -1044,6 +1044,37 @@ def group_of(name: str) -> str | None:
         tok = re.split(r"[-.\s\[\]()]", s[i + 1:].lower())[0]
         if tok and tok not in _NOT_GROUP:
             return tok
+    return _group_without_dash(s) if (m_res or m_ep) else None
+
+
+# tags a release name is made of - never a group's name
+_TECH = re.compile(r"(?i)^(?:[xh]\.?26[45]|hevc|avc|av1|xvid|10bit|8bit|hdr(?:10\+?)?|dv|dovi|sdr|atmos|truehd|"
+                   r"dts(?:-?hd)?|ma|e?ac3|ddp?(?:\d(?:\.\d)?)?|aac(?:\d(?:\.\d)?)?|flac|opus|\d\.\d|"
+                   r"web(?:-?dl|rip)?|dl|blu-?ray|bdrip|brrip|remux|hdtv|amzn|nf|dsnp|hmax|atvp|ds4k|"
+                   r"eng(?:lish)?|multi|proper|repack|internal|\d{3,4}p|mkv|mp4|avi)$")
+_GROUPWORD = r"([A-Za-z][A-Za-z0-9]{1,19})"
+
+
+def _group_without_dash(s: str) -> str | None:
+    """A group named without the scene dash, as posters and encoders often do:
+    'Show.S03E03.1080p.AMZN.WEB-DL.x265.Grpa', '...EAC3.5.1.Atmos.Grpb]',
+    '(1080p AMZN Webrip x265 ... - Enc)[Grpc]', '(1080p ... x265) - Grpd', '(1080p BluRay x265 Grpe)'.
+    Only a word that follows the name's tech tags counts - never one of them."""
+    s = re.sub(r"(?i)(?:\.(?:mkv|mp4|m4v|avi|nzb))?(?:-x?(?:post|repo))?\s*$", "", s.strip())
+
+    def ok(g):
+        return g and not _TECH.match(g) and g.lower() not in _NOT_GROUP and not _RES.search(g.lower())
+
+    m = re.search(r"\)\s*\[" + _GROUPWORD + r"\]$", s)                    # (...)[Grpc]
+    if m and ok(m.group(1)):
+        return m.group(1).lower()
+    m = re.search(r"\)\s+-\s+" + _GROUPWORD + r"$", s)                    # (...) - Grpd
+    if m and ok(m.group(1)):
+        return m.group(1).lower()
+    # the last word of the name (or of its closing bracket), straight after a tech tag
+    m = re.search(r"([^\s.()\[\]]+)[\s.]" + _GROUPWORD + r"[)\]]?$", s)
+    if m and _TECH.match(m.group(1)) and ok(m.group(2)):
+        return m.group(2).lower()
     return None
 
 
