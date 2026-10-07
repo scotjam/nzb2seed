@@ -142,6 +142,7 @@ def test_a_build_carrying_on_an_automatic_one_stays_automatic(server, monkeypatc
                                                       "other_tracker": first.id})
     assert status == 200 and seen.wait(5) and got["unattended"] is True
     assert app.jobs[r["id"]].title == "auto: Film.2020.1080p.BluRay-GRPA"
+    assert first.status == "cancelled" and first.retried_as == r["id"]       # replaced by it
 
 
 def test_a_build_over_90_percent_looks_on_the_other_trackers_by_itself(server, monkeypatch):  # noqa: F811
@@ -168,5 +169,12 @@ def test_a_build_over_90_percent_looks_on_the_other_trackers_by_itself(server, m
     assert first.extra["built_from_other"] == "TrackerTwo"
     new = max(app.jobs.values(), key=lambda j: j.id)
     assert new.title.startswith("auto: ") and new.repeat["body"]["other_tracker"] == first.id
+    import time
+    end = time.time() + 5
+    while time.time() < end and first.status != "cancelled":
+        time.sleep(0.05)
+    # the old job is done with: cancelled, pointing at the build that replaced it
+    assert first.status == "cancelled" and first.retried_as == new.id
+    assert first.result == f"replaced by job {new.id}: built from TrackerTwo"
     for j in app.jobs.values():
         j.cancel.set()
