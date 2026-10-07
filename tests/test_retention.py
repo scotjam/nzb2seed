@@ -414,14 +414,27 @@ def test_stamping_leaves_an_already_stamped_record_alone(setup):
     assert json.loads(rec.read_text())["stamps"] == before
 
 
-def test_a_job_can_be_ticked_to_go_or_to_stay_whoever_built_it(setup):
-    """The per-job choice beats who built it, and only that choice is written."""
-    cfg, qb, data, rec = setup()
+def test_your_own_builds_have_no_choice_they_are_never_removed(setup):
+    cfg, qb, data, rec = setup(age_days=9999)
     _source(rec, "manual")
-    assert retention.removable(cfg, "a" * 40) is False
-    stamps = json.loads(rec.read_text())["stamps"]
-    retention.set_removable(cfg, "a" * 40, True)
+    assert retention.removable(cfg, "a" * 40) is None
+    with pytest.raises(ValueError):
+        retention.set_removable(cfg, "a" * 40, True)
+    retention.sweep(cfg, qb, log=lambda *_: None)
+    assert (data / "film.mkv").exists() and qb.removed == []
+
+
+def test_an_automatic_build_follows_the_rules_by_default_and_again_when_ticked(setup):
+    """On by default; ticked again it follows the rules as they are then - only the choice
+    is written, never the recorded sizes and times."""
+    cfg, qb, data, rec = setup()
+    _source(rec, "auto")
     assert retention.removable(cfg, "a" * 40) is True
+    stamps = json.loads(rec.read_text())["stamps"]
+    retention.set_removable(cfg, "a" * 40, False)
+    assert retention.removable(cfg, "a" * 40) is False
+    retention.set_removable(cfg, "a" * 40, True)
+    assert retention.removable(cfg, "a" * 40) is True and "auto_remove" not in json.loads(rec.read_text())
     assert json.loads(rec.read_text())["stamps"] == stamps
     out = retention.sweep(cfg, qb, log=lambda *_: None)
     assert len(out["removed"]) == 1 and not (data / "film.mkv").exists()
@@ -438,6 +451,7 @@ def test_an_automatic_build_ticked_to_stay_is_kept(setup):
 def test_the_choice_survives_the_record_being_saved_again(setup):
     from nzb2seed import assemble as asm
     cfg, qb, data, rec = setup()
+    _source(rec, "auto")
     retention.set_removable(cfg, "a" * 40, False)
     asm.Owned(str(rec)).save()
     assert retention.removable(cfg, "a" * 40) is False

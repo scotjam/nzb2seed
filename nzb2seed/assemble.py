@@ -71,7 +71,7 @@ class Owned:
         self.dirs: set[str] = set()
         self.stamps: dict[str, list] = {}   # path -> [size, mtime] as nzb2seed left it
         self.source = ""                    # "auto" (the Automatic tab) or "manual"; "" = unknown
-        self.auto_remove: bool | None = None  # chosen per job; None = by source
+        self.auto_remove: bool | None = None  # False: an automatic build kept out of the removal rules
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 d = json.load(fh)
