@@ -1394,8 +1394,10 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 since = int(q.split("since=")[1].split("&")[0]) if "since=" in q else 0
                 with job.lock:
                     lines = job.lines[since:]
+                h = app.torrent_of(job) if job.status == "done" else ""
                 return self._json({**app.summary(job), "lines": lines, "next": since + len(lines),
-                                   "pieces": job.pieces})
+                                   "pieces": job.pieces,
+                                   "auto_remove": retention_mod.removable(app.cfg, h) if h else None})
             self._err("not found", 404)
 
         def do_POST(self):
@@ -1439,6 +1441,18 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 if r is None:
                     return self._err("that tracker's torrent is not known for this job - Look on other trackers first")
                 return self._json({"id": app.add_via_tracker(job, r).id})
+            if path == "/api/jobs/auto_remove":
+                # per job: removed after the retention days, or kept - whoever built it
+                try:
+                    job = app.jobs.get(int(body.get("id")))
+                except (TypeError, ValueError):
+                    job = None
+                h = app.torrent_of(job) if job else ""
+                if not h or retention_mod.removable(app.cfg, h) is None:
+                    return self._err("nzb2seed has no record of this build's files, so it is never removed")
+                retention_mod.set_removable(app.cfg, h, bool(body.get("on")))
+                app.store.changed(urgent=True)
+                return self._json({"auto_remove": retention_mod.removable(app.cfg, h)})
             if path == "/api/jobs/whole_posts":
                 return self.whole_posts(body)
             if path == "/api/jobs/remove":

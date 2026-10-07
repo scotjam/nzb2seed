@@ -222,7 +222,7 @@ export function SettingsTab({ active }) {
       </fieldset>
       <fieldset>
         <h2>Removing builds again</h2>
-        <p class="status">Off unless you switch it on. When it is on, a torrent nzb2seed built is removed from qBittorrent once it is older than the age below, and the files nzb2seed placed for it are deleted. <b>Only files nzb2seed put there go</b> - it deletes from the record each build writes, so anything you added yourself, a metadata folder, or another torrent's data in the same place is left alone. Seeding stops when the torrent is removed, so set an age your trackers are happy with.</p>
+        <p class="status">Off unless you switch it on. When it is on, a torrent nzb2seed built is removed from qBittorrent once it is older than the age below, and the files nzb2seed placed for it are deleted. <b>Only files nzb2seed put there go</b> - it deletes from the record each build writes, so anything you added yourself, a metadata folder, or another torrent's data in the same place is left alone. Automatic builds are removed and your own are kept, unless you change it on a job (<b>Remove automatically</b> on the job's page). Seeding stops when the torrent is removed, so set an age your trackers are happy with.</p>
         ${C("retention.enabled", "Remove builds after a while")}
         <label>Remove builds older than
           <input type="number" min="0" max="3650" step="1" title="0 means every automatic build, however new - useful for seeing the full list." ...${field("retention.days")} /> days</label>

@@ -243,6 +243,7 @@ function JobView({ id }) {
         ${isLive(job) && html`<button class="btn danger" onClick=${cancel}>Cancel build</button>`}
       </div>
       <${PieceMap} pieces=${job.pieces} />
+      ${job.auto_remove != null && html`<${AutoRemove} id=${id} on=${job.auto_remove} />`}
       ${job.question && html`<${Question} id=${id} q=${job.question} />`}
       <ol class="steps">
         ${once.map(s => html`<li class=${s === last && job.status !== "done" ? "now" + (BADLY_ENDED.includes(job.status) ? " failed" : "") : ""}>
@@ -254,6 +255,24 @@ function JobView({ id }) {
           l.k === "step" ? "\n==> " : l.k === "warn" ? "  ! " : l.k === "info" ? "    " : ""}${linked(l.t)}${"\n"}</span>`)}</pre>
       </details>
     </div>`;
+}
+
+/* per job: removed after the retention days, or kept - whoever built it */
+function AutoRemove({ id, on }) {
+  const s = useStore(settings);
+  const r = s?.settings?.retention || {};
+  const [now, setNow] = useState(on);
+  useEffect(() => setNow(on), [on]);
+  const flip = async (e) => {
+    const want = e.target.checked;
+    try { setNow((await api("/api/jobs/auto_remove", { id, on: want })).auto_remove); }
+    catch (err) { toast(err.message); }
+  };
+  return html`<label class="autoremove" title="Removed from qBittorrent, with the files nzb2seed placed for it, once it has been there longer than the days set in Settings. Automatic builds start ticked, your own builds unticked.">
+    <input type="checkbox" checked=${now} onChange=${flip} />
+    ${` Remove automatically after ${r.days ?? 30} days`}
+    ${now && !r.enabled ? html`<small class="status"> - removal is switched off in Settings, so nothing is removed yet</small>` : ""}
+  </label>`;
 }
 
 /* a build waiting for the person to pick an NZB */
