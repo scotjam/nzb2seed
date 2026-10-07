@@ -412,3 +412,33 @@ def test_stamping_leaves_an_already_stamped_record_alone(setup):
     qb._torrents[0]["downloaded"] = 999                      # would disqualify it if re-stamped
     retention.backfill(cfg, qb, retention.builds(cfg, qb), log=lambda *_: None)
     assert json.loads(rec.read_text())["stamps"] == before
+
+
+def test_a_job_can_be_ticked_to_go_or_to_stay_whoever_built_it(setup):
+    """The per-job choice beats who built it, and only that choice is written."""
+    cfg, qb, data, rec = setup()
+    _source(rec, "manual")
+    assert retention.removable(cfg, "a" * 40) is False
+    stamps = json.loads(rec.read_text())["stamps"]
+    retention.set_removable(cfg, "a" * 40, True)
+    assert retention.removable(cfg, "a" * 40) is True
+    assert json.loads(rec.read_text())["stamps"] == stamps
+    out = retention.sweep(cfg, qb, log=lambda *_: None)
+    assert len(out["removed"]) == 1 and not (data / "film.mkv").exists()
+
+
+def test_an_automatic_build_ticked_to_stay_is_kept(setup):
+    cfg, qb, data, rec = setup(age_days=9999)
+    _source(rec, "auto")
+    retention.set_removable(cfg, "a" * 40, False)
+    retention.sweep(cfg, qb, log=lambda *_: None)
+    assert (data / "film.mkv").exists() and qb.removed == []
+
+
+def test_the_choice_survives_the_record_being_saved_again(setup):
+    from nzb2seed import assemble as asm
+    cfg, qb, data, rec = setup()
+    retention.set_removable(cfg, "a" * 40, False)
+    asm.Owned(str(rec)).save()
+    assert retention.removable(cfg, "a" * 40) is False
+    assert retention.removable(cfg, "b" * 40) is None        # no record: never removed

@@ -71,6 +71,7 @@ class Owned:
         self.dirs: set[str] = set()
         self.stamps: dict[str, list] = {}   # path -> [size, mtime] as nzb2seed left it
         self.source = ""                    # "auto" (the Automatic tab) or "manual"; "" = unknown
+        self.auto_remove: bool | None = None  # chosen per job; None = by source
         if path and os.path.exists(path):
             with open(path, encoding="utf-8") as fh:
                 d = json.load(fh)
@@ -78,6 +79,7 @@ class Owned:
             self.dirs = set(d.get("dirs", []))
             self.stamps = {k: list(v) for k, v in (d.get("stamps") or {}).items()}
             self.source = d.get("source", "")
+            self.auto_remove = d.get("auto_remove")
 
     def owns(self, p: str) -> bool:
         return _key(p) in {_key(x) for x in self.files}
@@ -119,6 +121,7 @@ class Owned:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"files": sorted(self.files), "dirs": sorted(self.dirs),
                        "source": self.source,
+                       **({"auto_remove": self.auto_remove} if self.auto_remove is not None else {}),
                        "stamps": {k: self.stamps[k] for k in sorted(self.stamps)}}, fh, indent=1)
         os.replace(tmp, self.path)
 
