@@ -20,7 +20,9 @@ export function JobsTab({ active }) {
   const counts = {};
   for (const j of all) counts[kindOf(j)] = (counts[kindOf(j)] || 0) + 1;
   const kind = filter !== "all" && !counts[filter] ? "all" : filter;      // nothing left of that kind
-  const shown = kind === "all" ? all : all.filter(j => kindOf(j) === kind);
+  const [words, setWords] = useState("");             // the keyword filter: name, tracker or result
+  const shown = (kind === "all" ? all : all.filter(j => kindOf(j) === kind))
+    .filter(j => !words || filterMatch([j.title, j.extra?.tracker, j.result].filter(Boolean).join(" "), words));
   // a tick on a job the filter hides would be acted on unseen: ticks follow the filter
   const ticked = shown.filter(j => picked.has(j.id));
 
@@ -37,7 +39,8 @@ export function JobsTab({ active }) {
     <div class=${"jobs" + (showing ? " showing" : "")}>
       <div class="jobside">
         <${JobBar} all=${all} shown=${shown} ticked=${ticked} picked=${picked} kind=${kind} counts=${counts}
-          choose=${choose} select=${select} untick=${untick} />
+          choose=${choose} select=${select} untick=${untick} words=${words}
+          search=${(v) => { setWords(v); setPicked(new Map()); }} />
         <p class="status jobtip">Tip: a job's Usenet downloads stay while it is on the list. Clear from list, delete files
           removes them; Clear from list, keep files leaves them in your Usenet downloads folder for good.</p>
         <div class="joblist" id="joblist">
@@ -51,7 +54,7 @@ export function JobsTab({ active }) {
     </div>`;
 }
 
-function JobBar({ all, shown, ticked, picked, kind, counts, choose, select, untick }) {
+function JobBar({ all, shown, ticked, picked, kind, counts, choose, select, untick, words, search }) {
   const [tracker, setTracker] = useState("");
   const trackers = trackersOf(shown);
   // a greyed-out button says why, rather than doing nothing without a word
@@ -79,6 +82,9 @@ function JobBar({ all, shown, ticked, picked, kind, counts, choose, select, unti
         <option value="all">All jobs (${all.length})</option>
         ${JOB_KINDS.filter(([k]) => counts[k]).map(([k, label]) => html`<option value=${k}>${label} (${counts[k]})</option>`)}
       </select>
+      <input type="search" class="jsearch" placeholder="Filter jobs by keyword" aria-label="Filter jobs by keyword"
+        title="Words in a job's name, tracker or result - every word has to be there" value=${words}
+        onInput=${(e) => search(e.target.value)} />
       <small>${ticked.length ? `${ticked.length} ticked` : "Tick jobs to act on several at once"}</small>
       <div class="jbrow"><b>Select:</b>
         ${SELECT.map(([k, label, fits]) => html`<button type="button" class="btn" disabled=${!shown.some(fits)}

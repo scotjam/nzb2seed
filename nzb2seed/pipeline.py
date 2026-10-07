@@ -1263,9 +1263,30 @@ def _fits(need: Need, r: Release) -> str | None:
         return "other resolution" if _RES.findall(n) else "no resolution in its name"
     if need.group and group_of(r.title) != need.group:
         return "other release group" if group_of(r.title) else "no release group in its name"
+    if other_codec(need.target, r.title):
+        return "other codec"
     if r.size < need.min_size:
         return "smaller than the torrent's file - cannot hold it"
+    say, holds = size_verdict(need, r)
+    if not holds:
+        return say
     return None
+
+
+def _codec(name: str) -> str | None:
+    n = matching.norm(name)
+    if re.search(r"(?<![a-z0-9])(?:[xh]\.?265|hevc)(?![0-9])", n):
+        return "265"
+    if re.search(r"(?<![a-z0-9])(?:[xh]\.?264|avc)(?![0-9])", n):
+        return "264"
+    return None
+
+
+def other_codec(target: str, title: str) -> bool:
+    """The torrent's file and the post both name a codec, and not the same one (H.264 vs
+    H.265): another encode, never the same bytes."""
+    a, b = _codec(target or ""), _codec(title)
+    return bool(a and b and a != b)
 
 
 def usenet_results(cfg: Config, pr: Prowlarr, need: Need, known: list[Release]) -> list[Release]:
@@ -1301,6 +1322,31 @@ def find_alternatives(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release
     return out
 
 
+# a post of the same file(s) is about their size: par2 and packing add a fraction, never
+# this much. Far larger, it is a different encode (a disc or remux of the episode, say)
+FAR_LARGER = 2.5
+
+
+def size_verdict(need: Need, r: Release) -> tuple[str, bool]:
+    """How a post's size compares with what it has to hold: (what to say, can it hold it).
+    Smaller cannot hold it; far larger is a different encode - unless the post is a bigger
+    unit than the need (a season post for one episode), which holds more than the file."""
+    if not r.size or not need.min_size:
+        return "", True
+    ratio = r.size / need.min_size
+    what = f"the {gb(need.min_size)} " + ("file" if need.level == "episode" or need.ep else "torrent")
+    if r.size < need.min_size * 0.9:
+        return f"smaller than {what} - cannot hold it", False
+    if r.size < need.min_size:          # an indexer's size can be rounded down a little
+        return f"slightly smaller than {what} - only if the indexer rounded its size", True
+    n = matching.norm(r.title)
+    same_unit = (bool(re.search(rf"(?<![a-z0-9]){need.ep}(?![0-9])", n)) if need.ep
+                 else not _EP.search(n))
+    if same_unit and ratio > FAR_LARGER and r.size - need.min_size > 200 << 20:
+        return f"{ratio:.0f}× {what} - a different encode, cannot be it", False
+    return f"{ratio:.2f}× {what}", True
+
+
 def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
                  known: list[Release] = (), note: str = "") -> Release | None:
     """Nothing fits automatically: show the search results and let the person pick - but
@@ -1312,15 +1358,26 @@ def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
 
     def could_be(r: Release) -> bool:
         group, res = group_of(r.title), _RES.findall(matching.norm(r.title))
-        return (not need.group or not group or group == need.group) and             (not need.res or not res or need.res in res)
-    results = [r for r in usenet_results(cfg, pr, need, known) if r.guid not in tried_guids and could_be(r)]
+        return (not need.group or not group or group == need.group) and             (not need.res or not res or need.res in res) and not other_codec(need.target, r.title)
+    possible = [r for r in usenet_results(cfg, pr, need, known) if r.guid not in tried_guids and could_be(r)]
+    # a post whose size rules it out is not offered: it cannot hold the file
+    results = [r for r in possible if size_verdict(need, r)[1]]
     if not results:
-        warn(f"no other {need.group.upper() + ' ' if need.group else ''}{need.res + ' ' if need.res else ''}"
-             f"posts of {need.label} to choose from")
+        if possible:
+            sample = size_verdict(need, possible[0])[0]
+            warn(f"{len(possible)} post(s) of {need.label} might have been it by name, but none can hold "
+                 f"{need.target} by size (e.g. {possible[0].title}: {sample}) - nothing to choose from")
+        else:
+            warn(f"no other {need.group.upper() + ' ' if need.group else ''}{need.res + ' ' if need.res else ''}"
+                 f"posts of {need.label} to choose from")
         return None
-    results.sort(key=lambda r: (r.size < need.min_size, -(r.grabs or 0)))
+    if len(possible) > len(results):
+        info(f"left out {len(possible) - len(results)} post(s) of {need.label} that cannot hold it by size")
+    results.sort(key=lambda r: (abs(r.size / (need.min_size or 1) - 1.1), -(r.grabs or 0)))
     choices = [{"title": r.title, "indexer": r.indexer, "size": r.size, "size_text": gb(r.size),
-                "grabs": r.grabs, "publish_date": r.publish_date, "note": _fits(need, r) or ""} for r in results]
+                "grabs": r.grabs, "publish_date": r.publish_date,
+                "note": " · ".join(x for x in ((_fits(need, r) or ""), size_verdict(need, r)[0]) if x)}
+               for r in results]
     prompt = (f"No automatic replacement for {need.label}. Pick the {need.group.upper() + ' ' if need.group else ''}"
               f"NZB to download instead - it has to hold {need.target} ({gb(need.min_size)}).")
     if note:

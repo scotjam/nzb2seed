@@ -194,6 +194,18 @@ export const SCENARIOS = {
              buttons: [...row.querySelectorAll(".jretry span.btn, .jretry button")].map(b => b.textContent.trim()) };
   },
 
+  /* the new page only: the jobs list narrowed by keywords in a job's name, tracker or result */
+  async jobSearch({ act, doc }) {
+    await act.go("jobs");
+    await act.settle();
+    const titles = () => [...doc.querySelectorAll(".jrow .t")].map(t => t.textContent.trim());
+    const before = titles().length;
+    await act.type("Filter jobs by keyword", "show s02");
+    const narrowed = titles();
+    await act.type("Filter jobs by keyword", "");
+    return { before, narrowed, after: titles().length };
+  },
+
   /* the new page only: a resolution folds away under its release group, like the group does */
   async resFold({ act, doc }) {
     await act.go("build");
