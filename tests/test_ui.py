@@ -31,7 +31,7 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
     # removal can be chosen per job, which the retention text mentions
-    (re.compile(r"Automatic builds are removed and your own are kept, unless you change it on a job \(Remove automatically on the job\'s page\)\. "), ""),
+    (re.compile(r"Only automatic builds are removed - your own never are - and an automatic build can be taken out of these rules on its job's page\. "), ""),
     # what is found on Usenet, by group and resolution - and not trying groups never found
     (re.compile(r" ?Found on Usenet Nothing yet: every build that ends adds to this\. ?"), " "),
     (re.compile(r" ?\[[x ]\] Don't try groups that are never on Usenet: .*?it can still be tried again\)"), ""),

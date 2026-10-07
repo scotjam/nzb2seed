@@ -257,7 +257,7 @@ function JobView({ id }) {
     </div>`;
 }
 
-/* per job: removed after the retention days, or kept - whoever built it */
+/* per automatic build: follow the removal rules (on by default), or be kept for good */
 function AutoRemove({ id, on }) {
   const s = useStore(settings);
   const r = s?.settings?.retention || {};
@@ -268,10 +268,11 @@ function AutoRemove({ id, on }) {
     try { setNow((await api("/api/jobs/auto_remove", { id, on: want })).auto_remove); }
     catch (err) { toast(err.message); }
   };
-  return html`<label class="autoremove" title="Removed from qBittorrent, with the files nzb2seed placed for it, once it has been there longer than the days set in Settings. Automatic builds start ticked, your own builds unticked.">
+  return html`<label class="autoremove" title="Ticked, this build follows Removing builds again in Settings - whatever it is set to, now or later, including off. Unticked, it is never removed.">
     <input type="checkbox" checked=${now} onChange=${flip} />
-    ${` Remove automatically after ${r.days ?? 30} days`}
-    ${now && !r.enabled ? html`<small class="status"> - removal is switched off in Settings, so nothing is removed yet</small>` : ""}
+    ${" Follow the automatic removal rules"}
+    <small class="status">${now ? (r.enabled ? ` - removed once older than ${r.days ?? 30} days` : " - removal is off in Settings at the moment")
+      : " - kept, whatever the rules say"}</small>
   </label>`;
 }
 

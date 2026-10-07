@@ -99,22 +99,36 @@ def record_of(cfg: Config, infohash: str) -> str:
     return os.path.join(cfg.torrent_dir, infohash.lower() + SUFFIX)
 
 
-def removable(cfg: Config, infohash: str) -> bool | None:
-    """Whether a build is removed after the retention days (None: no record of its files,
-    so it never is)."""
+def automatic_build(cfg: Config, infohash: str) -> bool:
+    """Built by the Automatic tab (by its record, or the inbox's list for older records)."""
     path = record_of(cfg, infohash)
     if not os.path.exists(path):
+        return False
+    source = asm.Owned(path).source
+    return source == "auto" if source else infohash.lower() in automatic(cfg)
+
+
+def removable(cfg: Config, infohash: str) -> bool | None:
+    """Does an automatic build follow the removal rules (on by default)? None: not an
+    automatic build - your own builds are never removed, so there is nothing to choose."""
+    if not automatic_build(cfg, infohash):
         return None
-    return made_automatically(cfg, infohash.lower(), path, automatic(cfg))
+    return asm.Owned(record_of(cfg, infohash)).auto_remove is not False
 
 
 def set_removable(cfg: Config, infohash: str, on: bool):
-    """Chosen per job: removed after the retention days or kept, whoever built it. Only
-    that choice is written; the recorded sizes and times are left as they are."""
+    """Chosen per automatic build: follow the removal rules - whatever they are set to now
+    or later, including off - or be kept for good. Only that choice is written; the
+    recorded sizes and times are left as they are."""
+    if not automatic_build(cfg, infohash):
+        raise ValueError("only automatic builds are ever removed")
     path = record_of(cfg, infohash)
     with open(path, encoding="utf-8") as fh:
         d = json.load(fh)
-    d["auto_remove"] = bool(on)
+    if on:
+        d.pop("auto_remove", None)        # back to following the rules
+    else:
+        d["auto_remove"] = False
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(d, fh)
@@ -122,12 +136,12 @@ def set_removable(cfg: Config, infohash: str, on: bool):
 
 
 def made_automatically(cfg: Config, infohash: str, record: str, seen: set[str]) -> bool:
-    """Only what the Automatic tab built is removed again - unless chosen otherwise for the
-    job. A build, season or assemble you asked for yourself is never swept away, however
-    old it is, unless you ticked it to be."""
+    """Only what the Automatic tab built is removed again - and not one taken out of the
+    rules on its job. A build, season or assemble you asked for yourself is never swept
+    away, however old it is."""
     owned = asm.Owned(record)
-    if owned.auto_remove is not None:
-        return bool(owned.auto_remove)
+    if owned.auto_remove is False:
+        return False
     source = owned.source
     if source:
         return source == "auto"
