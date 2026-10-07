@@ -41,8 +41,8 @@ export function JobsTab({ active }) {
         <${JobBar} all=${all} shown=${shown} ticked=${ticked} picked=${picked} kind=${kind} counts=${counts}
           choose=${choose} select=${select} untick=${untick} words=${words}
           search=${(v) => { setWords(v); setPicked(new Map()); }} />
-        <p class="status jobtip">Tip: a job's Usenet downloads stay while it is on the list. Clear from list, delete files
-          removes them; Clear from list, keep files leaves them in your Usenet downloads folder for good.</p>
+        <p class="status jobtip">Tip: a job's Usenet downloads are kept while it is on the list. Clear from list,
+          delete files removes them; Clear from list, keep files leaves them in your Usenet downloads folder.</p>
         <div class="joblist" id="joblist">
           ${shown.length ? shown.map(j => html`
             <${JobRow} key=${j.id} j=${j} all=${all} on=${picked.has(j.id)} via=${picked.get(j.id)} current=${j.id === current}

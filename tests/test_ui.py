@@ -70,15 +70,21 @@ INTENDED = [
      lambda m: "Always add, for these trackers [" + ", ".join(
          re.findall(r"\[x\] (\S+)", m.group(1))) + "]"),
     # the Jobs tab says what each Clear from list does with the downloads
-    (re.compile(r" ?Tip: a job's Usenet downloads stay while it is on the list\. Clear from list, delete files "
-                r"removes them; Clear from list, keep files leaves them in your Usenet downloads folder for good\. ?"), " "),
-    # ...and its "keep files" confirmation says no file is deleted, and what may be left behind
-    (re.compile(r"^Clear (\d+) job\(s\) from the list and keep their files\?\n\nNo file is deleted: not the torrents' "
-                r"files, and not their downloads in your Usenet downloads folder - temporary files may be left there "
-                r"for you to delete \(Clear from list, delete files removes those\)\. Nothing in qBittorrent is touched\. "
-                r"Automatic torrents stay on the Automatic tab, where they can still be tried again\."),
+    (re.compile(r" ?Tip: a job's Usenet downloads are kept while it is on the list\. Clear from list, delete files "
+                r"removes them; Clear from list, keep files leaves them in your Usenet downloads folder\. ?"), " "),
+    # ...and its "keep files" confirmation says nothing is deleted, and what may be left behind
+    (re.compile(r"^Clear (\d+) jobs? from the list and keep their files\?\n\nNothing is deleted: neither the torrents' "
+                r"files nor the jobs' Usenet downloads\. Temporary files may stay in your Usenet downloads folder - to "
+                r"delete those too, use Clear from list, delete files\.\n\nNothing in qBittorrent is changed\. Automatic "
+                r"torrents stay on the Automatic tab, where they can be tried again\."),
      r"Remove \1 job(s) from the list?\n\nOnly the list entries go: no file, download or torrent is touched, and "
      r"automatic torrents stay on the Automatic tab where they can still be tried again."),
+    # (with no Abandon on a job any more, only Add to torrent client is counted - the sample has
+    # one such job, where the classic page counted two with Add or Abandon)
+    (re.compile(r"\n\n(?:One of them can|\d+ of them can) still be added to the torrent client\. Once cleared, "
+                r"that button is gone, but the files are kept\."),
+     "\n\n2 of them still have Add to torrent client or Abandon on them - those buttons go with them, and anything "
+     "such a build left behind stays where it is."),
     # the Jobs bar: Select: and Action:, actions named by what they do
     (re.compile(r"Select: All Failed Nearly complete Running / queued Completed Automatic Manual None (?:\[Tracker.\] )?"
                 r"Action: Retry selected Cancel selected \(kept on list\) Add to torrent client \(download the rest\) "
@@ -86,9 +92,6 @@ INTENDED = [
      "Tick all that failed Try again Add to torrent client Abandon Remove from list Clear auto jobs from queue"),
     (re.compile(r"Add to torrent client \([^)]*\): "), "Add to torrent client: "),
     (re.compile(r" \((?:TrackerOne|TrackerTwo|tracker unknown)\): (\S+%)"), r": \1"),
-    # a build already in qBittorrent can be abandoned too (qBittorrent is left alone), so the
-    # sample list's one added build now counts among those still offering Abandon
-    (re.compile(r"\b3 of them still have Add to torrent client or Abandon"), "2 of them still have Add to torrent client or Abandon"),
     # and has a button to remove jobs together with their Usenet downloads
     (re.compile(r" Remove and delete downloads(?: \(\d+\))?"), ""),
     # and offers to look for a nearly complete build on your other trackers
