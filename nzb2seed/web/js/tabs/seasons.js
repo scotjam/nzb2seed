@@ -107,8 +107,8 @@ export function SeasonsTab({ active }) {
 
   const opts = s.options;
   return html`
-    <h1>Grab a season, or the whole series</h1>
-    <p class="lede">One release group, one resolution, every episode. nzb2seed tries a season NZB first, then the missing episodes on their own, checks every episode against TVmaze and - for scene releases - against srrDB's CRC of the original video, and puts MediaInfo, screenshots and links in a separate <code>-metadata</code> folder next to the season.</p>
+    <h1>Grab a season, or the whole series, from Usenet</h1>
+    <p class="lede">One release group, one resolution, every episode. nzb2seed tries a season NZB first, then the missing episodes on their own, checks every episode against TVmaze and - for scene releases - against srrDB's CRC of the original video, and puts MediaInfo, screenshots and links in a separate <code>-metadata</code> folder next to the season, without searching for or downloading any torrent files.</p>
     <div class="sgrid">
       <div>
         <div class="panel">

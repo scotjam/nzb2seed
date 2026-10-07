@@ -3,7 +3,7 @@
 // lets the missing bit come over BitTorrent without asking; the Usenet downloads already
 // made are reused, so nothing is downloaded twice. When a pre-approved tracker has the same
 // files with someone seeding them, that is done at once - nothing to choose.
-import { html, useState } from "../lib.js";
+import { html, useEffect, useState } from "../lib.js";
 import { api } from "../api.js";
 import { refreshJobs, settings, toast } from "../store.js";
 import { plural, shortSize, size } from "../util.js";
@@ -13,8 +13,14 @@ export const trackerKey = (name) => { const n = (name || "").trim().toLowerCase(
 export const approved = (tracker) => (settings.get()?.settings?.behaviour?.nearly_auto_trackers || [])
   .some(t => trackerKey(t) === trackerKey(tracker));
 
+/* the stopped build's own size, from a size difference saved with what was found */
+const ownSize = (rs) => { const r = rs.find(x => x.size_diff != null); return r ? r.size - r.size_diff : null; };
+
 export function OtherTrackers({ j, Act }) {
-  const [found, setFound] = useState(null);       // null: not looked yet
+  // looked already (pressed, or by itself when the build stopped): shown straight away
+  const saved = () => j.extra?.others ? { releases: j.extra.others, size: j.extra.others_size ?? ownSize(j.extra.others) } : null;
+  const [found, setFound] = useState(saved);       // null: not looked yet
+  useEffect(() => { if (j.extra?.others) setFound(saved()); }, [j.extra?.others]);
   const [busy, setBusy] = useState(false);
   const [went, setWent] = useState(null);         // the pre-approved release built from at once
   const look = async () => {
@@ -39,6 +45,9 @@ export function OtherTrackers({ j, Act }) {
   };
   if (went) {
     return html`<small class="status">Building it from ${went.indexer} - pre-approved, ${plural(went.seeders, "seeder")}</small>`;
+  }
+  if (j.extra?.built_from_other) {
+    return html`<small class="status">Found on ${j.extra.built_from_other} (pre-approved) - being built from there</small>`;
   }
   if (!found) {
     return html`<${Act} label=${busy ? "Looking…" : "Look on other trackers"}
