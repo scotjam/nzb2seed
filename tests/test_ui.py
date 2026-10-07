@@ -100,6 +100,13 @@ INTENDED = [
     (re.compile(r" Cancel(?: \(\d+\))?(?= Try again)"), ""),
     # and the NZB pick list can be filtered and sorted
     (re.compile(r" \[\] \[Best match\] \d+ NZBs"), ""),
+    # each job's own buttons are the Jobs bar's: Retry, and Clear from list (keep or delete
+    # files) in place of Try again and Abandon
+    # (Abandon was only offered on a build that left files behind: the nearly complete ones)
+    (re.compile(r"(for TrackerOne|over BitTorrent\.) Retry Clear from list, keep files Clear from list, delete files"),
+     r"\1 Try again Abandon"),
+    (re.compile(r"(?<!\w)Retry Clear from list, keep files Clear from list, delete files"), "Try again"),
+    (re.compile(r" ?Clear from list, keep files Clear from list, delete files"), ""),
 ]
 
 

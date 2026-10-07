@@ -7,7 +7,7 @@ import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, tr
 import { SortSelect } from "../components/sort.js";
 import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAbandon, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, trackersOf, viaTracker } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
-import { abandonJob, addFromTrackers, addToClient, cancelMany, clearAndDelete, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
+import { addFromTrackers, addToClient, cancelMany, clearAndDelete, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
 export function JobsTab({ active }) {
   const all = useStore(jobs);
@@ -145,12 +145,18 @@ function JobActions({ j, all }) {
   const x = j.extra || {};
   const [starting, setStarting] = useState(false);
   useStore(settings);                      // a tracker's limit set here (or in Settings) shows at once
-  if (x.abandoned) return html`<div class="jretry"></div>`;
+  // the same as the Jobs bar's actions, for this one job
+  const clear = canRemove(j) && html`
+    <${Act} label="Clear from list, keep files" title="Take this job off the list. The files it placed and anything in qBittorrent stay; its unused Usenet downloads are cleared within the hour"
+      onPress=${() => removeMany([j])} />
+    <${Act} label="Clear from list, delete files" title="Take this job off the list and delete its Usenet downloads and the files it placed - never anything a torrent in qBittorrent uses"
+      onPress=${() => clearAndDelete([j])} />`;
+  if (x.abandoned) return html`<div class="jretry">${clear}</div>`;
   if (builtLater(j, all)) {
-    return html`<div class="jretry"><small class="status">built when tried again, as job ${finalOf(j, all).id}</small></div>`;
+    return html`<div class="jretry"><small class="status">built when tried again, as job ${finalOf(j, all).id}</small>${clear}</div>`;
   }
-  if (x.added) return html`<div class="jretry"><small class="status">${x.complete ? "complete in qBittorrent - seeding" : "in qBittorrent, downloading the rest"}</small></div>`;
-  if (x.added_via) return html`<div class="jretry"><small class="status">added to qBittorrent as ${trackerName(x.added_via)}'s torrent</small></div>`;
+  if (x.added) return html`<div class="jretry"><small class="status">${x.complete ? "complete in qBittorrent - seeding" : "in qBittorrent, downloading the rest"}</small>${clear}</div>`;
+  if (x.added_via) return html`<div class="jretry"><small class="status">added to qBittorrent as ${trackerName(x.added_via)}'s torrent</small>${clear}</div>`;
   const limit = nearlyLimitText(x.tracker);
   // the tracker is always named: whether downloading the rest risks a hit-and-run depends on it
   const where = x.tracker ? trackerName(x.tracker) : "tracker unknown";
@@ -183,9 +189,9 @@ function JobActions({ j, all }) {
       ${j.retried_as ? html`<small class="status">tried again as job ${j.retried_as}</small>`
         : j.can_retry && BADLY_ENDED.includes(j.status) && (starting ? html`<small class="status">starting again...</small>`
           // the button goes the moment it is pressed, so it cannot be pressed twice
-          : html`<${Act} label="Try again" title="Run it again, exactly as it was started"
+          : html`<${Act} label="Retry" title="Run it again, exactly as it was started"
               onPress=${() => { setStarting(true); retryJob(j); }} />`)}
-      ${x.infohash && html`<${Act} label="Abandon" title="Delete every temporary file this build left" onPress=${() => abandonJob(j)} />`}
+      ${clear}
     </div>`;
 }
 
