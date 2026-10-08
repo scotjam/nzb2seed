@@ -83,10 +83,9 @@ def test_an_ordinary_failure_has_nothing_to_finish(server):  # noqa: F811
     wait(lambda: job.status == "failed")
     assert job.extra is None
     assert call(url + "/api/jobs/add_to_client", *AUTH, body={"id": job.id})[0] == 404
-    assert call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})[0] == 404
 
 
-# ---------------------------------------------------------------- abandoning it
+# ---------------------------------------------------------------- Clear from list, delete files
 
 class FakeQbit:
     def __init__(self, state=None):
@@ -94,6 +93,9 @@ class FakeQbit:
 
     def info(self, h):
         return {"state": self.state, "progress": 0.97} if self.state else None
+
+    def torrents(self):
+        return [{"hash": H, "state": self.state, "save_path": "/x", "content_path": "/x/y"}] if self.state else []
 
     def remove(self, h, delete_files=False):
         assert delete_files is False                          # its files go from the record
@@ -112,67 +114,53 @@ def placed(app, tmp_path):
     return f, d
 
 
-def test_abandoning_deletes_what_the_build_placed(server, tmp_path, monkeypatch):  # noqa: F811
+def clear_and_delete(url, job):
+    return call(url + "/api/jobs/remove", *AUTH, body={"ids": [job.id], "delete_downloads": True})
+
+
+def test_clearing_with_delete_files_deletes_what_the_build_placed_and_says_how_much(server, tmp_path, monkeypatch):  # noqa: F811
     app, url = server
     f, d = placed(app, tmp_path)
     monkeypatch.setattr(app, "_qbit", lambda: FakeQbit(state=None))
     monkeypatch.setattr(app, "_sab", lambda: None)
     job = failed_part_way(app)
-    status, r = call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})
-    assert status == 200 and not f.exists() and not d.exists()
-    assert job.extra["abandoned"] is True and "abandoned" in job.result
+    status, r = clear_and_delete(url, job)
+    assert status == 200 and not f.exists() and not d.exists() and job.id not in app.jobs
+    assert r["placed_files"] == 1 and r["placed_bytes"] == 10
 
 
 @pytest.mark.parametrize("state", ["stoppedDL", "downloading", "stoppedUP"])
-def test_abandoning_never_touches_qbittorrent(server, tmp_path, monkeypatch, state):  # noqa: F811
-    """Abandoning clears nzb2seed and SABnzbd only: a torrent in qBittorrent - stopped,
-    downloading the rest, or complete - stays there, and so do the files it uses."""
+def test_clearing_never_touches_qbittorrent(server, tmp_path, monkeypatch, state):  # noqa: F811
+    """A torrent in qBittorrent - stopped, downloading the rest, or complete - stays there,
+    and so do the files it uses."""
     app, url = server
     f, _ = placed(app, tmp_path)
     qb = FakeQbit(state=state)
     monkeypatch.setattr(app, "_qbit", lambda: qb)
     monkeypatch.setattr(app, "_sab", lambda: None)
     job = failed_part_way(app, in_client=True)
-    status, r = call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})
-    assert status == 200 and job.extra["abandoned"] is True
-    assert qb.removed == [] and f.exists()
-    assert "qBittorrent" in r["result"]
+    status, r = clear_and_delete(url, job)
+    assert status == 200 and qb.removed == [] and f.exists() and r["placed_files"] == 0
+    assert any("qBittorrent" in k for k in r["kept"])
 
 
-def test_a_build_added_to_qbittorrent_can_be_abandoned_too(server, tmp_path, monkeypatch):  # noqa: F811
+def test_a_build_given_to_qbittorrent_keeps_its_files(server, tmp_path, monkeypatch):  # noqa: F811
     app, url = server
     f, _ = placed(app, tmp_path)
     monkeypatch.setattr(app, "_qbit", lambda: FakeQbit(state=None))   # gone from qBittorrent's list meanwhile
     monkeypatch.setattr(app, "_sab", lambda: None)
     job = failed_part_way(app, in_client=True)
     job.extra = {**job.extra, "added": True}
-    assert call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})[0] == 200
+    assert clear_and_delete(url, job)[0] == 200
     assert f.exists()                                         # it was given to qBittorrent: kept
 
 
-def test_nothing_is_deleted_until_the_person_abandons_it(server, tmp_path):  # noqa: F811
+def test_nothing_is_deleted_until_the_person_clears_it(server, tmp_path):  # noqa: F811
     """A build that stops a few percent short keeps everything on its own."""
     app, _ = server
     f, _ = placed(app, tmp_path)
     failed_part_way(app, have=0.99)
     assert f.exists()
-
-
-def test_its_usenet_downloads_are_kept_while_other_builds_run(server, tmp_path, monkeypatch):  # noqa: F811
-    """Another build may be reusing one of them."""
-    import threading
-    app, url = server
-    placed(app, tmp_path)
-    monkeypatch.setattr(app, "_qbit", lambda: FakeQbit(state=None))
-    gate = threading.Event()
-    other = app.start_job("Another.Build", "build", lambda cfg: gate.wait(5) and {"result": "done"})
-    job = failed_part_way(app)
-    try:
-        status, r = call(url + "/api/jobs/abandon", *AUTH, body={"id": job.id})
-        assert status == 200 and "other builds are running" in job.result
-    finally:
-        gate.set()
-        wait(lambda: other.status == "done")
 
 
 # ---------------------------------------------------------------- always, for a tracker
