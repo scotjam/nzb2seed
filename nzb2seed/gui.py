@@ -799,6 +799,44 @@ class App:
             json.dump({k: sorted(v) for k, v in self.kept_downloads.items()}, fh)
         os.replace(tmp, self._kept_path)
 
+    def delete_placed(self, job: "Job", qb) -> tuple[int, int, list[str]]:
+        """Delete the files a build that stopped part-way placed for its torrent: (files,
+        bytes, what was kept and why). Never while its torrent is in qBittorrent (those files
+        are the torrent's), and never once a later build - a retry, or a build from another
+        tracker - finished: they are that build's then. Only files in its own record go."""
+        x = job.extra or {}
+        h = x.get("infohash")
+        if job.status not in ("failed", "cancelled", "interrupted") or not h or x.get("abandoned"):
+            return 0, 0, []
+        later = self.jobs.get(job.retried_as or -1)
+        while later is not None and later.retried_as:
+            later = self.jobs.get(later.retried_as)
+        if later is not None and later.status == "done":
+            return 0, 0, []
+        if x.get("added") or (qb is not None and qb.info(h)):
+            return 0, 0, [f"{job.title}: its torrent is in qBittorrent, so its files stay"]
+        owned = pipeline_mod.owned_record(self.cfg, type("T", (), {"infohash": h})())
+        n, freed, kept = 0, 0, []
+        for f in sorted(owned.files):
+            try:
+                if os.path.isfile(f):
+                    size = os.path.getsize(f)
+                    os.remove(f)
+                    n, freed = n + 1, freed + size
+            except OSError as e:
+                kept.append(f"{f} ({e})")
+        for d in sorted(owned.dirs, key=len, reverse=True):
+            try:
+                if os.path.isdir(d) and not os.listdir(d):
+                    os.rmdir(d)
+            except OSError:
+                pass
+        try:
+            os.remove(owned.path)
+        except OSError:
+            pass
+        return n, freed, kept
+
     def keep_downloads_of(self, jobs: list["Job"]):
         """Cleared from the list with "keep files": what the jobs downloaded from Usenet stays
         where it is - the hourly clean-up leaves it alone from now on."""
@@ -1514,10 +1552,21 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 if body.get("delete_downloads"):
                     hashes = {h for h in (app.torrent_of(app.jobs[i]) for i in gone) if h}
                     busy = {app.torrent_of(j) for j in app.jobs.values() if j.status in ("running", "waiting")}
+                    qb = app._qbit()
                     try:
-                        out = pipeline_mod.delete_downloads_of(app.cfg, app._sab(), app._qbit(), hashes - busy)
+                        out = pipeline_mod.delete_downloads_of(app.cfg, app._sab(), qb, hashes - busy)
                     except (ApiError, Abort, OSError) as e:
                         return self._err(f"nothing was removed: {e}")
+                    # and the files each stopped build placed for its torrent
+                    files = freed = 0
+                    for i in gone:
+                        try:
+                            n, b, why = app.delete_placed(app.jobs[i], qb)
+                        except (ApiError, OSError) as e:
+                            n, b, why = 0, 0, [f"{app.jobs[i].title}: {e}"]
+                        files, freed = files + n, freed + b
+                        out["kept"] = list(out.get("kept") or []) + why
+                    out["placed_files"], out["placed_bytes"] = files, freed
                     name = lambda t: t[len("auto: "):] if t.startswith("auto: ") else t
                     app.forget_kept(hashes, {pipeline_mod.release_key(name(app.jobs[i].title)) for i in gone})
                 else:
@@ -1528,8 +1577,6 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                         app.jobs.pop(i, None)
                 app.store.changed(urgent=True)
                 return self._json({"removed": len(gone), "kept": len(ids) - len(gone), **out})
-            if path == "/api/jobs/abandon":
-                return self.abandon(body)
             if path == "/api/jobs/retry":
                 # replay the request that made the job: the same call, made again
                 job = app.jobs.get(int(body.get("id", -1)) if str(body.get("id", "")).lstrip("-").isdigit() else -1)
@@ -1890,68 +1937,6 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                         why = f"{x['tracker']} is set to always add builds this close"
                         also.append(app.finish_in_client(other, why).id)
             return self._json({"id": nj.id, "also": also})
-
-        def abandon(self, body):
-            """Clear what a failed build left in nzb2seed and SABnzbd: its Usenet downloads, and
-            the files it placed - unless its torrent is in qBittorrent. qBittorrent is never
-            touched: a torrent there stays, with the files it uses; remove it there yourself."""
-            job = self._nearly(body)
-            if job is None:
-                return
-            x = job.extra
-            h = x["infohash"]
-            done, kept = [], []
-            later = app.jobs.get(job.retried_as or -1)
-            while later is not None and later.retried_as:
-                later = app.jobs.get(later.retried_as)
-            if later is not None and later.status == "done":
-                return self._err(f"it was tried again and job {later.id} built it - its files "
-                                 "are that build's now")
-            qb = app._qbit()
-            there = qb.info(h) if qb else None
-            if there or x.get("added"):
-                kept.append("the torrent in qBittorrent and the files it uses (remove it there if you "
-                            "no longer want it)")
-            else:
-                owned = pipeline_mod.owned_record(app.cfg, type("T", (), {"infohash": h})())
-                gone = 0
-                for f in sorted(owned.files):
-                    try:
-                        if os.path.isfile(f):
-                            os.remove(f)
-                            gone += 1
-                    except OSError:
-                        kept.append(f)
-                for d in sorted(owned.dirs, key=len, reverse=True):
-                    try:
-                        if os.path.isdir(d) and not os.listdir(d):
-                            os.rmdir(d)
-                    except OSError:
-                        pass
-                try:
-                    os.remove(owned.path)
-                except OSError:
-                    pass
-                done.append(f"deleted the {gone} file(s) it placed")
-            # its Usenet downloads - unless another build is running, which may be using one
-            busy = [j for j in app.jobs.values() if j.status in ("running", "waiting") and j is not job]
-            if busy:
-                kept.append("its Usenet downloads (other builds are running and may be using them)")
-            else:
-                sab = app._sab()
-                n = 0
-                for j in pipeline_mod.ledger_for(app.cfg).all():
-                    if j.get("torrent") == h and sab is not None:
-                        try:
-                            if pipeline_mod.remove_download(app.cfg, sab, j["nzo"]):
-                                n += 1
-                        except (ApiError, OSError) as e:
-                            kept.append(f"{j.get('title') or j['nzo']} ({e})")
-                done.append(f"deleted {n} Usenet download(s)")
-            job.extra = {**x, "abandoned": True}
-            job.result = "abandoned: " + "; ".join(done) + (f" (kept {', '.join(kept)})" if kept else "")
-            app.store.changed(urgent=True)
-            return self._json({"result": job.result})
 
         def _auto_state(self):
             cfg = app.cfg
