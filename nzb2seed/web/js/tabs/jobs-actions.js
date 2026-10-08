@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { jobs, loadSettings, nearlyLimitText, openJobId, jobScreen, refreshJobs, settings, toast } from "../store.js";
 import { defaultOptions } from "../components/options.js";
 import { gb, missText, plural, shortSize, size, trackerName } from "../util.js";
-import { canAdd, canAbandon } from "./jobs-rules.js";
+import { canAdd } from "./jobs-rules.js";
 
 async function each(list, path, done, failed, ok) {
   let n = 0; const bad = [];
@@ -45,16 +45,6 @@ ${w.parts} part(s) stopped with only small files missing `
     await refreshJobs();
     toast(`Building it again, trying whole posts - job ${r.id}.`);
   } catch (err) { toast("Could not start it: " + err.message); }
-}
-
-export async function abandonJob(j) {
-  if (!confirm(`Abandon ${j.title}?\n\nThis deletes its Usenet downloads, and the files it placed unless `
-      + `its torrent is in qBittorrent. qBittorrent is not touched: a torrent there stays, with its files - `
-      + `remove it there yourself if you no longer want it.`)) return;
-  try {
-    const r = await api("/api/jobs/abandon", { id: j.id });
-    toast(r.result); await refreshJobs();
-  } catch (err) { toast("Could not abandon it: " + err.message); }
 }
 
 export async function addToClient(j, where, always = false) {
@@ -108,13 +98,6 @@ export function addMany(list, done) {
       + `${lines}\n\n`
       + `Each is within what its tracker lets you download, as you set it.`)) return;
   return each(list, "/api/jobs/add_to_client", "handed to qBittorrent", "could not add", done);
-}
-
-export function abandonMany(list, done) {
-  if (!confirm(`Abandon ${list.length} build(s)?\n\nThis deletes the files each one placed and its `
-      + `Usenet downloads, and removes it from qBittorrent if it is there and not running. `
-      + `Only nzb2seed's own files are touched.`)) return;
-  return each(list, "/api/jobs/abandon", "abandoned", "could not abandon", done);
 }
 
 export async function removeMany(list, done) {
@@ -183,15 +166,13 @@ export async function clearAndDelete(list, done) {
       + `This deletes the jobs' Usenet downloads and the files they placed for their torrents. `
       + `A file is kept if a torrent in qBittorrent uses it, a running build needs it, or another download shares it.\n\n`
       + `Nothing in qBittorrent is removed: its torrents and their files stay.\n\nThis cannot be undone.`)) return;
-  for (const j of list.filter(j => canAbandon(j, all))) {
-    try { await api("/api/jobs/abandon", { id: j.id }); } catch { /* still cleared below */ }
-  }
   try {
     const r = await api("/api/jobs/remove", { ids: list.map(j => j.id), delete_downloads: true });
     if (list.some(j => j.id === openJobId.get())) { openJobId.set(null); jobScreen.set(false); }
     done?.();
     await refreshJobs();
-    toast(`Cleared ${r.removed} job(s) and deleted ${r.deleted || 0} download(s), freeing ${gb(r.bytes || 0)}`
+    toast(`Cleared ${plural(r.removed, "job")}: deleted ${plural(r.placed_files || 0, "placed file")} and `
+      + `${plural(r.deleted || 0, "Usenet download")}, freeing ${gb((r.placed_bytes || 0) + (r.bytes || 0))}`
       + (r.kept?.length ? `; kept ${r.kept.length}: ${r.kept[0]}` : "") + ".");
   } catch (err) { toast("Could not clear them: " + err.message); }
 }

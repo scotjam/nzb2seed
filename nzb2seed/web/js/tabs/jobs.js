@@ -5,7 +5,7 @@ import { api, onChange } from "../api.js";
 import { backToJobs, jobs, jobScreen, nearlyLimitText, openJob, openJobId, setTrackerLimit, settings, shortEnough, toast, trackerLimit, useStore } from "../store.js";
 import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName } from "../util.js";
 import { SortSelect } from "../components/sort.js";
-import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAbandon, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, trackersOf, viaTracker } from "./jobs-rules.js";
+import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, trackersOf, viaTracker } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
 import { addFromTrackers, addToClient, cancelMany, clearAndDelete, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
