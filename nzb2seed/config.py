@@ -77,11 +77,11 @@ class Config:
     auto_enabled: bool = False
     auto_folder: str = ""              # the inbox as this machine sees it
     auto_autobrr_folder: str = ""      # the same folder as autobrr sees it (its watch-folder action)
-    auto_wait_hours: float = 14 / 60   # how long to keep trying for the Usenet post
+    auto_wait_hours: float = 1.0       # how long to keep trying for the Usenet post
                                       # (measured: a release that is posted at all is there
                                       #  within minutes of the torrent, often before it)
-    auto_retry_first_minutes: float = 2.0   # the first gap; it doubles up to the cap below
-    auto_retry_minutes: float = 2.0    # the longest gap between tries of one torrent
+    auto_retry_first_minutes: float = 15.0  # the first gap; it doubles up to the cap below
+    auto_retry_minutes: float = 15.0   # the longest gap between tries of one torrent
     auto_start: bool = True            # start seeding - only ever at a 100.0% recheck
     auto_parallel: int = 1             # builds at once
     auto_queue_max: int = 10           # torrents queued at once (not counting builds); 0 = no cap

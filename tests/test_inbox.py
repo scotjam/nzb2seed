@@ -227,22 +227,22 @@ def test_a_zero_day_preview_means_everything_not_the_saved_age(server, monkeypat
     assert seen["days"] is None and r["days"] == 30      # no age given: the saved one
 
 
-def test_it_tries_at_once_then_every_two_minutes_for_a_quarter_of_an_hour(tmp_path):
-    """Measured against real releases: one that reaches Usenet is there within minutes of
-    the torrent. So: a try straight away, then every 2 minutes, giving up after 14."""
+def test_it_tries_at_once_then_every_quarter_of_an_hour_for_an_hour(tmp_path):
+    """A fresh release's Usenet post can take half an hour or more: a try straight away,
+    then every 15 minutes, giving up after an hour."""
     from nzb2seed.config import Config, finalize
     from nzb2seed.inbox import retry_gap
     cfg = finalize(Config(path=tmp_path / "nzb2seed.toml"))
-    assert cfg.auto_retry_minutes == 2.0 and cfg.auto_retry_first_minutes == 2.0
-    assert round(cfg.auto_wait_hours * 60) == 14
-    assert [retry_gap(cfg, n) / 60 for n in (1, 2, 5, 9)] == [2, 2, 2, 2]
+    assert cfg.auto_retry_minutes == 15.0 and cfg.auto_retry_first_minutes == 15.0
+    assert cfg.auto_wait_hours == 1.0
+    assert [retry_gap(cfg, n) / 60 for n in (1, 2, 5, 9)] == [15, 15, 15, 15]
 
-    # one try at once, then every 2 minutes while still inside the 14 minutes
+    # one try at once, then every 15 minutes while still inside the hour
     deadline, at, tries = cfg.auto_wait_hours * 3600, 0.0, [0.0]
     while at < deadline:
         at += retry_gap(cfg, len(tries))
         tries.append(at / 60)
-    assert tries == [0, 2, 4, 6, 8, 10, 12, 14]
+    assert tries == [0, 15, 30, 45, 60]
 
 
 def test_the_gap_between_tries_starts_short_and_backs_off(tmp_path):
