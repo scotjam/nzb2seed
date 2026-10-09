@@ -5,11 +5,11 @@ and, through a "watch folder" action nzb2seed sets up on the filters you choose,
 the inbox. nzb2seed never contacts the tracker. Each torrent becomes one automatic job:
 
 * the Usenet post often appears minutes to hours after the announce, so the build is tried
-  again every ``auto_retry_minutes`` until ``auto_wait_hours`` have passed. Both are
-  short by default - a try at once, then every 2 minutes for 14 minutes - because a
-  release that reaches Usenet at all is there within minutes of the torrent (often
-  before it), while one that is missing after that is usually a tracker's own encode
-  that will never be posted, and every further look only costs indexer searches;
+  again every ``auto_retry_minutes`` until ``auto_wait_hours`` have passed - by default
+  a try at once, then every 15 minutes for an hour: a release that reaches Usenet at all
+  is usually there within the hour (a fresh one can take half an hour or more), while one
+  still missing after that is usually a tracker's own encode that will never be posted,
+  and every further look only costs indexer searches;
 * it never asks anything (no pick lists) and never downloads over BitTorrent: the torrent is
   added stopped, rechecked, and started only at exactly 100.0% (``auto_start``);
 * at most ``auto_parallel`` builds run at once, and automatic builds make at most
@@ -148,7 +148,7 @@ def retry_gap(cfg, attempts: int) -> float:
     Measured against real releases: one that reaches Usenet at all is there within
     minutes of the torrent - often before it - so the looks are close together, where
     they can actually find something. The gap doubles up to ``auto_retry_minutes``;
-    with the two set the same (the default 2 minutes) it is simply a fixed gap."""
+    with the two set the same (the default 15 minutes) it is simply a fixed gap."""
     first = max(0.01, float(cfg.auto_retry_first_minutes))   # never a busy loop
     cap = max(first, float(cfg.auto_retry_minutes))
     return min(first * 2 ** max(0, attempts - 1), cap) * 60
