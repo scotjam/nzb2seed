@@ -20,7 +20,7 @@ function formFrom(st) {
 }
 function toSettings(f) {
   return { folder: f.folder.trim(), autobrr_folder: f.autobrr_folder.trim(),
-    wait_hours: Number(f.wait_hours) || 24, retry_minutes: Number(f.retry_minutes) || 120,
+    wait_hours: Number(f.wait_hours) || 1, retry_minutes: Number(f.retry_minutes) || 15,
     retry_first_minutes: Number(f.retry_first_minutes) || 15,
     parallel: Number(f.parallel) || 1, searches_per_hour: Number(f.searches_per_hour) || 40,
     queue_max: f.queue_max === "" ? 10 : Math.max(0, Math.floor(Number(f.queue_max) || 0)),
@@ -147,9 +147,9 @@ export function AutoTab({ active }) {
           <small class="status">Uses autobrr's own config folder, which it can already write to - no change to autobrr's container needed.</small></div>
         <hr />
         <div class="two">
-          ${num("wait_hours", "Keep trying for (hours)", { min: "0", step: "0.05", title: "How long to keep looking for the Usenet post before giving up. 0.23 (14 minutes) by default: a release that is posted at all appears within minutes of the torrent, and one still missing after that is usually a tracker-internal encode that never will be." })}
-          ${num("retry_first_minutes", "First retry after (minutes)", { min: "1", step: "1", title: "A release that reaches Usenet at all is usually there within minutes of the torrent, so the first looks are close together." })}
-          ${num("retry_minutes", "…backing off to at most (minutes)", { min: "1", step: "1", title: "The gap doubles after each try up to this. A release still missing after an hour is usually a tracker's own encode that will never be posted, and every look costs indexer searches." })}
+          ${num("wait_hours", "Keep trying for (hours)", { min: "0", step: "0.05", title: "How long to keep looking for the Usenet post before giving up. 1 hour by default: a release that is posted at all usually appears within the hour (a fresh one can take half an hour or more), and one still missing after that is usually a tracker-internal encode that never will be." })}
+          ${num("retry_first_minutes", "First retry after (minutes)", { min: "1", step: "1", title: "How long after the first try to look again. 15 minutes by default." })}
+          ${num("retry_minutes", "…backing off to at most (minutes)", { min: "1", step: "1", title: "The gap doubles after each try up to this - 15 minutes by default, the same as the first, so every 15 minutes. A release still missing after an hour is usually a tracker's own encode that will never be posted, and every look costs indexer searches." })}
           ${num("parallel", "Builds at once", { min: "1", max: "8", step: "1" })}
           ${num("queue_max", "Queued at once (0 = no cap)", { min: "0", step: "1", title: "The most torrents waiting their turn at a time, not counting builds already running. When the queue is full, the oldest waiting one is stopped to make room for a new arrival (or the newcomer is, with the box below ticked). Stopped ones stay in the list and can be tried again." })}
           ${num("searches_per_hour", "Prowlarr searches an hour (automatic only)", { min: "1", step: "1" })}
