@@ -85,8 +85,7 @@ def automatic(tmp_path, monkeypatch, **cfg):
     app = gui.App(str(cfgfile))
     box = tmp_path / "inbox"
     box.mkdir()
-    settings = dict(auto_enabled=True, auto_folder=str(box), auto_retry_minutes=60,
-                    auto_retry_first_minutes=60, auto_wait_hours=48)
+    settings = dict(auto_enabled=True, auto_folder=str(box), auto_retry_at=list(range(0, 48 * 60 + 1, 60)))
     settings.update(cfg)
     app.cfg = dataclasses.replace(app.cfg, **settings)
     calls = []

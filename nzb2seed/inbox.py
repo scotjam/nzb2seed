@@ -4,12 +4,11 @@ autobrr (in the same network as the other services) fetches the .torrent from th
 and, through a "watch folder" action nzb2seed sets up on the filters you choose, saves it in
 the inbox. nzb2seed never contacts the tracker. Each torrent becomes one automatic job:
 
-* the Usenet post often appears minutes to hours after the announce, so the build is tried
-  again every ``auto_retry_minutes`` until ``auto_wait_hours`` have passed - by default
-  a try at once, then every 15 minutes for an hour: a release that reaches Usenet at all
-  is usually there within the hour (a fresh one can take half an hour or more), while one
-  still missing after that is usually a tracker's own encode that will never be posted,
-  and every further look only costs indexer searches;
+* the Usenet post often appears minutes after the announce, sometimes half an hour or
+  more, so the build is tried at the minutes in ``auto_retry_at`` after the torrent arrived
+  - by default 0, 2, 10, 20 and 60: close together at first, where most posts turn up, and
+  a last look at an hour. One still missing after that is usually a tracker's own encode
+  that will never be posted, and every further look only costs indexer searches;
 * it never asks anything (no pick lists) and never downloads over BitTorrent: the torrent is
   added stopped, rechecked, and started only at exactly 100.0% (``auto_start``);
 * at most ``auto_parallel`` builds run at once, and automatic builds make at most
@@ -142,16 +141,16 @@ def _ago(seconds: float) -> str:
     return "moments"
 
 
-def retry_gap(cfg, attempts: int) -> float:
-    """How long to wait before looking for this release again, in seconds.
+def next_try(cfg, first_seen: float, now: float) -> float | None:
+    """When to look for the release's post again: the next of ``auto_retry_at`` (minutes
+    after the torrent arrived) still to come - None once they are all past."""
+    later = [first_seen + m * 60 for m in cfg.auto_retry_at if first_seen + m * 60 > now]
+    return min(later) if later else None
 
-    Measured against real releases: one that reaches Usenet at all is there within
-    minutes of the torrent - often before it - so the looks are close together, where
-    they can actually find something. The gap doubles up to ``auto_retry_minutes``;
-    with the two set the same (the default 15 minutes) it is simply a fixed gap."""
-    first = max(0.01, float(cfg.auto_retry_first_minutes))   # never a busy loop
-    cap = max(first, float(cfg.auto_retry_minutes))
-    return min(first * 2 ** max(0, attempts - 1), cap) * 60
+
+def wait_seconds(cfg) -> float:
+    """How long after it arrived a torrent is looked for at all."""
+    return max(cfg.auto_retry_at or [0]) * 60
 
 
 def detect_autobrr_folder() -> tuple[str, str] | None:
@@ -374,7 +373,6 @@ class Inbox:
             info(call.why)
         while True:
             cfg = self.app.cfg
-            deadline = it.get("first_seen", time.time()) + cfg.auto_wait_hours * 3600
             wait = it.get("next_try", 0) - time.time()
             if wait > 0:
                 info(f"next try at {time.strftime('%H:%M', time.localtime(it['next_try']))}")
@@ -405,18 +403,15 @@ class Inbox:
                 raise
             except (Abort, ApiError, OSError, ValueError) as e:
                 why = str(e)
-                gap = retry_gap(cfg, attempts)
-                # try again while still inside the window, so the last try lands on the
-                # deadline rather than a gap short of it
+                nxt = next_try(cfg, it.get("first_seen", time.time()), time.time())
                 # an old release that is not on Usenet by now will not be in a few
                 # minutes either: the quick retries are for fresh ones on their way
                 age = time.time() - rel.published if rel.published else None
-                old = age is not None and age > max(3600, cfg.auto_wait_hours * 3600)
+                old = age is not None and age > max(3600, wait_seconds(cfg))
                 if _NOT_YET.search(why) and old:
                     warn(f"the tracker posted it {_ago(age)} ago - if it is not on Usenet by "
                          "now, a few more minutes will not change that; not trying again")
-                elif _NOT_YET.search(why) and time.time() < deadline:
-                    nxt = time.time() + gap
+                elif _NOT_YET.search(why) and nxt is not None:
                     warn(f"not complete from Usenet yet ({why}) - trying again at "
                          f"{time.strftime('%H:%M', time.localtime(nxt))}")
                     if not self.state.move_on(h, status="waiting", next_try=nxt, why=why):
