@@ -51,7 +51,7 @@ const USENET = [
 
 const AUTO = {
   settings: { enabled: true, folder: "/inbox", autobrr_folder: "/config/inbox", wait_hours: 0.23, retry_minutes: 2,
-    retry_first_minutes: 2, parallel: 2, queue_max: 10, queue_keep_older: false, searches_per_hour: 40, start: true,
+    retry_first_minutes: 2, retry_at: [0, 2, 10, 20, 60], parallel: 2, queue_max: 10, queue_keep_older: false, searches_per_hour: 40, start: true,
     autobrr_url: "http://autobrr.example:7474" },
   has_key: true,
   items: [

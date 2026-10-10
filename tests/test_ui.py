@@ -30,6 +30,9 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # the differences made on purpose: the new page always names the tracker a nearly complete
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
+    # the Automatic tab's tries: one list of minutes in place of a window and two gaps
+    (re.compile(r"Look for the Usenet post at \(minutes after it arrived\) \[0, 2, 10, 20, 60\]"),
+     "Keep trying for (hours) [0.23] First retry after (minutes) [2] …backing off to at most (minutes) [2]"),
     # the Seasons tab says it works from Usenet alone
     (re.compile(r"Grab a season, or the whole series, from Usenet"), "Grab a season, or the whole series"),
     (re.compile(r"folder next to the season, without searching for or downloading any torrent files\."), "folder next to the season."),
@@ -110,7 +113,8 @@ INTENDED = [
 ]
 
 
-NEW_SETTINGS = {"skip_unposted", "max_age_days", "nearly_limits"}          # settings the new page sends that the classic one had not
+NEW_SETTINGS = {"skip_unposted", "max_age_days", "nearly_limits", "retry_at"}
+OLD_SETTINGS = {"wait_hours", "retry_minutes", "retry_first_minutes"}     # replaced by retry_at          # settings the new page sends that the classic one had not
 
 
 def without_new_settings(value):
@@ -119,7 +123,7 @@ def without_new_settings(value):
     if isinstance(value, list):
         return [without_new_settings(v) for v in value]
     if isinstance(value, dict):
-        return {k: without_new_settings(v) for k, v in value.items() if k not in NEW_SETTINGS}
+        return {k: without_new_settings(v) for k, v in value.items() if k not in NEW_SETTINGS | OLD_SETTINGS}
     return value
 
 
