@@ -39,8 +39,7 @@ def test_a_torrent_in_the_inbox_waits_for_its_post_then_builds(tmp_path, monkeyp
     box = tmp_path / "inbox"
     box.mkdir()
     import dataclasses
-    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_minutes=0.001, auto_retry_first_minutes=0.001,
-                                  auto_wait_hours=1)
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_at=[i * 0.001 for i in range(1000)])
     calls = []
 
     def fake_run(cfg, opts, rel, groups, torrent_data=None):
@@ -227,42 +226,35 @@ def test_a_zero_day_preview_means_everything_not_the_saved_age(server, monkeypat
     assert seen["days"] is None and r["days"] == 30      # no age given: the saved one
 
 
-def test_it_tries_at_once_then_every_quarter_of_an_hour_for_an_hour(tmp_path):
-    """A fresh release's Usenet post can take half an hour or more: a try straight away,
-    then every 15 minutes, giving up after an hour."""
+def test_it_looks_at_once_then_at_2_10_20_and_60_minutes(tmp_path):
+    """Most posts turn up within minutes, some take half an hour or more: looks close
+    together at first, a last one at an hour, then it gives up."""
     from nzb2seed.config import Config, finalize
-    from nzb2seed.inbox import retry_gap
+    from nzb2seed.inbox import next_try, wait_seconds
     cfg = finalize(Config(path=tmp_path / "nzb2seed.toml"))
-    assert cfg.auto_retry_minutes == 15.0 and cfg.auto_retry_first_minutes == 15.0
-    assert cfg.auto_wait_hours == 1.0
-    assert [retry_gap(cfg, n) / 60 for n in (1, 2, 5, 9)] == [15, 15, 15, 15]
-
-    # one try at once, then every 15 minutes while still inside the hour
-    deadline, at, tries = cfg.auto_wait_hours * 3600, 0.0, [0.0]
-    while at < deadline:
-        at += retry_gap(cfg, len(tries))
+    assert cfg.auto_retry_at == [0, 2, 10, 20, 60] and wait_seconds(cfg) == 3600
+    tries, at = [0.0], 0.0
+    while (nxt := next_try(cfg, 0.0, at)) is not None:
+        at = nxt
         tries.append(at / 60)
-    assert tries == [0, 15, 30, 45, 60]
+    assert tries == [0, 2, 10, 20, 60]
 
 
-def test_the_gap_between_tries_starts_short_and_backs_off(tmp_path):
-    """Measured on real releases: one that reaches Usenet is there within minutes, so the
-    early looks are close together; after that the gap doubles to the cap."""
+def test_a_build_that_ran_long_takes_the_next_look_still_to_come(tmp_path):
+    """The looks are timed from when the torrent arrived: a try that ran past a look's
+    time goes on to the next one, never two at once."""
     from nzb2seed.config import Config, finalize
-    from nzb2seed.inbox import retry_gap
-    import dataclasses
-    cfg = dataclasses.replace(finalize(Config(path=tmp_path / "nzb2seed.toml")),
-                              auto_retry_first_minutes=15, auto_retry_minutes=120)
-    assert [retry_gap(cfg, n) / 60 for n in (1, 2, 3, 4, 5, 9)] == [15, 30, 60, 120, 120, 120]
-
-
-def test_the_cap_is_never_below_the_first_gap(tmp_path):
-    import dataclasses
-    from nzb2seed.config import Config, finalize
-    from nzb2seed.inbox import retry_gap
+    from nzb2seed.inbox import next_try
     cfg = finalize(Config(path=tmp_path / "nzb2seed.toml"))
-    odd = dataclasses.replace(cfg, auto_retry_first_minutes=60, auto_retry_minutes=10)
-    assert retry_gap(odd, 1) / 60 == 60 and retry_gap(odd, 5) / 60 == 60
+    assert next_try(cfg, 0.0, 11 * 60) == 20 * 60
+    assert next_try(cfg, 0.0, 61 * 60) is None
+
+
+def test_the_looks_can_be_written_any_way(tmp_path):
+    from nzb2seed.config import minutes_list
+    assert minutes_list("60, 2 10;20 0 2") == [0, 2, 10, 20, 60]
+    assert minutes_list([5, "x", -1, 1.5]) == [1.5, 5]
+    assert minutes_list("") == []
 
 
 def waiting_inbox(tmp_path, monkeypatch, names=("Show.S01E01.720p-GRPA",), building=None):
@@ -275,7 +267,7 @@ def waiting_inbox(tmp_path, monkeypatch, names=("Show.S01E01.720p-GRPA",), build
     box = tmp_path / "inbox"
     box.mkdir()
     app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_parallel=2,
-                                  auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+                                  auto_retry_at=list(range(0, 48 * 60 + 1, 60)))
     hold = threading.Event()
 
     def fake_run(cfg, opts, rel, groups, torrent_data=None):
@@ -352,7 +344,7 @@ def full_queue(tmp_path, monkeypatch, keep_older):
     box = tmp_path / "inbox"
     box.mkdir()
     app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_queue_max=1,
-                                  auto_queue_keep_older=keep_older, auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+                                  auto_queue_keep_older=keep_older, auto_retry_at=list(range(0, 48 * 60 + 1, 60)))
     monkeypatch.setattr(inbox, "execute_run",
                         lambda *a, **k: (_ for _ in ()).throw(Abort("no Usenet post could supply S01E01")))
     monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
@@ -415,7 +407,7 @@ def test_after_a_restart_the_same_job_carries_on(tmp_path, monkeypatch):
     def boot():
         app = gui.App(str(cfgfile))
         app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
-                                      auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+                                      auto_retry_at=list(range(0, 48 * 60 + 1, 60)))
         app.start_inbox()
         return app
     try:
@@ -448,7 +440,7 @@ def test_try_again_on_the_jobs_tab_works_for_automatic_jobs(server, tmp_path, mo
     box = tmp_path / "inbox"
     box.mkdir()
     app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
-                                  auto_retry_minutes=60, auto_retry_first_minutes=60, auto_wait_hours=48)
+                                  auto_retry_at=list(range(0, 48 * 60 + 1, 60)))
     monkeypatch.setattr(inbox, "execute_run",
                         lambda *a, **k: (_ for _ in ()).throw(Abort("no Usenet post could supply S01E01")))
     monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
@@ -488,7 +480,7 @@ def test_an_old_release_missing_from_usenet_is_tried_once(tmp_path, monkeypatch)
     box = tmp_path / "inbox"
     box.mkdir()
     app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box),
-                                  auto_retry_minutes=0.001, auto_retry_first_minutes=0.001, auto_wait_hours=1,
+                                  auto_retry_at=[i * 0.001 for i in range(1000)],
                                   auto_max_age_days=100)      # an old release on purpose, within this limit
     calls = []
     monkeypatch.setattr(inbox, "execute_run",
@@ -540,8 +532,7 @@ def test_an_automatic_build_that_settled_can_be_tried_with_whole_posts(server, t
     app, url = server
     box = tmp_path / "inbox"
     box.mkdir()
-    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_minutes=60,
-                                  auto_retry_first_minutes=60, auto_wait_hours=48)
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_at=list(range(0, 48 * 60 + 1, 60)))
     runs = []
 
     def fake_run(cfg, opts, rel, groups, torrent_data=None):
@@ -583,8 +574,7 @@ def _aged_inbox(tmp_path, monkeypatch, published, **cfg):
     app = gui.App(str(cfgfile))
     box = tmp_path / "inbox"
     box.mkdir()
-    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_minutes=60,
-                                  auto_retry_first_minutes=60, auto_wait_hours=48, **cfg)
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_at=list(range(0, 48 * 60 + 1, 60)), **cfg)
     searched, built = [], []
     monkeypatch.setattr(inbox.lookup_mod, "find", lambda *a, **k: searched.append(1) or (
         lookup.Info(published=published) if published is not None else None))

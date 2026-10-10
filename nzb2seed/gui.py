@@ -1802,9 +1802,8 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
 
         # ------------------------------------------------ the Automatic tab
         AUTO_FIELDS = {"enabled": ("auto_enabled", bool), "folder": ("auto_folder", str),
-                       "autobrr_folder": ("auto_autobrr_folder", str), "wait_hours": ("auto_wait_hours", float),
-                       "retry_minutes": ("auto_retry_minutes", float), "start": ("auto_start", bool),
-                       "retry_first_minutes": ("auto_retry_first_minutes", float),
+                       "autobrr_folder": ("auto_autobrr_folder", str),
+                       "retry_at": ("auto_retry_at", config_mod.minutes_list), "start": ("auto_start", bool),
                        "parallel": ("auto_parallel", int), "searches_per_hour": ("auto_searches_per_hour", int),
                        "queue_max": ("auto_queue_max", int), "queue_keep_older": ("auto_queue_keep_older", bool),
                        "skip_unposted": ("auto_skip_unposted", bool),

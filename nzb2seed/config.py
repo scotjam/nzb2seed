@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -77,11 +78,10 @@ class Config:
     auto_enabled: bool = False
     auto_folder: str = ""              # the inbox as this machine sees it
     auto_autobrr_folder: str = ""      # the same folder as autobrr sees it (its watch-folder action)
-    auto_wait_hours: float = 1.0       # how long to keep trying for the Usenet post
+    # when to look for the Usenet post: minutes after the torrent arrived (0 = at once)
+    auto_retry_at: list = field(default_factory=lambda: [0, 2, 10, 20, 60])
                                       # (measured: a release that is posted at all is there
                                       #  within minutes of the torrent, often before it)
-    auto_retry_first_minutes: float = 15.0  # the first gap; it doubles up to the cap below
-    auto_retry_minutes: float = 15.0   # the longest gap between tries of one torrent
     auto_start: bool = True            # start seeding - only ever at a 100.0% recheck
     auto_parallel: int = 1             # builds at once
     auto_queue_max: int = 10           # torrents queued at once (not counting builds); 0 = no cap
@@ -152,9 +152,7 @@ LAYOUT = [
     ("automatic", "enabled", "auto_enabled"),
     ("automatic", "folder", "auto_folder"),
     ("automatic", "autobrr_folder", "auto_autobrr_folder"),
-    ("automatic", "wait_hours", "auto_wait_hours"),
-    ("automatic", "retry_minutes", "auto_retry_minutes"),
-    ("automatic", "retry_first_minutes", "auto_retry_first_minutes"),
+    ("automatic", "retry_at", "auto_retry_at"),
     ("automatic", "start", "auto_start"),
     ("automatic", "parallel", "auto_parallel"),
     ("automatic", "queue_max", "auto_queue_max"),
@@ -192,6 +190,20 @@ def from_sections(d: dict, path: Path) -> Config:
     return finalize(cfg)
 
 
+def minutes_list(v) -> list:
+    """'0, 2, 10, 20, 60' (or a list) -> [0, 2, 10, 20, 60]: sorted, no repeats, none below 0."""
+    items = v if isinstance(v, (list, tuple)) else re.split(r"[\s,;]+", str(v or ""))
+    out = set()
+    for x in items:
+        try:
+            f = float(x)
+        except (TypeError, ValueError):
+            continue
+        if f >= 0:
+            out.add(int(f) if f == int(f) else f)
+    return sorted(out)
+
+
 def finalize(cfg: Config) -> Config:
     # torrents nzb2seed adds are filed under their own category, so they are easy to tell
     # from the rest of qBittorrent. Set it to "-" to add them without any category.
@@ -201,6 +213,7 @@ def finalize(cfg: Config) -> Config:
         cfg.qbit_category = ""
     if cfg.post_processing not in ("auto", "repair", "unpack"):
         raise ValueError("post_processing must be 'auto', 'repair' or 'unpack' (+Delete is never allowed)")
+    cfg.auto_retry_at = minutes_list(cfg.auto_retry_at)
     raw = cfg.torrent_dir_raw or "torrents"
     cfg.torrent_dir = raw if os.path.isabs(raw) else str(Path(cfg.path).parent / raw)
     return cfg
