@@ -19,12 +19,26 @@ export function partOf(title) {
               : { label: `S${pad(m[1])}`, order: Number(m[1]) * 1000, season: Number(m[1]) };
 }
 
-/* "grpa|1080p|s2" (or "grpa|1080p|film"): a group, resolution and season to match Usenet by */
+/* what a film (or program) is, without the release's own tags: "film 2012", or for a name
+   with no year or resolution - software, say - every word but the group's:
+   "veeam backup replication v12 0 0 1420". "&" and "and" are left out, as names spell it
+   either way. */
+function filmName(group, title) {
+  const words = norm(title).replace(/-x?(?:post|repo)$/, "").split(/[.\-()[\]]+/)
+    .filter(w => w && w !== "&" && w !== "and");
+  const k = words.findIndex(w => /^(19|20)\d{2}$/.test(w) || RES.test(w));
+  if (k >= 0) return words.slice(0, RES.test(words[k]) ? k : k + 1).join(" ");
+  return (words.at(-1) === group.toLowerCase() ? words.slice(0, -1) : words).join(" ");
+}
+
+/* "grpa|1080p|s2" (or "grpa|1080p|film 2012"): a group, resolution and season - or, not
+   being a season, the film itself - to match Usenet by. Without the film's name, any NZB
+   of the group's matched every film of theirs (v11 marked v12 as found). */
 function nzbKey(group, title) {
   const res = (norm(title).match(RES) || [null, null])[1];
   const part = partOf(title);
   const season = part?.season ?? (part ? Math.floor(part.order / 1000) : null);
-  return `${group.toLowerCase()}|${res ? res + "p" : "other"}|${season != null ? "s" + season : "film"}`;
+  return `${group.toLowerCase()}|${res ? res + "p" : "other"}|${season != null ? "s" + season : filmName(group, title)}`;
 }
 
 /* a whole season (or several), or a film - not a single episode */
