@@ -607,3 +607,16 @@ def test_another_codec_is_another_encode():
     assert pipeline._fits(need, rel("Show.S03E03.1080p.AMZN.WEB-DL.DDP5.1.H.264-GRPA", 1100 << 20, "a")) == "other codec"
     assert pipeline._fits(need, rel("Show.S03E03.1080p.AMZN.WEB-DL.DDP5.1.HEVC-GRPA", 1100 << 20, "b")) is None
     assert pipeline._fits(need, rel("Show.S03E03.1080p.AMZN.WEB-DL-GRPA", 1100 << 20, "c")) is None   # names none
+
+
+def test_a_rard_release_takes_its_group_from_the_release_name():
+    """Scene archives are named group first ('qzxwiso-abr11011261.r00'): read as a name,
+    the short name looked like the group and every post of the release was turned away."""
+    name = "Acme.Backup.and.Replication.v11.0.1.1261-QZXWiSO"
+    files = {"qzxwiso-abr11011261.rar": rnd(30_000, 1), "qzxwiso-abr11011261.r00": rnd(30_000, 2),
+             "qzxwiso-abr11011261.sfv": b"; sfv", "qzxwiso.nfo": b"nfo"}
+    t = parse(make_torrent(name, files))
+    assert need_for(t, t.name, True).group == "qzxwiso"
+    need = pipeline.build_units(t, t.name).need
+    assert need.group == "qzxwiso"
+    assert pipeline._fits(need, rel(name + "-xpost", t.total_size + 1000, "p")) is None
