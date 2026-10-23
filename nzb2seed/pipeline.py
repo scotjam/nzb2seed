@@ -1215,6 +1215,16 @@ def release_title(name: str) -> str:
     return _FILE_EXT.sub("", (name or "").strip())
 
 
+def _not_volumes(files: list) -> list:
+    """Files whose names can tell the release group. RAR volumes cannot: scene archives are
+    named group first ('btcriso-vbr11011261.rar'), so the dash-token after it is the short
+    name, not the group - the release name says it instead. Nor can the .sfv/.nfo beside them."""
+    return [f for f in files if not _RAR.search(f.name) and not _SIDECAR.search(f.name)]
+
+
+_SIDECAR = re.compile(r"\.(sfv|nfo|diz|md5|sha1|par2|srr|srs|txt|url|jpe?g|png)$", re.I)
+
+
 def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
     """``whole_torrent``: one post must supply every file (single release); otherwise the
     post supplies the torrent file for ``title``'s episode (season pack from episodes)."""
@@ -1227,9 +1237,10 @@ def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
         files = [f for f in t.real_files if re.search(rf"(?<![a-z0-9]){ep_tok}(?![0-9])", matching.norm(f.name))]
         target_file = max(files, key=lambda f: f.length) if files else None
     if whole_torrent or target_file is None:
-        main = max(t.real_files, key=lambda f: f.length)
+        named = _not_volumes(t.real_files)
+        main = max(named, key=lambda f: f.length) if named else None
         min_size, target = t.total_size, t.name
-        group = group_of(main.name) or group_of(t.name) or group_of(title)
+        group = (main and group_of(main.name)) or group_of(t.name) or group_of(title)
     else:
         min_size, target = target_file.length, target_file.name
         group = group_of(target_file.name) or group_of(title)
@@ -1436,7 +1447,7 @@ class Unit:
         self.holed: tuple[str, str] | None = None   # a download with missing articles, kept as a last resort
         self.done = False
         videos = [f for f in files if f.length >= 1 << 20] or files
-        groups = {g for g in (group_of(f.name) for f in videos) if g}
+        groups = {g for g in (group_of(f.name) for f in _not_volumes(videos)) if g}
         self.mixed = len(groups) > 1            # e.g. a pack with one episode from another group
         group = groups.pop() if len(groups) == 1 else (None if self.mixed else group_of(title))
         n = matching.norm(title)
