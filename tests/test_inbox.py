@@ -646,3 +646,25 @@ def test_the_rules_and_the_age_limit_share_one_search(tmp_path, monkeypatch):
         assert searched == [1]                 # asked for the rule; the age limit reused it
     finally:
         clients.SEARCH_GATE = None
+
+
+def test_it_tries_at_the_minutes_given_after_the_torrent_arrived(tmp_path):
+    """Most posts turn up within minutes, some take half an hour or more; one still missing
+    after an hour is usually a tracker's own encode. So by default: at 0, 2, 10, 20, 60."""
+    from nzb2seed.config import Config, finalize
+    from nzb2seed.inbox import next_try, wait_seconds
+    cfg = finalize(Config(path=tmp_path / "nzb2seed.toml"))
+    assert cfg.auto_retry_at == [0, 2, 10, 20, 60]
+    assert wait_seconds(cfg) == 3600
+    arrived, tries, now = 1000.0, [], 1000.0
+    while (nxt := next_try(cfg, arrived, now)) is not None:
+        tries.append((nxt - arrived) / 60)
+        now = nxt
+    assert tries == [2, 10, 20, 60]                 # after the first try, made at once
+    assert next_try(cfg, arrived, arrived + 3601) is None
+
+
+def test_the_retry_minutes_are_read_leniently():
+    from nzb2seed.config import minutes_list
+    assert minutes_list("20, 0; 2 2 -5 x 10") == [0, 2, 10, 20]
+    assert minutes_list([60, "1.5"]) == [1.5, 60]

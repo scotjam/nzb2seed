@@ -74,7 +74,7 @@ class PR:
         return [r for r in self.results if ep in r.title.lower()]
 
 
-def setup(tmp_path, remuxed):
+def scenario(tmp_path, remuxed):
     t, raw, files = pack()
     tfile = tmp_path / "pack.torrent"
     tfile.write_bytes(raw)
@@ -95,7 +95,7 @@ def setup(tmp_path, remuxed):
 
 def test_bad_copies_are_replaced_until_every_piece_verifies(tmp_path):
     # the picked E02 and E04 are re-muxed, and so is the first alternative for E02
-    t, tfile, cfg, sab, pr, slots, dirs, files = setup(tmp_path, {"pick2", "pick4", "alt20"})
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(tmp_path, {"pick2", "pick4", "alt20"})
     out = str(tmp_path / "complete")
     result = pipeline.finish(cfg, Options(no_qbit=True), t, tfile, dirs, out, None, None,
                              retry=Retry(cfg, pr, sab, 2, slots))
@@ -176,7 +176,7 @@ def test_pieces_are_taken_from_whichever_copy_has_them_when_no_post_is_whole(tmp
 
 
 def test_retry_switched_off_stops_the_build(tmp_path):
-    t, tfile, cfg, sab, pr, slots, dirs, _ = setup(tmp_path, {"pick2"})
+    t, tfile, cfg, sab, pr, slots, dirs, _ = scenario(tmp_path, {"pick2"})
     with pytest.raises(Abort, match="pieces fail"):
         pipeline.finish(cfg, Options(no_qbit=True, retry_bad=False, local_verify=True), t, tfile, dirs,
                         str(tmp_path / "out"), None, None, retry=Retry(cfg, pr, sab, 2, slots))
@@ -185,7 +185,7 @@ def test_retry_switched_off_stops_the_build(tmp_path):
 
 def test_gives_up_when_no_post_has_the_right_copy(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "report_ask", lambda p, c: None)   # person declines to pick
-    t, tfile, cfg, sab, pr, slots, dirs, _ = setup(tmp_path, {"pick2", "alt20", "alt21"})
+    t, tfile, cfg, sab, pr, slots, dirs, _ = scenario(tmp_path, {"pick2", "alt20", "alt21"})
     with pytest.raises(Abort, match="still fail"):
         pipeline.finish(cfg, Options(no_qbit=True), t, tfile, dirs,
                         str(tmp_path / "out"), None, None, retry=Retry(cfg, pr, sab, 2, slots))
@@ -194,7 +194,7 @@ def test_gives_up_when_no_post_has_the_right_copy(tmp_path, monkeypatch):
 def test_rerun_resumes_from_placed_files_and_only_fixes_the_bad_ones(tmp_path):
     """First run places everything but E02 is a remux; a rerun downloads nothing it already
     placed, skips the post that supplied the bad E02, and fetches only a replacement."""
-    t, tfile, cfg, sab, pr, slots, dirs, files = setup(tmp_path, {"pick2"})
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(tmp_path, {"pick2"})
     out = str(tmp_path / "complete")
     cfg.output_dir = out
     with pytest.raises(Abort):                        # first run, retry off: stops at the check
@@ -216,7 +216,7 @@ def test_rerun_resumes_from_placed_files_and_only_fixes_the_bad_ones(tmp_path):
 
 
 def test_success_also_cleans_earlier_downloads_of_the_same_torrent(tmp_path):
-    t, tfile, cfg, sab, pr, slots, dirs, files = setup(tmp_path, set())
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(tmp_path, set())
     # an earlier attempt at this torrent left a RAR set behind; another torrent's download too
     for nzo, torrent in (("nzoOLD", t.infohash), ("nzoOTHER", "f" * 40)):
         d = tmp_path / "dl" / nzo
@@ -281,7 +281,7 @@ class HashingQbit:
 
 
 def test_qbittorrents_recheck_is_the_only_full_hash_when_nothing_is_wrong(tmp_path, monkeypatch):
-    t, tfile, cfg, sab, pr, slots, dirs, files = setup(tmp_path, set())
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(tmp_path, set())
     out = str(tmp_path / "complete")
     hashed = []
     monkeypatch.setattr(pipeline.asm, "verify_all", lambda *a, **k: hashed.append(1) or [])
@@ -295,7 +295,7 @@ def test_qbittorrents_recheck_is_the_only_full_hash_when_nothing_is_wrong(tmp_pa
 
 def test_pieces_qbittorrent_finds_bad_are_repaired_then_checked_once_more(tmp_path, monkeypatch):
     """The picked E02 and E04 are re-muxed copies: same size, different bytes."""
-    t, tfile, cfg, sab, pr, slots, dirs, files = setup(tmp_path, {"pick2", "pick4", "alt20"})
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(tmp_path, {"pick2", "pick4", "alt20"})
     out = str(tmp_path / "complete")
     hashed = []
     monkeypatch.setattr(pipeline.asm, "verify_all", lambda *a, **k: hashed.append(1) or [])
@@ -312,7 +312,7 @@ def test_pieces_qbittorrent_finds_bad_are_repaired_then_checked_once_more(tmp_pa
 
 
 def test_a_repair_that_cannot_finish_leaves_it_stopped_and_says_how_far(tmp_path, monkeypatch):
-    t, tfile, cfg, sab, pr, slots, dirs, files = setup(
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(
         tmp_path, {"pick2", "pick4", "alt20", "alt21", "alt40", "alt41"})     # no good copy anywhere
     out = str(tmp_path / "complete")
     monkeypatch.setattr(pipeline, "next_post",
@@ -323,3 +323,22 @@ def test_a_repair_that_cannot_finish_leaves_it_stopped_and_says_how_far(tmp_path
                         retry=Retry(cfg, pr, sab, 2, slots, True))
     assert 0 < e.value.have < 1 and e.value.in_client is True
     assert qb.started is False               # never started with bad data in it
+
+
+def scenario(tmp_path, remuxed):
+    t, raw, files = pack()
+    tfile = tmp_path / "pack.torrent"
+    tfile.write_bytes(raw)
+    size = {i: len(next(v for k, v in files.items() if f"s03e0{i}" in k)) for i in range(1, 5)}
+    grp = {i: "GRPB" if i == 4 else "GRPA" for i in range(1, 5)}
+    picks = [[rel(f"Show.2016.S03E0{i}.720p.HDTV.x264-{grp[i]}", size[i] + 100, f"pick{i}")]
+             for i in range(1, 5)]
+    others = [rel(f"Show.2016.S03E0{i}.720p.HDTV.x264-{grp[i]}", size[i] + 200 + n, f"alt{i}{n}", grabs=9 - n)
+              for i in (2, 4) for n in range(2)]
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]],
+                 torrent_dir=str(tmp_path / "torrents"))
+    sab = SAB(str(tmp_path / "dl"), files, remuxed)
+    pr = PR(others)
+    slots = []
+    dirs, _ = pipeline.usenet_multi(cfg, pr, sab, t, picks, 2, slots)
+    return t, str(tfile), cfg, sab, pr, slots, dirs, files

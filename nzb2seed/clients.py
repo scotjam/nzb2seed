@@ -1,6 +1,7 @@
 """Thin clients for the Prowlarr, SABnzbd and qBittorrent Web APIs."""
 from __future__ import annotations
 
+import json
 import html
 import re
 import time
@@ -90,6 +91,29 @@ class Prowlarr:
             raise ApiError(f"Prowlarr indexer list: HTTP {r.status_code}")
         return [(i.get("name") or "", list(i.get("indexerUrls") or []) + ([i["baseUrl"]] if i.get("baseUrl") else []))
                 for i in r.json() if i.get("protocol") == "torrent"]
+
+    _usenet_cache: dict = {}
+
+    def usenet_ids(self) -> list[int]:
+        """Prowlarr's enabled Usenet indexers (ids), kept for an hour: a search for posts goes
+        to these only - never to the torrent trackers, which would be asked for nothing."""
+        c = Prowlarr._usenet_cache.get(self.url)
+        if c and time.time() - c[0] < 3600:
+            return c[1]
+        r = self.s.get(f"{self.url}/api/v1/indexer", timeout=TIMEOUT)
+        if r.status_code != 200:
+            raise ApiError(f"Prowlarr indexer list: HTTP {r.status_code}")
+        ids = [i.get("id") for i in r.json() if i.get("protocol") == "usenet" and i.get("enable", True) and i.get("id")]
+        Prowlarr._usenet_cache[self.url] = (time.time(), ids)
+        return ids
+
+    def indexers(self) -> list[tuple[int, str]]:
+        """Prowlarr's torrent indexers: (id, name) - the Library tab's tracker choice."""
+        r = self.s.get(f"{self.url}/api/v1/indexer", timeout=TIMEOUT)
+        if r.status_code != 200:
+            raise ApiError(f"Prowlarr indexer list: HTTP {r.status_code}")
+        return [(i.get("id") or 0, i.get("name") or "") for i in r.json()
+                if i.get("protocol") == "torrent" and i.get("enable", True)]
 
     def search(self, query: str, indexer_ids=None, categories=None, limit: int = 1000) -> list[Release]:
         if SEARCH_GATE:
@@ -389,6 +413,9 @@ class QBittorrent:
 
     def preferences(self) -> dict:
         return self._ok(self._req("GET", "app/preferences"), "preferences").json()
+
+    def set_preferences(self, prefs: dict):
+        self._ok(self._req("POST", "app/setPreferences", data={"json": json.dumps(prefs)}), "setPreferences")
 
     def info(self, infohash: str) -> dict | None:
         r = self._ok(self._req("GET", "torrents/info", params={"hashes": infohash}), "info")

@@ -418,7 +418,7 @@ def test_nearly_complete_is_under_the_trackers_percentage_and_megabytes(server):
     assert not app.nearly_enough({"have": 0.99, "short": 500 * mb, "tracker": t})   # 1% of 50 GB: 500 MB
     assert not app.nearly_enough({"have": 0.94, "short": 10 * mb, "tracker": t})    # 6%: over the percentage
     assert app.nearly_enough({"have": 0.99, "tracker": t})                          # size not known
-    assert app.nearly_limit_text(t) == "5% or 200 MB - whichever is less"
+    assert app.nearly_limit_text(t) == "5% or 200 MB - whichever is less, keeping 10% of it free"
 
 
 def test_a_tracker_with_no_limit_set_allows_nothing(server, monkeypatch):  # noqa: F811
@@ -431,7 +431,7 @@ def test_a_tracker_with_no_limit_set_allows_nothing(server, monkeypatch):  # noq
     assert call(url + "/api/jobs/add_to_client", *AUTH, body={"id": job.id})[0] == 400
     assert call(url + "/api/jobs/add_to_client", *AUTH, body={"id": job.id, "always": True})[0] == 400
     status, r = call(url + "/api/trackers/limit", *AUTH, body={"tracker": "Strict Tracker (API)", "percent": 1, "mb": 0})
-    assert status == 200 and r["limit"] == "1%"
+    assert status == 200 and r["limit"] == "1%, keeping 10% of it free"
     assert app.nearly_enough(tiny)                                 # now it may
     call(url + "/api/trackers/limit", *AUTH, body={"tracker": "strict tracker", "percent": "", "mb": ""})
     assert not app.nearly_enough(tiny)                             # blank again: nothing
@@ -642,3 +642,77 @@ def test_a_job_ticked_via_another_tracker_goes_to_qbittorrent_as_that_torrent(se
     assert tags == [("-", ["nzb2seed"]), ("+", ["Other Tracker (nzb)"])]           # 20%: more than it allows
     assert job.extra["added_via"] == "Other Tracker"
     assert call(url + "/api/jobs/add_via", *AUTH, body={"id": job.id, "guid": "nope"})[0] == 400
+
+
+LIMITS = [{"tracker": "trackerc", "percent": 10, "mb": 0}]     # 3% short is within it, with room
+
+
+def remove(url, job, delete=True):
+    return call(url + "/api/jobs/remove", *AUTH, body={"ids": [job.id], "delete_downloads": delete})
+
+
+def test_removing_with_its_downloads_deletes_what_the_build_placed(server, tmp_path, monkeypatch):  # noqa: F811
+    app, url = server
+    f, d = placed(app, tmp_path)
+    monkeypatch.setattr(app, "_qbit", lambda: FakeQbit(state=None))
+    monkeypatch.setattr(app, "_sab", lambda: None)
+    job = failed_part_way(app)
+    status, r = remove(url, job)
+    assert status == 200 and r["removed"] == 1 and r["placed_files"] == 1
+    assert not f.exists() and not d.exists() and job.id not in app.jobs
+
+
+def test_a_torrent_in_qbittorrent_keeps_its_files(server, tmp_path, monkeypatch):  # noqa: F811
+    """Its files are the torrent's then - stopped or downloading the rest, they stay, and
+    nzb2seed never removes the torrent from qBittorrent."""
+    app, url = server
+    for state in ("stoppedDL", "downloading"):
+        f, _ = placed(app, tmp_path / state)
+        qb = FakeQbit(state=state)
+        monkeypatch.setattr(app, "_qbit", lambda: qb)
+        monkeypatch.setattr(app, "_sab", lambda: None)
+        job = failed_part_way(app, in_client=True)
+        status, r = remove(url, job)
+        assert status == 200 and f.exists() and qb.removed == []
+        assert any("qBittorrent" in k for k in r["kept"])
+
+
+def test_removing_only_the_entry_keeps_everything(server, tmp_path, monkeypatch):  # noqa: F811
+    app, url = server
+    f, _ = placed(app, tmp_path)
+    job = failed_part_way(app)
+    status, r = remove(url, job, delete=False)
+    assert status == 200 and r["removed"] == 1 and f.exists()
+
+
+def test_nothing_is_deleted_until_the_person_says_so(server, tmp_path):  # noqa: F811
+    """A build that stops a few percent short keeps everything on its own."""
+    app, _ = server
+    f, _ = placed(app, tmp_path)
+    failed_part_way(app, have=0.99)
+    assert f.exists()
+
+
+def test_a_running_build_is_never_removed(server):  # noqa: F811
+    import threading
+    app, url = server
+    gate = threading.Event()
+    other = app.start_job("Another.Build", "build", lambda cfg: gate.wait(5) and {"result": "done"})
+    try:
+        status, r = call(url + "/api/jobs/remove", *AUTH, body={"ids": [other.id]})
+        assert status == 200 and r["removed"] == 0 and other.id in app.jobs
+    finally:
+        gate.set()
+        wait(lambda: other.status == "done")
+
+
+def test_within_the_limit_but_without_room_to_spare_is_not_added(server, monkeypatch):  # noqa: F811
+    """10% of the limit is kept free: data that turns out bad comes down twice."""
+    import dataclasses
+    app, _ = server
+    app.cfg = dataclasses.replace(app.cfg, nearly_auto_trackers=["trackerc"], nearly_limits=LIMITS)
+    started = []
+    monkeypatch.setattr(app, "finish_in_client", lambda job, why="", **kw: started.append(job.id))
+    monkeypatch.setattr(app, "look_on_other_trackers", lambda job, e: None)
+    failed_part_way(app, have=0.905, tracker="trackerc (API)")      # 9.5% short: under 10, over 9
+    assert started == []

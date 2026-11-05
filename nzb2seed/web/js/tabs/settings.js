@@ -264,6 +264,106 @@ const trackerKey = (n) => { const k = (n || "").trim().toLowerCase(); return k.e
    Prowlarr, ticked if it is approved - plus any approved name Prowlarr does not list */
 /* how much each tracker lets you download, and whether its builds go over without asking:
    every torrent indexer in Prowlarr, plus any tracker with a limit Prowlarr does not list */
+/* ---- tracker limits as CSV, to share with others: tracker,percent,mb. "always add" is
+   your own choice of what nzb2seed may do by itself, so it is never exported or imported */
+const CSV_HEAD = ["tracker", "percent", "mb"];
+// the same bounds the server applies when it saves (config.clean_limits)
+const CSV_MAX_BYTES = 1 << 20, CSV_MAX_ROWS = 1000, NAME_MAX = 100, MB_MAX = 10_000_000;
+
+function csvCell(v) {
+  let s = String(v ?? "");
+  // a cell a spreadsheet would run as a formula (=, +, -, @) is written as text
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\r\n']/.test(s) || s !== s.trim() ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+/* a tracker name from a file: text only - no control characters, no formula guard, at
+   most NAME_MAX characters */
+function cleanName(v) {
+  let s = String(v ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  if (/^'[=+\-@]/.test(s)) s = s.slice(1);
+  return s.slice(0, NAME_MAX).trim();
+}
+
+export function limitsToCsv(limits) {
+  const names = [];
+  for (const n of limits.filter(r => r.percent || r.mb).map(r => r.tracker)) {
+    if (n && !names.some(m => trackerKey(m) === trackerKey(n))) names.push(n);
+  }
+  names.sort((a, b) => a.localeCompare(b));
+  const lines = [CSV_HEAD.join(",")];
+  for (const n of names) {
+    const r = limits.find(x => trackerKey(x.tracker) === trackerKey(n)) || {};
+    lines.push([n, r.percent || "", r.mb || ""].map(csvCell).join(","));
+  }
+  return lines.join("\r\n") + "\r\n";
+}
+
+export function parseCsv(text, maxRows = CSV_MAX_ROWS + 1) {
+  if (text.length > CSV_MAX_BYTES) throw new Error("the file is larger than 1 MB - not a tracker list");
+  const rows = [];
+  let row = [], cell = "", quoted = false;
+  for (let i = 0; i < text.length; i++) {
+    if (rows.length > maxRows) throw new Error(`more than ${CSV_MAX_ROWS} rows - not a tracker list`);
+    if (row.length > 50) throw new Error("a row with more than 50 columns - not a tracker list");
+    const c = text[i];
+    if (quoted) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+      else if (c === '"') quoted = false;
+      else cell += c;
+    } else if (c === '"') quoted = true;
+    else if (c === ",") { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell); rows.push(row); row = []; cell = "";
+    } else cell += c;
+  }
+  if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter(r => r.some(x => x.trim() !== ""));
+}
+
+/* Merge a shared CSV into the current limits: a tracker in the file takes the file's
+   values; the rest stay as they are. Names match the local ones with or without "(API)".
+   An "always add" column in the file is ignored. Returns {limits, count, skipped}. */
+export function limitsFromCsv(text, limits, localNames = []) {
+  const rows = parseCsv(text.replace(/^\uFEFF/, ""));
+  if (!rows.length) throw new Error("the file is empty");
+  const head = rows[0].map(h => h.trim().toLowerCase());
+  const col = (k) => head.indexOf(k);
+  if (col("tracker") < 0) throw new Error('no "tracker" column - expected: ' + CSV_HEAD.join(","));
+  const num = (v, top) => {
+    const t = String(v ?? "").trim().replace(/%$/, "");
+    if (t.length > 20) return -1;
+    const n = Number(t);
+    return !Number.isFinite(n) || n < 0 || n > top ? -1 : n;
+  };
+  let nextLimits = [...limits], count = 0, skipped = 0;
+  for (const r of rows.slice(1)) {
+    const raw = cleanName(r[col("tracker")]);
+    if (!raw) { skipped++; continue; }
+    const name = localNames.find(n => trackerKey(n) === trackerKey(raw))
+      || limits.find(x => trackerKey(x.tracker) === trackerKey(raw))?.tracker || raw;
+    const pct = col("percent") >= 0 ? num(r[col("percent")], 100) : 0;
+    const mb = col("mb") >= 0 ? num(r[col("mb")], MB_MAX) : 0;
+    if (pct < 0 || mb < 0) { skipped++; continue; }
+    if (!nextLimits.some(x => trackerKey(x.tracker) === trackerKey(name)) && nextLimits.length >= CSV_MAX_ROWS) {
+      skipped++; continue;
+    }
+    nextLimits = nextLimits.filter(x => trackerKey(x.tracker) !== trackerKey(name));
+    if (pct || mb) nextLimits.push({ tracker: name, ...(pct ? { percent: pct } : {}), ...(mb ? { mb } : {}) });
+    count++;
+  }
+  return { limits: nextLimits, count, skipped };
+}
+
+function downloadText(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/csv;charset=utf-8" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
   const known = prowlarr && (prowlarr.trackers || []), err = prowlarr?.error || "";
   const on = new Set(chosen.map(trackerKey));
@@ -278,6 +378,24 @@ function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
   };
   const flip = (name, yes) => setChosen(yes ? [...chosen, name] : chosen.filter(n => trackerKey(n) !== trackerKey(name)));
   const show = (v) => (v ? String(v) : "");
+  const exportCsv = () => {
+    if (!limits.some(r => r.percent || r.mb)) { toast("Nothing to export yet - no tracker has a limit set"); return; }
+    downloadText("nzb2seed-tracker-limits.csv", limitsToCsv(limits));
+  };
+  const importCsv = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";                    // the same file can be picked again
+    if (!file) return;
+    if (file.size > CSV_MAX_BYTES) { toast("Could not import that file: it is larger than 1 MB - not a tracker list"); return; }
+    try {
+      const out = limitsFromCsv(await file.text(), limits, known || []);
+      setLimits(out.limits);
+      toast(`Imported limits for ${out.count} tracker(s)${out.skipped ? `, skipped ${out.skipped} row(s)` : ""} - ` +
+            "your always add ticks are unchanged; check them, then press Save to keep them");
+    } catch (err) {
+      toast("Could not import that file: " + (err.message || err));
+    }
+  };
   return html`<div class="field"><span>What each tracker lets you download</span>
     ${known === null ? html`<small class="status">Asking Prowlarr for its trackers…</small>` : html`
       <table class="limits"><thead><tr><th>tracker</th><th>%</th><th>MB</th><th title="Builds from it within its limit go to qBittorrent without asking">always add</th></tr></thead>
@@ -290,7 +408,14 @@ function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
           <td><input type="checkbox" aria-label=${`Always add for ${n}`} checked=${on.has(trackerKey(n))}
             onChange=${(e) => flip(n, e.target.checked)} /></td></tr>`)}</tbody></table>`}
     <small class="status">${err ? `Prowlarr's trackers could not be listed (${err}) - only the ones with a limit are shown. `
-      : ""}Left blank, a tracker lets you download nothing: its builds that stop short go to the torrent client only by Override. With a % and/or MB set, a build missing less than that can be added - by itself, with always add ticked. A build that stops short on a tracker with nothing set asks you on the Jobs tab.</small></div>`;
+      : ""}Left blank, a tracker lets you download nothing: its builds that stop short go to the torrent client only by Override. With a % and/or MB set, a build missing less than that can be added - by itself, with always add ticked. A build that stops short on a tracker with nothing set asks you on the Jobs tab.</small>
+    <div class="csvbar">
+      <button type="button" class="btn" onClick=${exportCsv}
+        title="Save these limits as a CSV file (tracker, percent, MB) to share with others - your always add ticks are not included">Export CSV</button>
+      <label class="btn" title="Load limits someone shared: trackers in the file take its percent and MB, the others stay as they are. Your always add ticks are never changed. Nothing is kept until you press Save.">Import CSV
+        <input type="file" accept=".csv,text/csv" onChange=${importCsv} style="display:none" /></label>
+      <small class="status">Share your tracker limits (percent and MB), or load someone else's - always add stays your own choice. Check a tracker's own rules before relying on them.</small>
+    </div></div>`;
 }
 
 function Maps({ label, rows, set }) {

@@ -17,6 +17,125 @@ every piece hashed ─► failing pieces? other posts of that file until they ve
 qBittorrent: add STOPPED ─► set location ─► force recheck ─► 100.0%
 ```
 
+## Before you start: what nzb2seed needs
+
+nzb2seed drives three programs you run yourself, and needs a way onto Usenet:
+
+* **A Usenet provider and Usenet indexers.** A *provider* (news server) is the
+  paid account that stores the posts and serves the downloads; an *indexer* is
+  the search site whose NZB files say which posts make up a release. You need
+  at least one of each: the provider goes into SABnzbd, the indexers into
+  Prowlarr. SABnzbd's guide explains both:
+  [quick setup](https://sabnzbd.org/wiki/introduction/quick-setup) (adding
+  your provider's server) and [NZB sources](https://sabnzbd.org/wiki/introduction/nzb-sources)
+  (indexers).
+* **SABnzbd** downloads from Usenet.
+* **qBittorrent** checks each build piece by piece and seeds it.
+* **Prowlarr** searches your torrent trackers and your Usenet indexers.
+
+### SABnzbd
+
+```yaml
+services:
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/London
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./sabnzbd:/config
+      - /srv/disk1/downloads:/downloads     # where downloads land
+    restart: unless-stopped
+```
+
+At `http://<server>:8080` its wizard asks for your **provider's server**
+(host, port, SSL, user name and password - from your provider's account
+page; [servers](https://sabnzbd.org/wiki/configuration/4.5/servers)). Then
+copy the **API key** (*Config -> General -> Security*) into nzb2seed's
+**Settings -> SABnzbd** with its URL. The [SABnzbd wiki](https://sabnzbd.org/wiki/)
+and the [container's page](https://docs.linuxserver.io/images/docker-sabnzbd/)
+cover the rest.
+
+### qBittorrent
+
+```yaml
+services:
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/London
+      - WEBUI_PORT=8081                     # 8080 is SABnzbd's
+    ports:
+      - "8081:8081"
+      - "6881:6881"
+      - "6881:6881/udp"
+    volumes:
+      - ./qbittorrent:/config
+      - /srv/disk1:/data                    # where torrents are seeded from
+    restart: unless-stopped
+```
+
+At `http://<server>:8081` sign in (the container's log prints the first
+password), set your own under *Tools -> Options -> Web UI*, and enter the
+URL, user name and password in nzb2seed's **Settings -> qBittorrent**. See the
+[container's page](https://docs.linuxserver.io/images/docker-qbittorrent/)
+and the [qBittorrent wiki](https://github.com/qbittorrent/qBittorrent/wiki).
+
+**Paths:** when SABnzbd or qBittorrent run in containers they see your disks
+under other names (`/downloads`, `/data`). Tell nzb2seed in **Settings**:
+*SABnzbd path -> path on this machine* and *Path on this machine ->
+qBittorrent path* (for example `/data` -> `/srv/disk1`).
+
+### Prowlarr
+
+nzb2seed finds everything through [Prowlarr](https://prowlarr.com/): it
+searches your **torrent trackers** for the .torrent, and your **Usenet
+indexers** for the NZBs that hold the same release. Prowlarr has to be set up
+with both before nzb2seed can build anything (SABnzbd and qBittorrent are needed
+too - see above). The [quick start guide](https://wiki.servarr.com/prowlarr/quick-start-guide)
+covers it in full; in short, with Docker
+([other install methods](https://wiki.servarr.com/prowlarr/installation)):
+
+```yaml
+services:
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Europe/London
+    ports:
+      - "9696:9696"
+    volumes:
+      - ./prowlarr:/config
+    restart: unless-stopped
+```
+
+Then, at `http://<server>:9696`:
+
+1. **Set a login** when it asks (*Settings -> General -> Authentication*).
+2. **Add your torrent trackers**: *Indexers -> Add Indexer*, search for the
+   tracker and enter what it asks for (usually your passkey, API key or
+   cookie, from your profile on the tracker). Leave **Redirect** off, so
+   Prowlarr fetches .torrent files itself.
+3. **Add your Usenet indexers** the same way (most are listed by name; any
+   other works as *Generic Newznab* with its URL and API key)
+   ([indexers](https://wiki.servarr.com/prowlarr/indexers)).
+4. **Copy the API key**: *Settings -> General -> API Key*.
+
+In nzb2seed's **Settings**, under *Prowlarr*, enter its URL (for example
+`http://192.0.2.10:9696`) and that API key, and press *Test*. *Only these
+indexer ids* and *Only these categories* can narrow what it searches; blank
+means everything.
+
 ## Running it
 
 Python 3.10+ with `requests`. Run it on the machine that holds the
@@ -156,7 +275,7 @@ next to the season (so they never end up in a torrent).
   list; each episode comes from the highest release that has it, the next ones
   fill the gaps. Without a list, a series grab fills each season's gaps from
   the other releases at the same resolution.
-* **Posts named by episode title** (`Show De Dierenwinkel FLEMISH - GRP`, no
+* **Posts named by episode title** (`Show De Bakkerij FLEMISH - GRP`, no
   SxxEyy) - a checkbox on the Seasons tab, off by default and remembered per
   show (or `--match-names`), because it takes more indexer API searches: they
   are placed by the episode's name from TMDB /
@@ -180,6 +299,50 @@ python3 -m nzb2seed series "Show Name" --year 2016 --library "/data/tv/Show Name
 
 ## Automatic builds from autobrr
 
+A good way to build your tracker stats if you don't have much of a library yet:
+new releases are seeded from the moment they appear, when they are most in
+demand, without downloading them over BitTorrent. (With a library already, see
+the Library tab and *Moving seasons into your library with cross-eyed* below.)
+
+### Installing and setting up autobrr
+
+[autobrr](https://autobrr.com/introduction) watches your trackers' IRC
+announce channels and catches new releases the moment they are posted. The
+[official docs](https://autobrr.com/installation/docker) cover every install
+method; with Docker, on the same machine as nzb2seed:
+
+```yaml
+services:
+  autobrr:
+    image: ghcr.io/autobrr/autobrr:latest
+    container_name: autobrr
+    ports:
+      - "7474:7474"
+    volumes:
+      - ./autobrr:/config      # nzb2seed's inbox goes in here (see "Inbox" below)
+    restart: unless-stopped
+```
+
+```
+docker compose up -d autobrr
+```
+
+Then, at `http://<server>:7474`:
+
+1. **Create your login** on the first visit.
+2. **Add your trackers**: *Settings -> Indexers -> Add new*. Each needs the
+   details from your tracker profile (passkey or RSS key) and its IRC
+   announce channel - autobrr connects to IRC for you
+   ([indexers](https://autobrr.com/configuration/indexers),
+   [IRC](https://autobrr.com/configuration/irc)).
+3. **Make a filter** per kind of release you want to seed: *Filters -> Add
+   new*, pick the trackers, and narrow it down - resolution, sources,
+   categories, size, release groups ([filters](https://autobrr.com/filters)).
+   It needs no action: nzb2seed adds its own when you tick the filter.
+4. **Create an API key**: *Settings -> API keys*, for nzb2seed.
+
+### Connecting it to nzb2seed
+
 The *Automatic* tab (switch at the top; a dot in the menu shows whether it is on):
 
 1. **autobrr**: enter its URL and an API key (autobrr: *Settings → API keys*), list
@@ -202,6 +365,150 @@ The *Automatic* tab (switch at the top; a dot in the menu shows whether it is on
 4. At most *n* builds at once, and automatic builds make at most *n* Prowlarr
    searches an hour (your own searches are not counted). What happened to each
    torrent is kept in `inbox.json`, so a restart picks up where it was.
+
+## Moving seasons into your library with cross-eyed
+
+The *Library* tab is for people whose library came from other sources -
+Usenet, Sonarr/Radarr, a tracker that has since closed - and who want it to
+boost their torrent tracker stats (seeding size, ratio, bonus points, seeding
+time) without downloading those shows again over BitTorrent. It can swap a
+season in two ways. Without cross-eyed, the
+torrent's files are hard-linked over your season's files. With
+[cross-eyed](https://codeberg.org/cross-eyed/cross-eyed), approving a season
+**moves the torrent itself** - and every cross-seed copy linked to it - into
+the show's folder under its own name, has qBittorrent recheck it there, and
+only then lets the old season folder go. cross-eyed is a separate,
+self-hosted web app that keeps track of which torrents share which files.
+
+### 1. Install cross-seed
+
+cross-eyed works alongside [cross-seed](https://www.cross-seed.org), which
+finds the same release on your other trackers and adds it to qBittorrent
+seeding from the files you already have (hard links, nothing downloaded). Set
+it up first; the [cross-seed documentation](https://www.cross-seed.org/docs/basics/getting-started)
+has the details.
+
+```yaml
+services:
+  cross-seed:
+    image: ghcr.io/cross-seed/cross-seed:6
+    container_name: cross-seed
+    command: daemon
+    ports:
+      - "2468:2468"
+    volumes:
+      - ./cross-seed:/config
+      - /srv/disk1/data:/data          # the SAME paths qBittorrent uses for its downloads
+    restart: unless-stopped
+```
+
+```
+docker compose run --rm cross-seed gen-config   # writes ./cross-seed/config.js
+docker compose run --rm cross-seed api-key      # prints the key the webhook below needs
+```
+
+Edit `config.js` (the settings below matter most), then `docker compose up -d cross-seed`:
+
+```js
+torznab: ["http://prowlarr:9696/1/api?apikey=YOUR_PROWLARR_KEY"],   // one per tracker, from Prowlarr
+torrentClients: ["qbittorrent:http://user:password@192.0.2.10:8080"],
+action: "inject",                   // add matches to qBittorrent itself
+linkDirs: ["/data/cross-seed"],     // on the same disk as your downloads, so links work
+linkType: "hardlink",
+matchMode: "flexible",
+autoResumeMaxDownload: 0,           // never let a near-match download into shared files
+```
+
+* **`linkDirs`** must be on the same disk as the files it links to; with
+  several disks, list one folder per disk.
+* **`autoResumeMaxDownload: 0`** matters: a near-match left stopped can never
+  write its few differing pieces into files other torrents seed from
+  (cross-eyed's *Short & shared* page sorts those out safely).
+* To search each torrent as it finishes, set qBittorrent's *Options -> Downloads
+  -> Run external program on torrent finished* to
+  `curl -XPOST http://cross-seed:2468/api/webhook?apikey=YOUR_CROSS_SEED_KEY -d "infoHash=%I"`.
+  While nzb2seed's Library is on, it routes this through itself and holds the
+  calls back while a season is built or moved (*Hold back cross-seed* in the
+  Library tab), then puts your setting back when the Library is switched off.
+
+### 2. Run cross-eyed
+
+It needs Docker on the machine that holds your downloads and library, the
+same machine qBittorrent runs on. A minimal `docker-compose.yml`:
+
+```yaml
+services:
+  cross-eyed:
+    image: codeberg.org/cross-eyed/cross-eyed:latest
+    container_name: cross-eyed
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8765"]
+    ports:
+      - "8765:8765"                 # leave out when it shares a VPN container's network (below)
+    environment:
+      QBIT_URL: "http://192.0.2.10:8080"      # qBittorrent's Web UI
+      QBIT_USER: "admin"
+      QBIT_PASS: "your-qbittorrent-password"
+      QBIT_CONTAINER_NAME: "qbittorrent"        # so it can read qBittorrent's volume mappings
+      CROSS_SEED_URL: "http://192.0.2.10:2468"    # cross-seed, from step 1
+      CROSS_SEED_API_KEY: "YOUR_CROSS_SEED_KEY"
+      HOST_MOUNT_PREFIX: "/host"
+      DB_PATH: "/config/cross-eyed.db"
+      RULES_PATH: "/config/tracker-rules.yaml"
+      DRY_RUN: "true"                           # nothing is changed until you switch it to live
+      TZ: "Europe/London"
+    volumes:
+      - ./config:/config
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /:/host                                 # your disks, at /host/<the same path>
+    restart: unless-stopped
+```
+
+```
+docker compose up -d
+```
+
+Then open `http://<server>:8765`. Things to know:
+
+* **`/:/host`** is how cross-eyed reaches your files: a path such as
+  `/srv/disk1/tv/Show` on the server is `/host/srv/disk1/tv/Show` inside the
+  container. It must be writable, since moving a torrent writes to the disk.
+  To limit what it sees, mount a narrower folder that holds every download and
+  library folder (for example `/srv:/host/srv`).
+* **The Docker socket** (read-only) lets cross-eyed read qBittorrent's container
+  mappings, so it can translate qBittorrent's paths (`/data/...`) to real ones.
+* **Dry-run** is on at every start: moves are planned and shown on its *Jobs*
+  page but carried out only after you switch cross-eyed to live in its header.
+  Until then, a season you approve in nzb2seed waits as *Moving*.
+* **No login.** cross-eyed has no password of its own: keep it on your local
+  network, or behind your reverse proxy's authentication.
+* **Behind a VPN container** (gluetun): put it in the VPN's network
+  (`network_mode: "container:gluetun"`, no `ports:`), and publish 8765 on the
+  gluetun container instead.
+
+### 3. Connect nzb2seed
+
+In nzb2seed's **Library** tab, under *Tracker and folders*, set **cross-eyed
+address** to where nzb2seed can reach it, for example `http://192.0.2.10:8765`.
+If cross-eyed shares a VPN container's network, use the server's LAN address,
+not `127.0.0.1`. Save.
+
+* **Where cross-eyed sees your disks** is `cross_eyed_prefix` under `[library]`
+  in `nzb2seed.toml`, `/host` by default. Change it only if you mounted your
+  disks somewhere else in the cross-eyed container.
+* nzb2seed must see your library and downloads at the **same paths as the
+  server** (it runs on the server, or its container maps them 1:1), because it
+  passes those paths to cross-eyed with the prefix in front.
+
+From then on, **Approve** on a season *Ready to swap* hands it to cross-eyed
+instead of hard-linking. Two optional switches build on it:
+
+* **Auto move new torrents to the existing library location using cross-eyed**:
+  each season ready to swap is moved by itself, one at a time.
+* **Auto delete the existing library files once moved using cross-eyed**:
+  **may cause data loss.** Your original season folder is deleted once the
+  moved torrent seeds at 100.0% from the library and nothing in qBittorrent
+  uses the old folder. Leave it off until you have watched a few moves go
+  through.
 
 ## Only removing what it added
 
@@ -279,22 +586,23 @@ WantedBy=multi-user.target
 
 `systemctl enable --now nzb2seed`; after updating the code, `systemctl restart nzb2seed`.
 
+## Removing nzb2seed
+
+While the Library tab is switched on, qBittorrent's "Run external program on torrent
+finished" (usually cross-seed's search) is pointed at nzb2seed, which holds those calls
+back while a season is being built or moved and runs them once it is idle. The original
+setting is saved in `hook.json` and put back when the tab is switched off. Before removing
+nzb2seed, switch the Library tab off - or run
+
+    python3 -m nzb2seed --config /opt/nzb2seed/nzb2seed.toml restore-qbit-hook
+
+which puts the original program back and runs any held calls through it.
+
 ## Tests
 
-`python -m pytest -q` - about 470 tests, including a full run against fake
+`python -m pytest -q` - 80 tests, including a full run against fake
 Prowlarr/SABnzbd/qBittorrent whose recheck really hashes the files, season
 packs with mixed LF/CRLF .nfo files, cross-disk moves, and the ownership rules.
-
-The web interface is checked too. With [Node.js](https://nodejs.org) installed and
-`npm install` run once in `tests/ui` (it fetches jsdom, used only by the tests),
-`tests/test_ui.py` runs every tab of the interface in a browser-like environment next to
-the page it replaced (`tests/ui/baseline`), and requires both to show the same things,
-send the same requests and ask the same questions. Without Node those tests are skipped.
-
-The interface itself is plain ES modules in `nzb2seed/web` - `js/app.js` and one file per
-tab in `js/tabs/` - built with [Preact](https://preactjs.com) and
-[htm](https://github.com/developit/htm), with no build step. It follows the server live
-through `/api/events`.
 
 ## License
 
@@ -309,7 +617,3 @@ nzb2seed ships [pyReScene](https://github.com/srrDB/pyrescene) (MIT licence) in
 `nzb2seed/_vendor/rescene`, used to rebuild original scene RAR volumes from srrDB's `.srr`
 files. Its licence is in `nzb2seed/_vendor/PYRESCENE-COPYING`; the exact source commit is
 in `nzb2seed/_vendor/README.md`.
-
-The web interface ships Preact (MIT licence) and htm (Apache 2.0 licence) as one file,
-`nzb2seed/web/vendor/preact-htm.js`; where it comes from is in
-`nzb2seed/web/vendor/README.md`.

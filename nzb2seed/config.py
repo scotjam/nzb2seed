@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import json
 import re
 import os
@@ -46,6 +47,7 @@ class Config:
     local_verify: bool = False
     build_parallel: int = 2           # builds running at once (the rest wait their turn)
     nearly_complete_mb: float = 200.0     # with less than this missing (and the % below)
+    download_keep_days: float = 3.0       # nzb2seed's own SABnzbd downloads untouched this long are removed (0 = never)
     nearly_complete_percent: float = 5.0  # a build stops looking for more whole posts
     # how much each tracker lets you download without it counting against you:
     # [{tracker, percent, mb}] - a tracker not listed (or left blank) allows nothing, so
@@ -91,6 +93,20 @@ class Config:
     auto_searches_per_hour: int = 40   # Prowlarr searches automatic builds may make per hour
     autobrr_url: str = ""
     autobrr_key: str = ""
+    # the Library tab: seed the TV library from one tracker (see library.py)
+    library_enabled: bool = False
+    library_indexer: str = ""          # the Prowlarr torrent indexer every season pack comes from
+    library_roots: list = field(default_factory=list)   # TV folders (Show/Season N/...) as this machine sees them
+    library_output_dir: str = ""       # where the torrents go - on the same disk as the library
+    library_daily_gb: float = 200.0    # Usenet downloads a day for seasons rebuilt from scratch
+    library_keep_replaced_days: float = 14.0  # replaced library files are kept this long, then deleted
+    library_cross_eyed_url: str = ""   # cross-eyed's address: "Approve" moves the torrent into the show's folder with it
+    library_cross_eyed_prefix: str = "/host"  # where cross-eyed sees this machine's / (its HOST_MOUNT_PREFIX)
+    library_hold_hook: bool = True     # while on: qBittorrent's on-finished program (cross-seed) held while busy
+    library_hook_url: str = ""         # how qBittorrent reaches this GUI (blank: qBittorrent's host, the GUI's port)
+    library_redownload: bool = False   # seasons qBittorrent has already (other trackers): get them anyway
+    library_auto_move: bool = False    # with cross-eyed: move each season ready to swap into the library by itself
+    library_auto_delete: bool = False  # with cross-eyed: delete the original folder of each moved season by itself
     match_episode_names: bool = False  # place posts/files named only by episode title (more searches)
     episode_source: str = "all"       # where a show's episode list comes from: all | tvmaze | tmdb | tvdb | imdb
     season_packing: str = "scene"     # "scene" = keep scene RARs (rebuild them from srrDB) | "unpack"
@@ -125,6 +141,7 @@ LAYOUT = [
     ("behaviour", "local_verify", "local_verify"),
     ("behaviour", "build_parallel", "build_parallel"),
     ("behaviour", "nearly_complete_percent", "nearly_complete_percent"),
+    ("behaviour", "download_keep_days", "download_keep_days"),
     ("behaviour", "nearly_complete_mb", "nearly_complete_mb"),
     ("behaviour", "nearly_auto_trackers", "nearly_auto_trackers"),
     ("behaviour", "nearly_limits", "nearly_limits"),
@@ -160,6 +177,19 @@ LAYOUT = [
     ("automatic", "skip_unposted", "auto_skip_unposted"),
     ("automatic", "queue_keep_older", "auto_queue_keep_older"),
     ("automatic", "searches_per_hour", "auto_searches_per_hour"),
+    ("library", "enabled", "library_enabled"),
+    ("library", "indexer", "library_indexer"),
+    ("library", "roots", "library_roots"),
+    ("library", "output_dir", "library_output_dir"),
+    ("library", "daily_gb", "library_daily_gb"),
+    ("library", "keep_replaced_days", "library_keep_replaced_days"),
+    ("library", "redownload", "library_redownload"),
+    ("library", "auto_move", "library_auto_move"),
+    ("library", "auto_delete", "library_auto_delete"),
+    ("library", "cross_eyed_url", "library_cross_eyed_url"),
+    ("library", "cross_eyed_prefix", "library_cross_eyed_prefix"),
+    ("library", "hold_cross_seed", "library_hold_hook"),
+    ("library", "hook_url", "library_hook_url"),
     ("autobrr", "url", "autobrr_url"),
     ("autobrr", "api_key", "autobrr_key"),
     ("gui", "username", "gui_username"),
@@ -190,6 +220,73 @@ def from_sections(d: dict, path: Path) -> Config:
     return finalize(cfg)
 
 
+MAX_TRACKERS = 1000          # tracker limit rows kept (a shared CSV can hold no more)
+MAX_TRACKER_NAME = 100       # characters in a tracker's name
+MAX_LIMIT_MB = 10_000_000    # 10 TB: more than any tracker allows
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def clean_tracker_name(name) -> str:
+    """A tracker name as stored: text only, no control characters, at most 100 characters."""
+    if not isinstance(name, str):
+        return ""
+    return _CONTROL.sub("", name).strip()[:MAX_TRACKER_NAME].strip()
+
+
+def _limit_number(v, top: float) -> float | int:
+    """A percent or MB as stored: a finite number from 0 to ``top`` (anything else is 0,
+    which means "no limit set")."""
+    if isinstance(v, bool):
+        return 0
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(f) or f <= 0:
+        return 0
+    f = min(f, top)
+    return int(f) if f == int(f) else round(f, 4)
+
+
+def clean_limits(rows) -> list:
+    """What each tracker lets you download, as stored: rows of {tracker, percent, mb} only -
+    whatever else a row holds is dropped, numbers are checked, one row per tracker, and no
+    more than MAX_TRACKERS rows. Applied to everything saved, from the form or an import."""
+    out, seen = [], set()
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = clean_tracker_name(row.get("tracker"))
+        key = tracker_key(name)
+        if not key or key in seen:
+            continue
+        pct, mb = _limit_number(row.get("percent"), 100), _limit_number(row.get("mb"), MAX_LIMIT_MB)
+        if not (pct or mb):
+            continue
+        seen.add(key)
+        clean = {"tracker": name}
+        if pct:
+            clean["percent"] = pct
+        if mb:
+            clean["mb"] = mb
+        out.append(clean)
+        if len(out) >= MAX_TRACKERS:
+            break
+    return out
+
+
+def clean_tracker_names(names) -> list:
+    out, seen = [], set()
+    for n in names if isinstance(names, list) else []:
+        n = clean_tracker_name(n)
+        if n and tracker_key(n) not in seen:
+            seen.add(tracker_key(n))
+            out.append(n)
+        if len(out) >= MAX_TRACKERS:
+            break
+    return out
+
+
 def minutes_list(v) -> list:
     """'0, 2, 10, 20, 60' (or a list) -> [0, 2, 10, 20, 60]: sorted, no repeats, none below 0."""
     items = v if isinstance(v, (list, tuple)) else re.split(r"[\s,;]+", str(v or ""))
@@ -214,6 +311,8 @@ def finalize(cfg: Config) -> Config:
     if cfg.post_processing not in ("auto", "repair", "unpack"):
         raise ValueError("post_processing must be 'auto', 'repair' or 'unpack' (+Delete is never allowed)")
     cfg.auto_retry_at = minutes_list(cfg.auto_retry_at)
+    cfg.nearly_limits = clean_limits(cfg.nearly_limits)
+    cfg.nearly_auto_trackers = clean_tracker_names(cfg.nearly_auto_trackers)
     raw = cfg.torrent_dir_raw or "torrents"
     cfg.torrent_dir = raw if os.path.isabs(raw) else str(Path(cfg.path).parent / raw)
     return cfg
@@ -247,6 +346,16 @@ def load_or_default(explicit: str | None = None) -> Config:
         return from_sections(tomllib.load(fh), p)
 
 
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _toml_key(k) -> str:
+    """A key as TOML reads it back: bare when it can be, quoted otherwise - so a key can
+    never close its table and start a new one."""
+    k = str(k)
+    return k if _BARE_KEY.fullmatch(k) else json.dumps(k)
+
+
 def _toml(v) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -255,7 +364,7 @@ def _toml(v) -> str:
     if isinstance(v, str):
         return json.dumps(v)  # JSON string escapes are valid TOML basic-string escapes
     if isinstance(v, dict):
-        return "{" + ", ".join(f"{k} = {_toml(x)}" for k, x in v.items()) + "}"
+        return "{" + ", ".join(f"{_toml_key(k)} = {_toml(x)}" for k, x in v.items()) + "}"
     if isinstance(v, list):
         return "[" + ", ".join(_toml(x) for x in v) + "]"
     raise TypeError(f"cannot write {type(v).__name__} to TOML")
@@ -295,13 +404,22 @@ def tracker_limit(cfg: "Config", tracker: str) -> tuple[float, float] | None:
     return None
 
 
-def within_limit(cfg: "Config", tracker: str, fraction_missing: float, bytes_missing: int | None) -> bool:
+# Every add to the torrent client keeps this far under a tracker's limit (only Override
+# skips the limit): data that turns out bad and is downloaded a second time must not carry
+# the torrent over the limit.
+HEADROOM = 0.10
+AUTO_HEADROOM = HEADROOM
+
+
+def within_limit(cfg: "Config", tracker: str, fraction_missing: float, bytes_missing: int | None,
+                 headroom: float = HEADROOM) -> bool:
     """Little enough to download from this tracker: under its percentage and its MB, where
-    set (bytes unknown: the percentage only). A tracker with no limit set allows nothing."""
+    set (bytes unknown: the percentage only). A tracker with no limit set allows nothing.
+    ``headroom``: the share of the limit kept free (0.1: at most 90% of it may be needed)."""
     lim = tracker_limit(cfg, tracker)
     if lim is None:
         return False
-    pct, mb = lim
+    pct, mb = (x * (1 - headroom) for x in lim)
     if pct and fraction_missing * 100 >= pct:
         return False
     return not mb or bytes_missing is None or bytes_missing < mb * 1024 ** 2
@@ -313,4 +431,4 @@ def limit_text(cfg: "Config", tracker: str) -> str:
         return "nothing (no limit set for this tracker)"
     pct, mb = lim
     return " or ".join(x for x in (pct and f"{pct:g}%", mb and f"{mb:g} MB") if x) + \
-        (" - whichever is less" if pct and mb else "")
+        (" - whichever is less" if pct and mb else "") + f", keeping {HEADROOM:.0%} of it free"

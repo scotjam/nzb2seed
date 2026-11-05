@@ -182,7 +182,7 @@ MIN_NAME_CHARS = 5                     # shorter episode names ('De', 'Pech') ma
 
 class NameIndex:
     """Episodes by their names, to place posts named only by episode title - 'Show De
-    Dierenwinkel FLEMISH - GRP' - or files in your library named that way. Only an
+    Bakkerij FLEMISH - GRP' - or files in your library named that way. Only an
     unambiguous match counts: the longest episode name the title's words start with,
     belonging to exactly one episode."""
 

@@ -5,6 +5,11 @@ import { html, useEffect, useReducer, useRef } from "../lib.js";
 import { api } from "../api.js";
 import { jobs, openJob, refreshJobs, toast, useStore } from "../store.js";
 import { age, fileB64, filterMatch, groupOf, keep, norm, pageLink, remember, size, sortBy, sortKey } from "../util.js";
+
+function savedTrackers() {
+  try { const v = JSON.parse(remember("build.trackers", "[]")); return new Set(Array.isArray(v) ? v : []); }
+  catch { return new Set(); }
+}
 import { Options, useOptions } from "../components/options.js";
 import { SortSelect } from "../components/sort.js";
 import { GroupChips } from "../components/groups.js";
@@ -53,7 +58,7 @@ const fresh = () => ({
   tview: "digest", dsort: remember("dsort", "auto"),
   // what the torrent results show: by default only whole seasons or films, and only those
   // Usenet has the same release group, resolution and season of - untick for everything
-  whole: true, withNzbs: true, lang: "any",
+  whole: true, withNzbs: true, lang: "any", tracker: remember("build.tracker", ""),
   tsort: remember("tsort", "best"), usort: remember("usort", "best"),
   searching: false, finding: false, upload: "Upload .torrent",
 });
@@ -64,6 +69,19 @@ export function BuildTab({ active }) {
   const all = useStore(jobs);
   const [opts, setOpts] = useOptions();
   const queryRef = useRef(null), usenetRows = useRef(null);
+  // which trackers a search goes to: none ticked = all of them
+  const tk = useRef({ list: [], chosen: savedTrackers() }).current;
+  useEffect(() => {
+    if (!active || tk.list.length) return;
+    api("/api/library/indexers", {}).then(r => { tk.list = r.indexers || []; redraw(); }).catch(() => {});
+  }, [active]);
+  const toggleTracker = (n) => {
+    tk.chosen.has(n) ? tk.chosen.delete(n) : tk.chosen.add(n);
+    keep("build.trackers", JSON.stringify([...tk.chosen])); redraw();
+  };
+  const allTrackers = () => { tk.chosen.clear(); keep("build.trackers", "[]"); redraw(); };
+  // a tracker no longer in Prowlarr is not searched (and not counted as chosen)
+  const chosenTrackers = () => [...tk.chosen].filter(n => !tk.list.length || tk.list.includes(n));
 
   const entryFor = (t) => {
     if (!s.chosen.has(t.guid)) s.chosen.set(t.guid, { torrent: t, picked: new Set(), found: new Set(), how: "", paired: false });
@@ -125,7 +143,7 @@ export function BuildTab({ active }) {
     if (!query) return queryRef.current.focus();
     s.searching = true; redraw();
     try {
-      const r = await api("/api/search", { query });
+      const r = await api("/api/search", { query, trackers: chosenTrackers() });
       // a new search: the torrents that were ticked are no longer on screen
       Object.assign(s, { torrents: r.torrents, usenet: r.usenet, chosen: new Map(), editing: null,
                          autoFilter: "", tfilter: "", tgroup: "", ufilter: "", earlier: [], searched: true,
@@ -199,8 +217,14 @@ export function BuildTab({ active }) {
   const sortChange = (k) => (e) => { s[k] = e.target.value; keep(k, s[k]); redraw(); };
   // the result filters - a torrent you ticked always stays in view
   const hasNzbs = withNzbs(s.usenet);
+  // the trackers the torrents came from, most results first - a filter once there are two or more
+  const fromTrackers = [...s.torrents.reduce((m, t) => m.set(t.indexer, (m.get(t.indexer) || 0) + 1), new Map())]
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+  // the remembered tracker filters only when this search has results from it
+  const onlyTracker = fromTrackers.some(([n]) => n === s.tracker) ? s.tracker : "";
   const shownT = s.torrents.filter(t => s.chosen.has(t.guid)
-    || ((!s.whole || isWhole(t.title)) && (!s.withNzbs || hasNzbs(t)) && fitsLanguage(t.title, s.lang)));
+    || ((!s.whole || isWhole(t.title)) && (!s.withNzbs || hasNzbs(t)) && fitsLanguage(t.title, s.lang)
+        && (!onlyTracker || t.indexer === onlyTracker)));
   const hidden = s.torrents.length - shownT.length;
   // Usenet found nothing at all - usually the spelling: trackers forgive a typo, Usenet
   // indexers do not. Offered: the name the torrents themselves carry
@@ -212,7 +236,7 @@ export function BuildTab({ active }) {
     ${better && html` The torrents are named like <b>${better}</b>:
       <button type="button" class="btn" onClick=${(e) => search(e, better)}>Search for “${better}”</button>`}</p>`
     : hidden > 0 && html`<p class="status rtip">${hidden} more torrent${hidden === 1 ? " is" : "s are"} not shown.
-    For more results, untick ${[s.whole && "“Complete seasons or films only”", s.withNzbs && "“Only with NZBs found”"].filter(Boolean).join(" or ") || "nothing"}${s.lang !== "any" ? (s.whole || s.withNzbs ? ", or set the language to Any" : " - set the language to Any") : ""}.</p>`;
+    For more results, untick ${[s.whole && "“Complete seasons or films only”", s.withNzbs && "“Only with NZBs found”"].filter(Boolean).join(" or ") || "nothing"}${s.lang !== "any" ? (s.whole || s.withNzbs ? ", or set the language to Any" : " - set the language to Any") : ""}${onlyTracker ? ", or show all trackers" : ""}.</p>`;
   const ts = sortBy(shownT.filter(t => filterMatch(t.title + " " + t.indexer, s.tfilter)
     && (!s.tgroup || groupOf(t.title).toLowerCase() === s.tgroup)), s.tsort);
   const pk = picked(), fd = found();
@@ -232,6 +256,16 @@ export function BuildTab({ active }) {
     <form class="search" onSubmit=${search}>
       <input type="text" ref=${queryRef} placeholder="Release name, e.g. Show.S01.1080p.BluRay.x264-GRP" autocomplete="off" aria-label="Search Prowlarr" />
       <button class="btn primary" disabled=${s.searching}>${s.searching ? "Searching…" : "Search"}</button>
+      <details class="trackers">
+        <summary class="btn" title="Search only some trackers for torrents - Usenet is always searched for the NZBs">
+          ${chosenTrackers().length ? `Trackers: ${chosenTrackers().length === 1 ? chosenTrackers()[0] : chosenTrackers().length + " chosen"}` : "Trackers: all"}</summary>
+        <div class="trackerlist">
+          <label class="check"><input type="checkbox" checked=${!chosenTrackers().length} onChange=${allTrackers} /> All trackers</label>
+          ${tk.list.length ? tk.list.map(n => html`<label class="check" key=${n}>
+              <input type="checkbox" checked=${tk.chosen.has(n)} onChange=${() => toggleTracker(n)} /> ${n}</label>`)
+            : html`<small class="status">Loading the trackers from Prowlarr…</small>`}
+        </div>
+      </details>
       <label class="btn upload" title="Build a .torrent file you already have" aria-busy=${s.upload !== "Upload .torrent" ? "true" : null}>
         <input type="file" accept=".torrent,application/x-bittorrent" aria-label="Upload a .torrent file" onChange=${upload} />${s.upload}</label>
     </form>
@@ -257,6 +291,10 @@ export function BuildTab({ active }) {
             <label class="lang">Language <select aria-label="Language" value=${s.lang} onChange=${(e) => { s.lang = e.target.value; redraw(); }}>
               <option value="any">Any</option><option value="none">None in the name (usually English)</option>
               ${LANGUAGES.map(([k, label]) => html`<option value=${k}>${label}</option>`)}</select></label>
+            ${fromTrackers.length > 1 && html`<label class="lang">Tracker <select aria-label="Tracker" value=${onlyTracker}
+                onChange=${(e) => { s.tracker = e.target.value; keep("build.tracker", s.tracker); redraw(); }}>
+              <option value="">All (${fromTrackers.length})</option>
+              ${fromTrackers.map(([n, c]) => html`<option value=${n}>${n} (${c})</option>`)}</select></label>`}
           </div>`}
           ${s.tview === "digest" && s.torrents.length > 1 ? html`
           <${Digest} torrents=${shownT} usenet=${s.usenet} how=${s.dsort} chosen=${s.chosen} tip=${tip}
@@ -374,7 +412,7 @@ function BuildBar({ s, all, picked, opts, setOpts, build }) {
 }
 
 /* the name most of the torrents found go by (up to their year), when it is not what was
-   searched for: "Some Film 2026" for a search of "Sum Film 2026" */
+   searched for: "The Example 2026" for a search of "Exampel 2026" */
 function namedAs(torrents, asked) {
   const count = new Map();
   for (const t of torrents) {

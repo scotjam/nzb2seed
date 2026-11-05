@@ -27,7 +27,7 @@ export function useStore(store) {
 
 /* ---- the tab on screen: the page's address (#jobs, #settings, ...) - and an open job is
    #jobs/<id>, so the browser's (or Android's) Back goes from the job to the jobs list */
-export const TABS = ["build", "jobs", "seasons", "assemble", "auto", "demand", "settings"];
+export const TABS = ["build", "jobs", "seasons", "assemble", "auto", "library", "demand", "settings", "help"];
 const hashParts = () => location.hash.slice(1).split("/");
 const tabOf = () => TABS.includes(hashParts()[0]) ? hashParts()[0] : "build";
 const jobOf = () => hashParts()[0] === "jobs" && /^\d+$/.test(hashParts()[1] || "") ? Number(hashParts()[1]) : null;
@@ -76,13 +76,16 @@ export function nearlyLimitText(tracker) {
   const lim = trackerLimit(tracker);
   if (!lim) return "nothing (no limit set for this tracker)";
   const [pct, mb] = lim;
-  return [pct && `${pct}%`, mb && `${mb} MB`].filter(Boolean).join(" or ") + (pct && mb ? " - whichever is less" : "");
+  return [pct && `${pct}%`, mb && `${mb} MB`].filter(Boolean).join(" or ") + (pct && mb ? " - whichever is less" : "")
+    + `, keeping ${HEADROOM * 100}% of it free`;
 }
-/* little enough to download from its tracker: under that tracker's limits (bytes unknown: the %) */
+/* little enough to download from its tracker: under that tracker's limits less 10% (a piece
+   downloaded twice must not carry it over) - bytes unknown: the % (as config.within_limit) */
+export const HEADROOM = 0.10;
 export function shortEnough(x) {
   const lim = x && trackerLimit(x.tracker);
   if (!lim || x.have == null) return false;
-  const [pct, mb] = lim;
+  const [pct, mb] = lim.map(v => v * (1 - HEADROOM));
   return (!pct || (1 - x.have) * 100 < pct) && (!mb || x.short == null || x.short < mb * 1024 ** 2);
 }
 /* set (or, both blank, clear) how much a tracker lets you download */

@@ -610,13 +610,13 @@ def test_another_codec_is_another_encode():
 
 
 def test_a_rard_release_takes_its_group_from_the_release_name():
-    """Scene archives are named group first ('qzxwiso-abr11011261.r00'): read as a name,
+    """Scene archives are named group first ('xqzwprk-abr11011261.r00'): read as a name,
     the short name looked like the group and every post of the release was turned away."""
-    name = "Acme.Backup.and.Replication.v11.0.1.1261-QZXWiSO"
-    files = {"qzxwiso-abr11011261.rar": rnd(30_000, 1), "qzxwiso-abr11011261.r00": rnd(30_000, 2),
-             "qzxwiso-abr11011261.sfv": b"; sfv", "qzxwiso.nfo": b"nfo"}
+    name = "Acme.Backup.and.Replication.v11.0.1.1261-XQZWpRK"
+    files = {"xqzwprk-abr11011261.rar": rnd(30_000, 1), "xqzwprk-abr11011261.r00": rnd(30_000, 2),
+             "xqzwprk-abr11011261.sfv": b"; sfv", "xqzwprk.nfo": b"nfo"}
     t = parse(make_torrent(name, files))
-    assert need_for(t, t.name, True).group == "qzxwiso"
+    assert need_for(t, t.name, True).group == "xqzwprk"
     need = pipeline.build_units(t, t.name).need
-    assert need.group == "qzxwiso"
+    assert need.group == "xqzwprk"
     assert pipeline._fits(need, rel(name + "-xpost", t.total_size + 1000, "p")) is None

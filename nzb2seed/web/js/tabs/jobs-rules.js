@@ -68,7 +68,7 @@ export function viaTracker(j, tracker) {
 /* the dot's colour: a job that ended by skipping its release built nothing - grey, not green */
 /* ...and one handed to qBittorrent to download the rest: orange while it does, green once complete */
 export const dotOf = (j) => j.extra?.added ? (j.extra.complete ? "done" : "client")
-  : j.status === "done" && /^skipped\b/.test(j.result || "") ? "skipped"
+  : j.status === "done" && (/^(skipped\b|no usable season pack|waiting for the daily download budget)/.test(j.result || "") || j.extra?.nothing_built) ? "skipped"   // ended, nothing made
   : j.extra?.built_from_other && j.retried_as ? "skipped" : j.status;    // replaced by a build from another tracker
 export function canAdd(j, jobs) {
   const x = j.extra || {};

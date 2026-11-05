@@ -91,7 +91,7 @@ class PR:
         return list(self.results)
 
 
-def setup(tmp_path, files, name="Show.2020.S01-S02.720p.HDTV.x264-GRP"):
+def scenario(tmp_path, files, name="Show.2020.S01-S02.720p.HDTV.x264-GRP"):
     t = parse(make_torrent(name, files))
     cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]])
     return t, cfg
@@ -139,7 +139,7 @@ def covers_all(t, dirs):
 
 def test_multi_season_nzb_is_used_when_there_is_one(tmp_path):
     files = multi_season()
-    t, cfg = setup(tmp_path, files)
+    t, cfg = scenario(tmp_path, files)
     whole = rel("Show.2020.S01-S02.720p.HDTV.x264-GRP", t.total_size + 10)
     season = rel("Show.2020.S01.720p.HDTV.x264-GRP", season_size(files, 1) + 10)
     sab = SAB(str(tmp_path / "dl"), t, files)
@@ -149,7 +149,7 @@ def test_multi_season_nzb_is_used_when_there_is_one(tmp_path):
 
 def test_seasons_then_episodes_when_nothing_bigger_exists(tmp_path):
     files = multi_season()
-    t, cfg = setup(tmp_path, files)
+    t, cfg = scenario(tmp_path, files)
     s1 = rel("Show.2020.S01.720p.HDTV.x264-GRP", season_size(files, 1) + 10)
     # no season-2 NZB: season 2 comes from its episodes
     eps2 = [rel(f"Show.2020.S02E0{e}.720p.HDTV.x264-GRP", ep_size(files, 2, e) + 10) for e in (1, 2, 3)]
@@ -164,7 +164,7 @@ def test_seasons_then_episodes_when_nothing_bigger_exists(tmp_path):
 
 def test_every_option_at_a_level_is_tried_before_going_down(tmp_path):
     files = multi_season()
-    t, cfg = setup(tmp_path, files)
+    t, cfg = scenario(tmp_path, files)
     size1 = season_size(files, 1)
     bad = [rel("Show.2020.S01.720p.HDTV.x264-GRP", size1 + 10 + i, f"s1-{i}") for i in range(4)]
     good = rel("Show.2020.S01.720p.HDTV.x264-GRP", size1 + 99, "s1-good")
@@ -177,7 +177,7 @@ def test_every_option_at_a_level_is_tried_before_going_down(tmp_path):
 
 def test_a_short_season_post_still_supplies_its_episodes(tmp_path):
     files = multi_season()
-    t, cfg = setup(tmp_path, files)
+    t, cfg = scenario(tmp_path, files)
     s1 = rel("Show.2020.S01.720p.HDTV.x264-GRP", season_size(files, 1) + 10, "s1")
     s2 = rel("Show.2020.S02.720p.HDTV.x264-GRP", season_size(files, 2) + 10, "s2-short")
     e22 = rel("Show.2020.S02E02.720p.HDTV.x264-GRP", ep_size(files, 2, 2) + 10, "e22")
@@ -189,7 +189,7 @@ def test_a_short_season_post_still_supplies_its_episodes(tmp_path):
 
 def test_mixed_group_season_goes_straight_to_episodes(tmp_path):
     files = multi_season(extra_group="OTHER")
-    t, cfg = setup(tmp_path, files)
+    t, cfg = scenario(tmp_path, files)
     s1 = rel("Show.2020.S01.720p.HDTV.x264-GRP", season_size(files, 1) + 10, "s1")
     s2 = rel("Show.2020.S02.720p.HDTV.x264-GRP", season_size(files, 2) + 10, "s2-grp")
     eps2 = [rel(f"Show.2020.S02E0{e}.720p.HDTV.x264-{'OTHER' if e == 2 else 'GRP'}",
@@ -203,7 +203,7 @@ def test_mixed_group_season_goes_straight_to_episodes(tmp_path):
 def test_other_groups_and_resolutions_are_never_tried(tmp_path, monkeypatch):
     monkeypatch.setattr(pipeline, "report_ask", lambda p, c: None)
     files = {ep_name(1, 1): rnd(40_000, 1)}
-    t, cfg = setup(tmp_path, files, "Show.2020.S01E01.720p.HDTV.x264-GRP")
+    t, cfg = scenario(tmp_path, files, "Show.2020.S01E01.720p.HDTV.x264-GRP")
     wrong = [rel("Show.2020.S01E01.720p.HDTV.x264-OTHER", 10**6, "other-group"),
              rel("Show.2020.S01E01.1080p.HDTV.x264-GRP", 10**6, "other-res")]
     sab = SAB(str(tmp_path / "dl"), t, files)
@@ -214,7 +214,7 @@ def test_other_groups_and_resolutions_are_never_tried(tmp_path, monkeypatch):
 
 def test_a_movie_uses_movie_nzbs(tmp_path):
     files = {"movie.2021.1080p.bluray.x264-grp.mkv": rnd(60_000, 3)}
-    t, cfg = setup(tmp_path, files, "Movie.2021.1080p.BluRay.x264-GRP")
+    t, cfg = scenario(tmp_path, files, "Movie.2021.1080p.BluRay.x264-GRP")
     good = rel("Movie.2021.1080p.BluRay.x264-GRP", 70_000, "movie")
     other = rel("Movie.2021.2160p.BluRay.x264-GRP", 90_000, "uhd")
     sab = SAB(str(tmp_path / "dl"), t, files)
@@ -264,3 +264,9 @@ def test_a_season_nfo_with_the_episodes_in_place_is_fetched_on_its_own(tmp_path)
     assert ep_name(1, 1) not in sab.added[0] and ".par2" not in sab.added[0]          # just the .nfo
     nfo_rel = next(f.relpath for f in t.real_files if f.ext == ".nfo")
     assert nfo_rel in asm.find_sources(t, dirs)
+
+
+def scenario(tmp_path, files, name="Show.2020.S01-S02.720p.HDTV.x264-GRP"):
+    t = parse(make_torrent(name, files))
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]])
+    return t, cfg
