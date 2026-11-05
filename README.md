@@ -32,6 +32,8 @@ nzb2seed drives three programs you run yourself, and needs a way onto Usenet:
 * **SABnzbd** downloads from Usenet.
 * **qBittorrent** checks each build piece by piece and seeds it.
 * **Prowlarr** searches your torrent trackers and your Usenet indexers.
+* **cross-seed** (recommended) finds the same release on your other trackers
+  and seeds it there too, from the same files.
 
 ### SABnzbd
 
@@ -145,6 +147,63 @@ In nzb2seed's **Settings**, under *Prowlarr*, enter its URL (for example
 `http://192.0.2.10:9696`) and that API key, and press *Test*. *Only these
 indexer ids* and *Only these categories* can narrow what it searches; blank
 means everything.
+
+### cross-seed (recommended)
+
+Not needed to build anything, but recommended:
+[cross-seed](https://www.cross-seed.org) finds the same release on your other
+trackers and adds it to qBittorrent seeding from the files you already have
+(hard links, nothing downloaded). Every torrent nzb2seed builds - from the
+Build, Automatic or Library tab - then seeds on each tracker that has it, so
+one Usenet download grows your stats on all of them. cross-eyed (for the
+Library tab) works alongside it too. The
+[cross-seed documentation](https://www.cross-seed.org/docs/basics/getting-started)
+has the details.
+
+```yaml
+services:
+  cross-seed:
+    image: ghcr.io/cross-seed/cross-seed:6
+    container_name: cross-seed
+    command: daemon
+    ports:
+      - "2468:2468"
+    volumes:
+      - ./cross-seed:/config
+      - /srv/disk1/data:/data          # the SAME paths qBittorrent uses for its downloads
+    restart: unless-stopped
+```
+
+```
+docker compose run --rm cross-seed gen-config   # writes ./cross-seed/config.js
+docker compose run --rm cross-seed api-key      # prints the key the webhook below needs
+```
+
+Edit `config.js` (the settings below matter most), then `docker compose up -d cross-seed`:
+
+```js
+torznab: ["http://prowlarr:9696/1/api?apikey=YOUR_PROWLARR_KEY"],   // one per tracker, from Prowlarr
+torrentClients: ["qbittorrent:http://user:password@192.0.2.10:8080"],
+action: "inject",                   // add matches to qBittorrent itself
+linkDirs: ["/data/cross-seed"],     // on the same disk as your downloads, so links work
+linkType: "hardlink",
+matchMode: "flexible",
+autoResumeMaxDownload: 0,           // never let a near-match download into shared files
+```
+
+* **`linkDirs`** must be on the same disk as the files it links to; with
+  several disks, list one folder per disk.
+* **`autoResumeMaxDownload: 0`** matters: a near-match left stopped can never
+  write its few differing pieces into files other torrents seed from
+  (cross-eyed's *Short & shared* page sorts those out safely).
+* To search each torrent as it finishes, set qBittorrent's *Options -> Downloads
+  -> Run external program on torrent finished* to
+  `curl -XPOST http://cross-seed:2468/api/webhook?apikey=YOUR_CROSS_SEED_KEY -d "infoHash=%I"`.
+  Then every build is searched for on your other trackers as soon as it is
+  complete. While nzb2seed's Library is on, it routes this through itself and
+  holds the calls back while a season is built or moved (*Hold back cross-seed*
+  in the Library tab), then puts your setting back when the Library is
+  switched off.
 
 ## Running it
 
@@ -376,6 +435,42 @@ The *Automatic* tab (switch at the top; a dot in the menu shows whether it is on
    searches an hour (your own searches are not counted). What happened to each
    torrent is kept in `inbox.json`, so a restart picks up where it was.
 
+## Seeding your library: the Library tab
+
+The *Library* tab works through your TV folders (`Show/Season N/...`) one
+season at a time. A season a tracker has as the very release you have is
+linked into its torrent and rechecked - nothing is downloaded. Otherwise the
+tracker's single-season pack is built from Usenet within a daily budget, and
+once it seeds at 100.0% you decide whether it replaces your files. Only packs
+with every episode you have are used.
+
+**Where season packs come from** - under *Trackers and folders*:
+
+* **One tracker (recommended)**: every season pack comes from the tracker you
+  choose. Simplest to follow, and all the seeding builds one tracker's stats.
+* **Several trackers, in an order you set**: tick the trackers to use and move
+  them up or down; the first is tried first. The list also holds **Your
+  files** - the very release you have, on *any* ticked tracker - at the top by
+  default. Each season takes the first entry with a usable pack:
+  * *Your files* at the top: wherever a ticked tracker has your release, it is
+    used (linked, nothing downloaded); otherwise the first tracker in the list
+    with a pack builds it.
+  * *Your files* moved down: the trackers above it are preferred even when
+    they only have another release (built from Usenet).
+  * A season none of the ticked trackers has is left as *No season pack*.
+
+  One Prowlarr search covers all the ticked trackers, made when the season's
+  turn comes. Changing the list makes seasons still waiting search again with
+  the new order; seasons already built or seeding stay as they are. Ticking a
+  tracker puts seasons left as *No season pack* back in the queue, to try it;
+  otherwise they are not searched again unless you click *Try again*. With
+  cross-seed (recommended, above) a season also seeds on your other trackers
+  that have the same release.
+
+**Redownload even if already in torrent client** gets seasons qBittorrent
+already holds from a tracker that is not ticked; a season one of the ticked
+trackers already seeds is always left alone.
+
 ## Moving seasons into your library with cross-eyed
 
 The *Library* tab is for people whose library came from other sources -
@@ -390,58 +485,10 @@ the show's folder under its own name, has qBittorrent recheck it there, and
 only then lets the old season folder go. cross-eyed is a separate,
 self-hosted web app that keeps track of which torrents share which files.
 
-### 1. Install cross-seed
+cross-eyed works alongside cross-seed: set that up first (see
+*cross-seed (recommended)* above).
 
-cross-eyed works alongside [cross-seed](https://www.cross-seed.org), which
-finds the same release on your other trackers and adds it to qBittorrent
-seeding from the files you already have (hard links, nothing downloaded). Set
-it up first; the [cross-seed documentation](https://www.cross-seed.org/docs/basics/getting-started)
-has the details.
-
-```yaml
-services:
-  cross-seed:
-    image: ghcr.io/cross-seed/cross-seed:6
-    container_name: cross-seed
-    command: daemon
-    ports:
-      - "2468:2468"
-    volumes:
-      - ./cross-seed:/config
-      - /srv/disk1/data:/data          # the SAME paths qBittorrent uses for its downloads
-    restart: unless-stopped
-```
-
-```
-docker compose run --rm cross-seed gen-config   # writes ./cross-seed/config.js
-docker compose run --rm cross-seed api-key      # prints the key the webhook below needs
-```
-
-Edit `config.js` (the settings below matter most), then `docker compose up -d cross-seed`:
-
-```js
-torznab: ["http://prowlarr:9696/1/api?apikey=YOUR_PROWLARR_KEY"],   // one per tracker, from Prowlarr
-torrentClients: ["qbittorrent:http://user:password@192.0.2.10:8080"],
-action: "inject",                   // add matches to qBittorrent itself
-linkDirs: ["/data/cross-seed"],     // on the same disk as your downloads, so links work
-linkType: "hardlink",
-matchMode: "flexible",
-autoResumeMaxDownload: 0,           // never let a near-match download into shared files
-```
-
-* **`linkDirs`** must be on the same disk as the files it links to; with
-  several disks, list one folder per disk.
-* **`autoResumeMaxDownload: 0`** matters: a near-match left stopped can never
-  write its few differing pieces into files other torrents seed from
-  (cross-eyed's *Short & shared* page sorts those out safely).
-* To search each torrent as it finishes, set qBittorrent's *Options -> Downloads
-  -> Run external program on torrent finished* to
-  `curl -XPOST http://cross-seed:2468/api/webhook?apikey=YOUR_CROSS_SEED_KEY -d "infoHash=%I"`.
-  While nzb2seed's Library is on, it routes this through itself and holds the
-  calls back while a season is built or moved (*Hold back cross-seed* in the
-  Library tab), then puts your setting back when the Library is switched off.
-
-### 2. Run cross-eyed
+### 1. Run cross-eyed
 
 It needs Docker on the machine that holds your downloads and library, the
 same machine qBittorrent runs on. A minimal `docker-compose.yml`:
@@ -459,7 +506,7 @@ services:
       QBIT_USER: "admin"
       QBIT_PASS: "your-qbittorrent-password"
       QBIT_CONTAINER_NAME: "qbittorrent"        # so it can read qBittorrent's volume mappings
-      CROSS_SEED_URL: "http://192.0.2.10:2468"    # cross-seed, from step 1
+      CROSS_SEED_URL: "http://192.0.2.10:2468"    # cross-seed, set up above
       CROSS_SEED_API_KEY: "YOUR_CROSS_SEED_KEY"
       HOST_MOUNT_PREFIX: "/host"
       DB_PATH: "/config/cross-eyed.db"
@@ -488,16 +535,19 @@ Then open `http://<server>:8765`. Things to know:
   mappings, so it can translate qBittorrent's paths (`/data/...`) to real ones.
 * **Dry-run** is on at every start: moves are planned and shown on its *Jobs*
   page but carried out only after you switch cross-eyed to live in its header.
-  Until then, a season you approve in nzb2seed waits as *Moving*.
+  While it is in dry-run, nzb2seed's Library tab says so and offers no moves
+  (auto move waits too); once it is live, seasons ready to swap and moves
+  already queued go ahead by themselves. To keep it live across restarts, set
+  `DRY_RUN: "false"`.
 * **No login.** cross-eyed has no password of its own: keep it on your local
   network, or behind your reverse proxy's authentication.
 * **Behind a VPN container** (gluetun): put it in the VPN's network
   (`network_mode: "container:gluetun"`, no `ports:`), and publish 8765 on the
   gluetun container instead.
 
-### 3. Connect nzb2seed
+### 2. Connect nzb2seed
 
-In nzb2seed's **Library** tab, under *Tracker and folders*, set **cross-eyed
+In nzb2seed's **Library** tab, under *Trackers and folders*, set **cross-eyed
 address** to where nzb2seed can reach it, for example `http://192.0.2.10:8765`.
 If cross-eyed shares a VPN container's network, use the server's LAN address,
 not `127.0.0.1`. Save.

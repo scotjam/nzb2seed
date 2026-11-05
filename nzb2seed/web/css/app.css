@@ -63,6 +63,7 @@ p.lede { color: var(--ink-2); margin: 0 0 20px; max-width: 70ch; }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .btn.primary { color: #10131f; } }
 .btn.primary:disabled { opacity: .45; cursor: not-allowed; }
 .btn.danger { color: var(--bad); }
+.status.ce-wait { color: var(--bad); }
 input[type=text], input[type=password], input[type=number], select, textarea {
   width: 100%; padding: 9px 11px; border: 1px solid var(--rule); border-radius: 8px; background: var(--sheet);
 }
@@ -475,3 +476,13 @@ nav a.tour-here { outline: 2px solid var(--torrent); outline-offset: 2px; }
 .warnbox { border: 1px solid var(--warn, #c8902a); border-radius: 6px; padding: .6em .8em; margin-top: .6em;
   background: color-mix(in srgb, var(--warn, #c8902a) 10%, transparent); }
 .warnbox p { margin: 0 0 .5em; }
+
+/* Library: one tracker or several, and the order several are tried in */
+.radios { border: 0; padding: 0; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.radios legend { padding: 0; margin-bottom: 4px; }
+.trackorder { list-style: none; margin: 4px 0; padding: 0; }
+.trackorder li { display: flex; gap: 8px; align-items: center; padding: 3px 0; }
+.trackorder li .name { flex: 1; word-break: break-word; }
+.trackorder li .tick { width: 1em; }
+.trackorder li .btn { padding: 2px 8px; min-width: 2em; }
+.trackorder.rest { opacity: .8; border-top: 1px dashed var(--line, #8884); padding-top: 4px; }

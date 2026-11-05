@@ -417,7 +417,7 @@ def test_a_season_over_the_budget_waits_and_is_not_started_again_and_again(tmp_p
 
 class FakeCrossEyed:
     def __init__(self, show_dir, root, infohash):
-        self.calls, self.jobs, self.dry = [], [], True
+        self.calls, self.jobs, self.dry, self.mode_dry = [], [], True, False
         self.a = {"inside": [{"hash": infohash}], "blockers": [], "conflicts": [], "ghosts": [], "copy_bytes": 0,
                   "movable": True, "target_host": "/host" + os.path.join(show_dir, os.path.basename(root))}
 
@@ -437,6 +437,9 @@ class FakeCrossEyed:
 
     def batch(self, b):
         return self.jobs, self.dry
+
+    def dry_run(self):
+        return self.mode_dry
 
 
 def test_approve_with_cross_eyed_moves_the_torrent_in_and_lists_the_original(tmp_path, library, monkeypatch):
@@ -490,6 +493,46 @@ def test_approve_with_cross_eyed_moves_the_torrent_in_and_lists_the_original(tmp
     w.in_client = lambda: {"/elsewhere"}
     w.delete_original(s.key)
     assert not os.path.exists(s.dir) and w.state.seasons[s.key]["status"] == lib.ORIGINAL_DELETED
+
+
+def test_cross_eyed_in_dry_run_mode_moves_nothing_and_says_so(tmp_path, library, monkeypatch):
+    w, s = _client_worker(tmp_path, library, [], library_cross_eyed_url="http://ce", library_cross_eyed_prefix="/host",
+                          library_auto_move=True, library_auto_delete=False)
+    w.seasons = {s.key: s}
+    root = tmp_path / "out" / "Alpha.S04.1080p-NEW"
+    root.mkdir(parents=True)
+    w.state.update(s.key, status=lib.SWAP, root=str(root), infohash="ih", why="seeding at 100.0%")
+    ce = FakeCrossEyed(os.path.dirname(s.dir), str(root), "ih")
+    ce.mode_dry = True
+    monkeypatch.setattr(lib, "CrossEyed", lambda *a: ce)
+    monkeypatch.setattr(lib.threading, "Thread", lambda target, args, **k: SimpleNamespace(start=lambda: target(*args)))
+    assert w.check_dry_run(w.app.cfg) is True
+    w.auto_moves(w.app.cfg)
+    assert w.state.seasons[s.key]["status"] == lib.SWAP and ce.calls == []      # not handed over
+    with pytest.raises(ValueError, match="dry-run"):
+        w.approve(s.key)
+    monkeypatch.setattr(w, "torrent_states", lambda: {})
+    w.current = None
+    assert w.items()["cross_eyed_dry_run"] is True
+    # switched to dry run while being handed over: back to ready, and auto move tries it again later
+    w.ce_dry = False
+    w.approve(s.key)
+    it = w.state.seasons[s.key]
+    assert it["status"] == lib.SWAP and it["why"] == lib.DRY_RUN_WAIT and ("move", str(root), os.path.dirname(s.dir)) not in ce.calls
+    ce.mode_dry = False
+    ce.active = lambda: 0
+    w.check_dry_run(w.app.cfg)
+    w.auto_moves(w.app.cfg)
+    assert w.state.seasons[s.key]["status"] == lib.MOVING and ("move", str(root), os.path.dirname(s.dir)) in ce.calls
+
+
+def test_a_hand_over_a_restart_cut_off_is_ready_again(tmp_path):
+    st = lib.State(str(tmp_path / "library.json"))
+    st.update("a", status=lib.MOVING, why="approved - handing it to cross-eyed")
+    st.update("b", status=lib.MOVING, batch="b1")
+    st2 = lib.State(str(tmp_path / "library.json"))
+    assert st2.seasons["a"]["status"] == lib.SWAP and not st2.seasons["a"]["why"].startswith("not moved")
+    assert st2.seasons["b"]["status"] == lib.MOVING
 
 
 def test_a_failed_cross_eyed_move_goes_back_to_ready(tmp_path, library):
@@ -688,3 +731,116 @@ def test_hook_setting_off_restores(tmp_path):
     app.cfg = SimpleNamespace(**{**vars(cfg), "library_hold_hook": False})
     hk.sync()
     assert q.prefs == {"autorun_enabled": False, "autorun_program": "true"}
+
+
+# ---------------------------------------------------------------- one tracker, or several in order
+
+def test_the_order_one_tracker_by_default_several_when_chosen():
+    one = SimpleNamespace(library_indexer="TL", library_multi=False, library_order=["TB", lib.OWN, "TL"])
+    assert lib.order(one) == [lib.OWN, "TL"]                       # the list is kept, not used
+    several = SimpleNamespace(library_indexer="TL", library_multi=True, library_order=["TB", lib.OWN, "TL"])
+    assert lib.order(several) == ["TB", lib.OWN, "TL"] and lib.trackers(several) == ["TB", "TL"]
+    no_own = SimpleNamespace(library_indexer="", library_multi=True, library_order=["TB", "TL", "tb"])
+    assert lib.order(no_own) == [lib.OWN, "TB", "TL"]              # your files at the top; no doubles
+    assert lib.order(SimpleNamespace(library_indexer="", library_multi=True, library_order=[lib.OWN])) == []
+    assert lib.order(SimpleNamespace(library_indexer="TL")) == [lib.OWN, "TL"]     # an older config
+    assert lib.trackers_text(several) == "TB or TL" and lib.is_ours(several, "TB (API)")
+
+
+def _picker(tmp_path, library, monkeypatch, packs, **cfg):
+    """A Library worker against a fake Prowlarr with three trackers; ``packs``: {tracker:
+    "same" (the library's very files) | "other" (another release of the season)}."""
+    s = lib.scan([library.root])[0]
+    same = make_torrent("Alpha.2009.S04.1080p.BluRay.x265-pCf",
+                        {**library.eps, "Alpha.2009.S04.1080p.BluRay.x265-pCf.nfo": b"nfo"})
+    other = make_torrent("Alpha.2009.S04.1080p.WEB-DL.x264-GRP",
+                         {f"Alpha.2009.S04E0{n}.1080p.WEB-DL.x264-GRP.mkv": rnd(30_000 + n, n + 7) for n in (1, 2, 3)})
+    titles = {"same": "Alpha 2009 S04 1080p BluRay x265-pCf", "other": "Alpha 2009 S04 1080p WEB-DL x264-GRP"}
+    ids = {"TL": 7, "TB": 8, "TC": 9}
+    searched = []
+
+    class FakePr:
+        def __init__(self, *a): pass
+        def indexers(self): return [(i, n) for n, i in ids.items()]
+
+        def search(self, q, want, cats):
+            searched.append(sorted(want))
+            return [Release(title=titles[kind], protocol="torrent", indexer=n, indexer_id=ids[n], size=10 * 1024 ** 3,
+                            guid=f"{n}:{kind}", download_url="", info_url="", publish_date="", grabs=None,
+                            seeders=5, files=None)
+                    for n, kind in packs.items() if ids[n] in want]
+
+        def fetch(self, r): return same if r.guid.endswith(":same") else other
+    monkeypatch.setattr(lib, "Prowlarr", FakePr)
+    w = object.__new__(lib.Library)
+    w.app = SimpleNamespace(cfg=None)
+    w.state = lib.State(str(tmp_path / "library.json"))
+    w.seasons = {s.key: s}
+    w.current = None
+    c = SimpleNamespace(prowlarr_url="", prowlarr_key="", torrent_dir=str(tmp_path / "torrents"),
+                        library_indexer="TL", library_multi=True, library_order=[lib.OWN, "TL", "TB"])
+    for k, v in cfg.items():
+        setattr(c, k, v)
+    return w, c, s, searched
+
+
+def test_your_files_at_the_top_win_on_any_ticked_tracker(tmp_path, library, monkeypatch):
+    w, cfg, s, searched = _picker(tmp_path, library, monkeypatch, {"TL": "other", "TB": "same"})
+    p, _, _, same = w.look(cfg, s.key)
+    assert (p.release.indexer, same) == ("TB", True)
+    assert searched == [[7, 8]]                                    # one search for both
+    assert w.state.seasons[s.key]["offer"]["tracker"] == "TB"
+
+
+def test_a_tracker_above_your_files_wins_with_its_own_pack(tmp_path, library, monkeypatch):
+    w, cfg, s, _ = _picker(tmp_path, library, monkeypatch, {"TL": "other", "TB": "same"},
+                           library_order=["TL", lib.OWN, "TB"])
+    p, _, _, same = w.look(cfg, s.key)
+    assert (p.release.indexer, same) == ("TL", False)
+
+
+def test_the_next_tracker_when_the_first_has_no_pack(tmp_path, library, monkeypatch):
+    w, cfg, s, _ = _picker(tmp_path, library, monkeypatch, {"TB": "other", "TC": "same"})
+    p, _, _, same = w.look(cfg, s.key)                             # TC is not ticked: never used
+    assert (p.release.indexer, same) == ("TB", False)
+
+
+def test_one_tracker_searches_only_that_tracker(tmp_path, library, monkeypatch):
+    w, cfg, s, searched = _picker(tmp_path, library, monkeypatch, {"TL": "other", "TB": "same"},
+                                  library_multi=False)
+    p, _, _, same = w.look(cfg, s.key)
+    assert (p.release.indexer, same, searched) == ("TL", False, [[7]])
+
+
+def test_a_new_order_means_a_new_search(tmp_path, library, monkeypatch):
+    w, cfg, s, _ = _picker(tmp_path, library, monkeypatch, {"TL": "other", "TB": "same"})
+    w.look(cfg, s.key)
+    assert w.kept_pick(cfg, s.key)[0].release.indexer == "TB"
+    cfg.library_order = ["TL", lib.OWN, "TB"]
+    assert w.kept_pick(cfg, s.key) is None
+    assert lib.offer_current({"indexer": "TL"}, SimpleNamespace(library_indexer="TL"))   # an older offer
+
+
+def test_no_pack_seasons_search_again_only_for_a_newly_ticked_tracker(tmp_path, library, monkeypatch):
+    w, cfg, s, searched = _picker(tmp_path, library, monkeypatch, {"TC": "same"})
+    assert w.look(cfg, s.key) is None
+    w.state.update(s.key, status=lib.NO_PACK)
+    assert w.reopen_no_pack(cfg) == 0                              # nothing changed
+    cfg.library_order = ["TB", lib.OWN, "TL"]                      # reordered, nothing new
+    assert w.reopen_no_pack(cfg) == 0
+    cfg.library_order = [lib.OWN, "TL"]                            # one unticked
+    assert w.reopen_no_pack(cfg) == 0
+    cfg.library_order = [lib.OWN, "TL", "TC"]                      # TC ticked
+    assert w.reopen_no_pack(cfg) == 1
+    assert w.state.seasons[s.key]["status"] == lib.WAITING and not w.state.seasons[s.key]["offer"]
+    w.state.update(s.key, status=lib.NO_PACK, offer=None)           # from before searches were recorded
+    assert w.reopen_no_pack(SimpleNamespace(library_indexer="TL", library_multi=False)) == 0
+    assert w.reopen_no_pack(cfg) == 1                               # TC was never searched
+    assert lib.searched_on({"indexer": "TL"}) == {lib.config_key("TL")}     # an older offer
+    assert lib.searched_on({"order": [lib.OWN, "TL", "TB"]}) == {lib.config_key("TL"), lib.config_key("TB")}
+
+
+def test_a_season_one_of_the_ticked_trackers_has_is_left_alone(tmp_path, library):
+    w, s = _client_worker(tmp_path, library, [("Alpha.2009.S04.720p.WEB-DL-UAi", "TB")],
+                          library_redownload=True, library_multi=True, library_order=[lib.OWN, "TL", "TB"])
+    assert w.client_status(s, w.client(), w.app.cfg)[0] == lib.IN_CLIENT

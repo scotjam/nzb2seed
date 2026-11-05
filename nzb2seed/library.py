@@ -1,10 +1,12 @@
-"""The Library tab: seed a TV library, season by season, from one tracker.
+"""The Library tab: seed a TV library, season by season, from the trackers ticked on the tab.
 
 Most of a library downloaded from Usenet (by Sonarr, or by hand) is in no torrent: it
 earns nothing, and can't be hit-and-run either. This works through it one season at a
-time, always from the tracker chosen on the tab:
+time. The tab keeps an order: "your files" (the library's own release, on any tracker
+ticked) and the ticked trackers, each season taking the first of them that has a usable
+pack - see ``order``:
 
-* **The same release on that tracker** (its season pack has the files you already have,
+* **The same release on a tracker** (its season pack has the files you already have,
   byte for byte): the library's files are hard-linked into the torrent's layout and
   rechecked - nothing is downloaded but the small files the library lacks (.nfo, Sample),
   and the library files are not changed.
@@ -89,6 +91,67 @@ MOVING, MOVED, ORIGINAL_DELETED = "moving", "moved", "original_deleted"   # hand
 CE_FAILED = {"failed", "rolled_back", "mirror_failed", "delete_interrupted"}
 CE_WAITING = {"awaiting_user", "awaiting_permission"}
 OPEN = {WAITING, BUDGET}            # still to be tried by the loop
+
+# ---------------------------------------------------------------- which trackers, in what order
+
+OWN = "your files"                  # in the order: the library's own release, on any tracker ticked
+MAX_TRACKERS = 50
+DRY_RUN_WAIT = ("waiting - cross-eyed is in dry-run mode, so nothing is moved into the library; "
+                "switch it to live and it is moved by itself")
+
+
+def order(cfg) -> list[str]:
+    """The Library's order: "your files" and the ticked trackers, first choice first.
+    With one tracker (the default, ``library_indexer``): your files, then that tracker -
+    as it always was. With several (``library_multi``): ``library_order``, where "your
+    files" is at the top unless moved."""
+    raw = list(getattr(cfg, "library_order", None) or []) if getattr(cfg, "library_multi", False) else []
+    if not raw and getattr(cfg, "library_indexer", ""):
+        raw = [OWN, cfg.library_indexer]
+    out: list[str] = []
+    for x in raw:
+        x = str(x).strip()
+        if x and x not in out and (x == OWN or config_key(x) not in {config_key(y) for y in out if y != OWN}):
+            out.append(x)
+    if not any(x != OWN for x in out):
+        return []                       # no tracker ticked
+    if OWN not in out:
+        out.insert(0, OWN)
+    return out[:MAX_TRACKERS + 1]
+
+
+def trackers(cfg) -> list[str]:
+    """The ticked trackers, first choice first."""
+    return [x for x in order(cfg) if x != OWN]
+
+
+def is_ours(cfg, name: str) -> bool:
+    """Is ``name`` (as Prowlarr or qBittorrent names it) one of the ticked trackers?"""
+    return bool(name) and config_key(name) in {config_key(t) for t in trackers(cfg)}
+
+
+def trackers_text(cfg, joiner: str = " or ") -> str:
+    names = trackers(cfg)
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + joiner + names[-1] if names else "no tracker"
+
+
+def searched_on(o: dict | None) -> set[str]:
+    """The tracker keys a season's search covered (an older offer: those of its order, or
+    its one tracker)."""
+    o = o or {}
+    if "searched" in o:
+        return set(o["searched"])
+    names = o.get("order") or ([o["indexer"]] if o.get("indexer") else [])
+    return {config_key(n) for n in names if n != OWN}
+
+
+def offer_current(o: dict | None, cfg) -> bool:
+    """Was this season's search made with the order the tab has now? (An offer from before
+    there was a list names its one tracker.)"""
+    if not o:
+        return False
+    was = o.get("order") or ([OWN, o["indexer"]] if o.get("indexer") else [])
+    return was == order(cfg)
 
 
 # ---------------------------------------------------------------- names
@@ -540,6 +603,8 @@ class State:
         for it in self.seasons.values():
             if it.get("status") in (SEARCHING, MATCHING, BUILDING):     # cut off by a restart
                 it["status"] = WAITING
+            elif it.get("status") == MOVING and not it.get("batch"):   # handing over to cross-eyed
+                it.update(status=SWAP, move_started=None, why="ready to move - a restart cut off handing it to cross-eyed")
 
     def save(self):
         import json
@@ -578,6 +643,7 @@ class Library:
         self.current: str | None = None
         self.wake = threading.Event()
         self.stop = threading.Event()
+        self.ce_dry: bool | None = None     # cross-eyed's dry-run mode, as last asked (None: not known)
         threading.Thread(target=self._loop, name="library", daemon=True).start()
 
     def _loop(self):
@@ -648,14 +714,14 @@ class Library:
         have = holders(s, packs)
         if not have:
             return WAITING, ""
-        trackers = sorted({t or "an unknown tracker" for _, t in have}, key=str.lower)
-        mine = any(config_key(t) == config_key(cfg.library_indexer) for _, t in have)
+        froms = sorted({t or "an unknown tracker" for _, t in have}, key=str.lower)
+        mine = any(is_ours(cfg, t) for _, t in have)
         if cfg.library_redownload and not mine:
-            return WAITING, (f"in qBittorrent from {', '.join(trackers)} - downloaded again for "
-                             f"{cfg.library_indexer}, as ticked")
+            return WAITING, (f"in qBittorrent from {', '.join(froms)} - downloaded again for "
+                             f"{trackers_text(cfg)}, as ticked")
         names = sorted({n for n, _ in have})
         return IN_CLIENT, (f"in qBittorrent already ({'; '.join(names[:3])}{' ...' if len(names) > 3 else ''}"
-                           f" - from {', '.join(trackers)})")
+                           f" - from {', '.join(froms)})")
 
     def rescan(self):
         cfg = self.app.cfg
@@ -763,15 +829,17 @@ class Library:
         if not self.seasons or time.time() - self.state.scanned_at > RESCAN_HOURS * 3600:
             self.rescan()
         purge_replaced(cfg)
+        self.check_dry_run(cfg)
         self.follow_moves(cfg)
         self.auto_moves(cfg)
-        if not cfg.library_enabled or not cfg.library_indexer or self.current:
+        if not cfg.library_enabled or not trackers(cfg) or self.current:
             return
         try:
             if self.app.guard().holding():
                 return                          # the free-space guard is holding downloads back
         except (OSError, ValueError):
             pass
+        self.reopen_no_pack(cfg)
         budget_left = float(cfg.library_daily_gb or 0) * 1024 ** 3 - self.state.spent_today()
         held = None
         for key in sorted(self.seasons, key=lambda k: (self.seasons[k].show.lower(), self.seasons[k].season)):
@@ -804,6 +872,26 @@ class Library:
                 return
 
 
+
+    def reopen_no_pack(self, cfg) -> int:
+        """Seasons none of the trackers had go back in the queue once a tracker their
+        search did not cover is ticked - not otherwise (nothing changed: nothing to find)."""
+        now = {config_key(n) for n in trackers(cfg)}
+        n = 0
+        one = getattr(cfg, "library_indexer", "")
+        for key, it in list(self.state.seasons.items()):
+            if it.get("status") != NO_PACK:
+                continue
+            if not it.get("offer") and one:
+                # from before searches were recorded, when there was only ever the one tracker
+                it["offer"] = {"searched": [config_key(one)], "none": True}
+            if now - searched_on(it.get("offer")):
+                self.state.update(key, status=WAITING, offer=None,
+                                  why="a tracker was ticked since its search - searched again")
+                n += 1
+        if n:
+            info(f"{n} season(s) with no pack go back in the queue for the newly ticked tracker(s)")
+        return n
 
     def start(self, key: str):
         s = self.seasons[key]
@@ -838,13 +926,13 @@ class Library:
                              "is not on the library's drive")
         chosen = self.kept_pick(cfg, key)
         if chosen:
-            info(f"{cfg.library_indexer}'s pack, as found before: {chosen[0].release.title}")
+            info(f"{chosen[0].release.indexer}'s pack, as found before: {chosen[0].release.title}")
         else:
             st.update(key, status=SEARCHING, why="")
             chosen = self.look(cfg, key)
         if chosen is None:
             o = st.seasons[key].get("offer") or {}
-            st.update(key, status=NO_PACK, why=o.get("why") or f"{cfg.library_indexer} has no usable season pack of it")
+            st.update(key, status=NO_PACK, why=o.get("why") or f"{trackers_text(cfg)} has no usable season pack of it")
             return {"result": "no usable season pack", "extra": {"nothing_built": True}}
         p, data, t, same = chosen
         tmp = kept_torrent(cfg, t.infohash)
@@ -900,47 +988,82 @@ class Library:
         return out
 
     def look(self, cfg, key: str):
-        """The season's one search of the tracker: the pack it would use - (pick, .torrent
-        bytes, torrent, the library's very files?) or None - kept, with its .torrent saved,
-        as the season's "offer"."""
+        """The season's one search of the ticked trackers (one Prowlarr search for all of
+        them): the pack it would use - (pick, .torrent bytes, torrent, the library's very
+        files?) or None - kept, with its .torrent saved, as the season's "offer". The tab's
+        order decides: "your files" takes the library's own release from any ticked tracker;
+        a tracker takes its own best usable pack. The first of them with one wins."""
         s = self.seasons[key]
         q = s.query()
-        info(f"searching {cfg.library_indexer} for \"{q}\"")
+        names = trackers(cfg)
+        info(f"searching {', '.join(names)} for \"{q}\"")
         pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
-        found = candidates(s, pr.search(q, [self.indexer_id(cfg)], TV_CATEGORIES))
-        base = {"indexer": cfg.library_indexer, "at": time.time()}
+        ids = self.indexer_ids(cfg)
+        found = [p for p in candidates(s, pr.search(q, list(ids.values()), TV_CATEGORIES))
+                 if config_key(p.release.indexer) in ids]
+        base = {"order": order(cfg), "searched": sorted(ids), "at": time.time()}
         if not found:
-            self.state.update(key, offer=dict(base, none=True, why=f"{cfg.library_indexer} has no single-season pack of it"))
+            self.state.update(key, offer=dict(base, none=True, why=f"{trackers_text(cfg)} has no single-season pack of it"))
             return None
-        for p in found[:5]:
-            info(f"  {'same release ' if p.same else ''}{p.release.title} ({p.release.size / 1024 ** 3:.1f} GB, "
-                 f"{p.release.seeders} seeders)")
+        for p in found[:8]:
+            info(f"  {'same release ' if p.same else ''}{p.release.title} ({p.release.indexer}, "
+                 f"{p.release.size / 1024 ** 3:.1f} GB, {p.release.seeders} seeders)")
+        fetched: dict = {}
+
+        def get(p: Pick):
+            """(.torrent bytes, torrent) of a pack with every episode the library has, else None."""
+            k = (config_key(p.release.indexer), p.release.guid or p.release.title)
+            if k not in fetched:
+                check_cancel()
+                fetched[k] = None
+                try:
+                    data = pr.fetch(p.release)
+                    t = torrent_mod.parse(data)
+                except (ApiError, OSError, ValueError, torrent_mod.TorrentError) as e:
+                    warn(f"could not get {p.release.title} ({p.release.indexer}): {e}")
+                    return None
+                lacking = covers(t, s)
+                if lacking:
+                    info(f"{p.release.title} ({p.release.indexer}) lacks {', '.join(lacking[:6])} - not used")
+                    return None
+                fetched[k] = (data, t)
+            return fetched[k]
+
+        def own_files():
+            for p in found[:6]:                 # ranked: the library's group and resolution first
+                got = get(p)
+                if got and identical(got[1], s):
+                    return p, got[0], got[1], True
+            return None
+
+        def best_on(tracker: str):
+            chosen = None
+            for p in [p for p in found if config_key(p.release.indexer) == config_key(tracker)][:6]:
+                got = get(p)
+                if not got:
+                    continue
+                if identical(got[1], s):
+                    return p, got[0], got[1], True
+                if p.unsure:
+                    info(f"{p.release.title} is not the library's files, and its year is not the "
+                         "library's - not used")
+                    continue
+                if chosen is None:
+                    chosen = (p, got[0], got[1], False)
+                if not p.same:
+                    break                       # the rest are ranked lower still
+            return chosen
+
         chosen = None
-        for p in found[:6]:
-            check_cancel()
-            try:
-                data = pr.fetch(p.release)
-                t = torrent_mod.parse(data)
-            except (ApiError, OSError, ValueError, torrent_mod.TorrentError) as e:
-                warn(f"could not get {p.release.title}: {e}")
-                continue
-            lacking = covers(t, s)
-            if lacking:
-                info(f"{p.release.title} lacks {', '.join(lacking[:6])} - not used")
-                continue
-            if identical(t, s):
-                chosen = (p, data, t, True)
+        for entry in order(cfg):
+            chosen = own_files() if entry == OWN else best_on(entry)
+            if chosen:
+                if len(names) > 1:
+                    info(f"chosen: {chosen[0].release.title} from {chosen[0].release.indexer}"
+                         + (" - your files" if chosen[3] else ""))
                 break
-            if p.unsure:
-                info(f"{p.release.title} is not the library's files, and its year is not the "
-                     "library's - not used")
-                continue
-            if chosen is None:
-                chosen = (p, data, t, False)
-            if not p.same:
-                break                       # the rest are ranked lower still
         if chosen is None:
-            self.state.update(key, offer=dict(base, none=True, why="no pack on the tracker has every episode the library has"))
+            self.state.update(key, offer=dict(base, none=True, why=f"no pack on {trackers_text(cfg)} has every episode the library has"))
             return None
         p, data, t, same = chosen
         path = kept_torrent(cfg, t.infohash)
@@ -954,9 +1077,9 @@ class Library:
 
     def kept_pick(self, cfg, key: str):
         """The pack the season's earlier search chose, from its saved .torrent - None if
-        there is none (for this tracker)."""
+        there is none (for the order the tab has now)."""
         o = self.state.seasons.get(key, {}).get("offer") or {}
-        if o.get("indexer") != cfg.library_indexer or not o.get("infohash"):
+        if not offer_current(o, cfg) or not o.get("infohash"):
             return None
         try:
             with open(kept_torrent(cfg, o["infohash"]), "rb") as fh:
@@ -964,7 +1087,7 @@ class Library:
             t = torrent_mod.parse(data)
         except (OSError, ValueError, torrent_mod.TorrentError):
             return None
-        r = clients.Release(title=o["title"], protocol="torrent", indexer=o.get("tracker") or cfg.library_indexer,
+        r = clients.Release(title=o["title"], protocol="torrent", indexer=o.get("tracker") or o.get("indexer") or "",
                             indexer_id=0, size=t.total_size, guid="", download_url="", info_url="", publish_date="",
                             grabs=None, seeders=o.get("seeders"), files=o.get("files"))
         return Pick(r, bool(o.get("same")), False), data, t, bool(o.get("same"))
@@ -988,11 +1111,22 @@ class Library:
             rel = dataclasses.replace(rel, seeders=p.release.seeders)
         return execute_run(cfg, opts, rel, [], torrent_data=data)
 
-    def indexer_id(self, cfg) -> int:
-        for i, name in Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key).indexers():
-            if name == cfg.library_indexer:
-                return i
-        raise ValueError(f"Prowlarr has no torrent indexer called {cfg.library_indexer}")
+    def indexer_ids(self, cfg) -> dict[str, int]:
+        """{tracker key: Prowlarr id} of the ticked trackers Prowlarr has; one it no longer
+        has is left out (said in the log), none at all is an error."""
+        have = {config_key(name): i for i, name in Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key).indexers() if name}
+        out, gone = {}, []
+        for name in trackers(cfg):
+            k = config_key(name)
+            if k in have:
+                out[k] = have[k]
+            else:
+                gone.append(name)
+        if not out:
+            raise ValueError(f"Prowlarr has no torrent indexer called {trackers_text(cfg)}")
+        if gone:
+            warn(f"Prowlarr has no torrent indexer called {', '.join(gone)} - left out of the search")
+        return out
 
     # -- the tab's buttons
     def approve(self, key: str) -> dict:
@@ -1001,6 +1135,8 @@ class Library:
         if not it or it.get("status") != SWAP or not s:
             raise ValueError("that season is not waiting for a swap")
         if self.app.cfg.library_cross_eyed_url:
+            if getattr(self, "ce_dry", None):
+                raise ValueError("cross-eyed is in dry-run mode - switch it to live in its header first")
             return self.move_in(key, it, s)        # your files are not touched: no seeding check
         t = self._torrent(it.get("infohash") or "")
         busy = seeded_from(swap_plan(t, it["root"], s), self.in_client())
@@ -1039,6 +1175,9 @@ class Library:
                 raise ValueError("the season is no longer in the library")
             root, show_dir = it.get("root") or "", os.path.dirname(s.dir.rstrip("/"))
             ce = CrossEyed(cfg.library_cross_eyed_url, cfg.library_cross_eyed_prefix)
+            if ce.dry_run():
+                self.state.update(key, status=SWAP, batch=None, move_started=None, why=DRY_RUN_WAIT)
+                return
             a = ce.preview(root, show_dir)
             if not any(x.get("hash") == it.get("infohash") for x in a.get("inside") or []):
                 for _ in range(120):                    # up to an hour
@@ -1169,7 +1308,8 @@ class Library:
             elif states & CE_WAITING:
                 why = f"cross-eyed needs your answer on its Jobs page (batch {it['batch']})"
             elif dry and not started:
-                why = f"approved - held by cross-eyed's dry-run mode until you run it on its Jobs page (batch {it['batch']})"
+                why = (f"queued in cross-eyed, held by its dry-run mode - switch it to live and it is moved "
+                       f"by itself (batch {it['batch']})")
             elif not started:
                 why = f"approved - queued in cross-eyed, waiting its turn (batch {it['batch']})"
             else:
@@ -1189,6 +1329,17 @@ class Library:
             return False
         return moves_done(jobs)
 
+    def check_dry_run(self, cfg) -> bool | None:
+        """Ask cross-eyed whether it is in dry-run mode (it then only queues moves and waits):
+        moves are not offered while it is."""
+        self.ce_dry = None
+        if getattr(cfg, "library_cross_eyed_url", ""):
+            try:
+                self.ce_dry = CrossEyed(cfg.library_cross_eyed_url, cfg.library_cross_eyed_prefix).dry_run()
+            except (ApiError, ValueError, OSError):
+                pass
+        return self.ce_dry
+
     def auto_moves(self, cfg):
         """The Library tab's two ticks (cross-eyed only): seasons ready to swap are moved into
         the library one at a time, and moved seasons' original folders are deleted - each
@@ -1203,7 +1354,7 @@ class Library:
                     self.delete_original(key)
                 except (ValueError, OSError):
                     pass                        # not yet (still checking, ...) - tried again next time
-        if getattr(cfg, "library_auto_move", False):
+        if getattr(cfg, "library_auto_move", False) and not getattr(self, "ce_dry", None):
             if any(it.get("status") == MOVING for it in self.state.seasons.values()):
                 return                          # one move at a time
             for key in sorted(self.state.seasons, key=lambda k: (self.state.seasons[k].get("show") or "").lower()):
@@ -1291,16 +1442,16 @@ class Library:
         cfg = self.app.cfg
         if key not in self.seasons or key == self.current:
             raise ValueError("that season cannot be looked up now")
-        if not cfg.library_indexer:
-            raise ValueError("choose the tracker first")
+        if not trackers(cfg):
+            raise ValueError("tick a tracker first")
         self.look(cfg, key)
 
     def again(self, key: str):
-        """A season already in the client: get it for the chosen tracker all the same."""
+        """A season already in the client: get it for the ticked trackers all the same."""
         if key not in self.state.seasons or key == self.current:
             raise ValueError("nothing to download again")
         self.state.update(key, status=WAITING, again=True,
-                          why=f"downloading again for {self.app.cfg.library_indexer}, as you asked")
+                          why=f"downloading again for {trackers_text(self.app.cfg)}, as you asked")
         self.wake.set()
 
     def _torrent(self, infohash: str) -> torrent_mod.Torrent:
@@ -1330,7 +1481,9 @@ class Library:
     def items(self) -> dict:
         out = [dict(v, key=k, running=k == self.current) for k, v in self.state.seasons.items()]
         rows = self.torrent_states() if any(x.get("infohash") for x in out) else {}
+        cfg = getattr(self.app, "cfg", None)
         for x in out:
+            x["offer_current"] = offer_current(x.get("offer"), cfg) if cfg is not None else False
             if x.get("torrent"):
                 x["new_size"], x["new_files"] = self._new_files(x)
             if x.get("infohash") and x.get("status") not in (WAITING, IN_CLIENT, SEEDED, SEEDED_STOPPED, NO_PACK, SKIPPED):
@@ -1341,7 +1494,8 @@ class Library:
         return {"seasons": sorted(out, key=lambda x: ((x.get("show") or "").lower(), x.get("season") or 0)),
                 "counts": dict(counts),
                 "deletable_bytes": sum(x.get("size") or 0 for x in out if x.get("status") == MOVED), "spent_today": self.state.spent_today(),
-                "scanned_at": self.state.scanned_at, "current": self.current}
+                "scanned_at": self.state.scanned_at, "current": self.current,
+                "cross_eyed_dry_run": bool(getattr(self, "ce_dry", None)) if getattr(cfg, "library_cross_eyed_url", "") else False}
 
 
 class CrossEyed:
@@ -1395,6 +1549,10 @@ class CrossEyed:
     def cancel(self, batch_id: str):
         """Drop the batch's jobs that have not started (and roll back any that have)."""
         self._req("POST", "/jobs/cancel-active", timeout=120, data={"batch_id": batch_id})
+
+    def dry_run(self) -> bool:
+        """Is cross-eyed in dry-run mode (moves queued, run only by hand)?"""
+        return bool(self._req("GET", "/api/jobs", timeout=120).json().get("dry_run"))
 
     def batch(self, batch_id: str) -> tuple[list[dict], bool]:
         d = self._req("GET", "/api/jobs", timeout=120, params={"batch_id": batch_id}).json()

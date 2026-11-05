@@ -93,9 +93,11 @@ class Config:
     auto_searches_per_hour: int = 40   # Prowlarr searches automatic builds may make per hour
     autobrr_url: str = ""
     autobrr_key: str = ""
-    # the Library tab: seed the TV library from one tracker (see library.py)
+    # the Library tab: seed the TV library from one tracker, or several in order (see library.py)
     library_enabled: bool = False
-    library_indexer: str = ""          # the Prowlarr torrent indexer every season pack comes from
+    library_indexer: str = ""          # one tracker: the Prowlarr torrent indexer every season pack comes from
+    library_multi: bool = False        # several trackers instead, in library_order
+    library_order: list = field(default_factory=list)   # "your files" and the ticked trackers, first choice first
     library_roots: list = field(default_factory=list)   # TV folders (Show/Season N/...) as this machine sees them
     library_output_dir: str = ""       # where the torrents go - on the same disk as the library
     library_daily_gb: float = 200.0    # Usenet downloads a day for seasons rebuilt from scratch
@@ -179,6 +181,8 @@ LAYOUT = [
     ("automatic", "searches_per_hour", "auto_searches_per_hour"),
     ("library", "enabled", "library_enabled"),
     ("library", "indexer", "library_indexer"),
+    ("library", "multi", "library_multi"),
+    ("library", "order", "library_order"),
     ("library", "roots", "library_roots"),
     ("library", "output_dir", "library_output_dir"),
     ("library", "daily_gb", "library_daily_gb"),

@@ -59,3 +59,17 @@ def test_library_folders_must_share_the_first_ones_drive(server, tmp_path, monke
     status, r = call(url + "/api/library/save", *AUTH, body={"enabled": True, "indexer": "TL", "roots": [str(a), str(b)],
                                                              "output_dir": str(a)})
     assert status == 400                                    # "... has to be on the same drive"
+
+
+def test_several_library_trackers_are_saved_in_order_and_kept_in_bounds(server, tmp_path):  # noqa: F811
+    from nzb2seed import config as config_mod, library as lib
+    app, url = server
+    status, r = call(url + "/api/library/save", *AUTH, body={"multi": True, "order": [
+        "TrackerB", lib.OWN, "  TrackerA  ", "TrackerB", 7, "x" * 500] + [f"T{i}" for i in range(200)]})
+    assert status == 200 and r["settings"]["multi"] is True
+    order = r["settings"]["order"]
+    assert order[:4] == ["TrackerB", lib.OWN, "TrackerA", "x" * config_mod.MAX_TRACKER_NAME]
+    assert len(order) <= lib.MAX_TRACKERS + 1
+    assert config_mod.load(app.cfg.path).library_order == order      # in the config file, as shown
+    status, _ = call(url + "/api/library/save", *AUTH, body={"enabled": True, "multi": True, "order": [lib.OWN]})
+    assert status == 400                                    # "tick a tracker first"

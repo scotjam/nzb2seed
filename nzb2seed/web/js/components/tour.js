@@ -29,7 +29,7 @@ export const STEPS = [
           "build your tracker stats: new releases seed from the moment they appear, when demand is highest." },
   { tab: "library", title: "6. Library: seed what you already own",
     text: "Got a library from Usenet, Sonarr/Radarr or a tracker that has closed? Let it boost your " +
-          "torrent tracker stats. Pick one tracker and your TV folders: seasons " +
+          "torrent tracker stats. Pick a tracker (or several, in order) and your TV folders: seasons " +
           "the tracker has as the very same release are seeded straight away, the rest are built within a " +
           "daily budget - more seeding size, ratio and bonus points from shows you already own. Nothing in " +
           "your library is swapped or deleted without your approval." },

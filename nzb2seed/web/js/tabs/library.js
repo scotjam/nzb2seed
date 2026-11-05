@@ -1,7 +1,7 @@
-// The Library tab: seed the TV library from one tracker, a season at a time. Seasons the
-// tracker has as the very same release are linked into a torrent (nothing downloaded);
-// the rest are built from Usenet within a daily budget and then offered as a swap, which
-// only ever happens when you approve it.
+// The Library tab: seed the TV library from one tracker (or several, in an order you set),
+// a season at a time. Seasons a tracker has as the very same release are linked into a
+// torrent (nothing downloaded); the rest are built from Usenet within a daily budget and
+// then offered as a swap, which only ever happens when you approve it.
 import { html, useEffect, useState } from "../lib.js";
 import { api, onChange } from "../api.js";
 import { openJob, toast } from "../store.js";
@@ -21,14 +21,27 @@ const FILTERS = [["all", "All"], ["swap", "Ready to swap"], ["moved", "Original 
                  ["no_pack", "No pack"], ["short", "Short of 100%"], ["failed", "Stopped"], ["already_seeded", "Already seeding"], ["complete_stopped", "Complete (stopped)"],
                  ["in_client", "Already in the torrent client"]];
 const gb = (n) => `${((n || 0) / 1024 ** 3).toFixed(1)} GB`;
+// in the order of several trackers: the library's own release, on any tracker ticked
+export const OWN = "your files";
+
+// the trackers a season can come from, as a phrase: "A", "A or B", "A, B or C"
+export function trackersText(names) {
+  return names.length <= 1 ? (names[0] || "the chosen tracker") : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
+}
+// the ticked trackers of the settings, first choice first
+function chosenTrackers(s) {
+  return s.multi ? (s.order || []).filter(x => x !== OWN) : (s.indexer ? [s.indexer] : []);
+}
 
 function formFrom(s) {
-  return { indexer: s.indexer || "", roots: [...(s.roots || [])], output_dir: s.output_dir || "",
+  const order = (s.order || []).length ? [...s.order] : [OWN, ...(s.indexer ? [s.indexer] : [])];
+  return { indexer: s.indexer || "", multi: !!s.multi, order: order.includes(OWN) ? order : [OWN, ...order],
+           roots: [...(s.roots || [])], output_dir: s.output_dir || "",
            daily_gb: s.daily_gb ?? 200, keep_replaced_days: s.keep_replaced_days ?? 14, redownload: !!s.redownload,
            cross_eyed_url: s.cross_eyed_url || "", auto_move: !!s.auto_move, auto_delete: !!s.auto_delete, hold_cross_seed: s.hold_cross_seed !== false };
 }
 function toSettings(f) {
-  return { indexer: f.indexer, roots: f.roots, output_dir: f.output_dir,
+  return { indexer: f.indexer, multi: !!f.multi, order: f.order, roots: f.roots, output_dir: f.output_dir,
            daily_gb: Math.max(0, Number(f.daily_gb) || 0),
            keep_replaced_days: Math.max(0, Number(f.keep_replaced_days) || 0), redownload: !!f.redownload,
            cross_eyed_url: (f.cross_eyed_url || "").trim(), auto_move: !!f.auto_move, auto_delete: !!f.auto_delete, hold_cross_seed: !!f.hold_cross_seed };
@@ -114,6 +127,9 @@ export function LibraryTab({ active }) {
     || (filter === "open" && ["waiting", "budget", "searching", "matching", "building"].includes(it.status)));
   const swaps = counts.swap || 0;
   const moved = counts.moved || 0;
+  const ceDry = !!state?.cross_eyed_dry_run;                    // cross-eyed only queues moves: none offered
+  const autoMove = !!(s.cross_eyed_url && s.auto_move) && !ceDry;  // the ticks only act with cross-eyed's address
+  const autoDelete = !!(s.cross_eyed_url && s.auto_delete);
   async function deleteOriginal(it) {
     if (!confirm(`Delete your original folder of ${it.show}, season ${it.season}?\n\n${it.dir}\n${gb(it.size)}\n\nIts torrent seeds at 100.0% from\n${it.root}\nThis cannot be undone.`)) return;
     act("delete_original", it.key);
@@ -122,7 +138,7 @@ export function LibraryTab({ active }) {
     <div class="autotop">
       <div>
         <h1 style="margin:0">Library</h1>
-        <p class="lede" style="margin:.3em 0 0">Seeds your TV library from one tracker, a season at a time. Where the tracker has the very release you have, your files are linked into its torrent - nothing is downloaded. Otherwise its season pack is built from Usenet, and once it seeds at 100.0% you decide whether it replaces your files.</p>
+        <p class="lede" style="margin:.3em 0 0">Seeds your TV library from one tracker - or several, in an order you set - a season at a time. Where a tracker has the very release you have, your files are linked into its torrent - nothing is downloaded. Otherwise its season pack is built from Usenet, and once it seeds at 100.0% you decide whether it replaces your files.</p>
         <p class="lede" style="margin:.3em 0 0">Useful if your library came from other sources - Usenet,
           Sonarr/Radarr, a tracker that has since closed - and you want it to boost your torrent tracker stats
           (seeding size, ratio, bonus points, seeding time) without downloading it again over BitTorrent.</p>
@@ -149,12 +165,22 @@ export function LibraryTab({ active }) {
     </div>
     <div class="autogrid">
       <div class="panel">
-        <h2>Tracker and folders</h2>
-        <label class="field"><span>Tracker every season pack comes from</span>
+        <h2>Trackers and folders</h2>
+        <fieldset class="field radios"><legend>Where season packs come from</legend>
+          <label class="check"><input type="radio" name="libmulti" checked=${!form.multi}
+              onChange=${() => { setForm({ ...form, multi: false }); setSaved("Press Save to keep it."); }} />
+            <span>One tracker (recommended)</span></label>
+          <label class="check"><input type="radio" name="libmulti" checked=${form.multi}
+              onChange=${() => { setForm({ ...form, multi: true }); setSaved("Press Save to keep it."); }} />
+            <span>Several trackers, in an order you set</span></label>
+        </fieldset>
+        ${!form.multi ? html`<label class="field"><span>Tracker every season pack comes from</span>
           <select value=${form.indexer} onChange=${set("indexer")}>
             <option value="">- choose -</option>
             ${[...new Set([form.indexer, ...indexers].filter(Boolean))].map(n => html`<option value=${n}>${n}</option>`)}
-          </select></label>
+          </select></label>`
+          : html`<${TrackerOrder} order=${form.order} all=${indexers}
+              set=${(order) => { setForm({ ...form, order }); setSaved("Press Save to keep it."); }} />`}
         <div class="field" style="margin-top:8px"><span>TV library folders (each holding Show/Season N/...)</span>
           ${form.roots.length ? html`<ul class="pathlist">${form.roots.map(r => html`<li key=${r}><code>${r}</code>
               <button type="button" class="btn" onClick=${() => setForm(f => ({ ...f, roots: f.roots.filter(x => x !== r) }))}>Remove</button></li>`)}</ul>`
@@ -183,8 +209,8 @@ export function LibraryTab({ active }) {
             title="With cross-eyed, approving a season moves its torrent (and its cross-seed copies) into the show's folder under its own name; your season folder is kept until you delete it." /></label>
         <label class="check" style="display:flex;gap:8px;align-items:baseline;margin-top:10px">
           <input type="checkbox" checked=${form.redownload} onChange=${(e) => { setForm({ ...form, redownload: e.target.checked }); setSaved("Press Save to keep it."); }} />
-          <span>Redownload for this tracker (${form.indexer || "the chosen tracker"}) even if already in torrent client
-            <small class="status" style="display:block">Off: a season qBittorrent already has a pack of (another release, or from another tracker) is left alone. A season this tracker already seeds is always left alone.</small></span></label>
+          <span>Redownload for ${form.multi ? "these trackers" : "this tracker"} (${trackersText(chosenTrackers(form))}) even if already in torrent client
+            <small class="status" style="display:block">Off: a season qBittorrent already has a pack of (another release, or from another tracker) is left alone. A season ${form.multi ? "one of these trackers" : "this tracker"} already seeds is always left alone.</small></span></label>
         <div class="actions" style="margin-top:12px"><button type="button" class="btn primary" onClick=${save}>Save</button>
           <button type="button" class="btn" onClick=${scan}>Scan the library now</button>
           <small class="status">${saved}</small></div>
@@ -195,8 +221,20 @@ export function LibraryTab({ active }) {
           ${Object.entries(LABEL).filter(([k]) => counts[k]).map(([k, v]) => html`<span>${v}: <b>${counts[k]}</b></span>`)}
           ${!seasons.length && html`<span class="status">Nothing scanned yet - add the library's folders and Save.</span>`}
         </div>
-        ${moved > 0 && html`<p class="status" style="margin-top:10px"><b>${plural(moved, "season")} seed from the library</b> - their original folders (${gb(state.deletable_bytes)}) can be deleted: filter "Original can be deleted".</p>`}
-        ${swaps > 0 && html`<p class="status" style="margin-top:10px"><b>${plural(swaps, "season")} ready to swap</b> - they seed at 100.0% now; your files stay as they are until you approve each one.</p>`}
+        ${ceDry && html`<p class="warnbox" style="margin-top:10px"><b>cross-eyed is in dry-run mode</b>, so nothing is moved into the library.
+          Switch it to live in <a href=${ceJobs(s.cross_eyed_url)} target="_blank" rel="noopener noreferrer">cross-eyed</a>'s header
+          for moves to go ahead - seasons ready to swap, and moves already queued there, then move by themselves.
+          (Dry-run starts again from cross-eyed's DRY_RUN setting whenever it restarts - set DRY_RUN=false there to keep it live.)</p>`}
+        ${moved > 0 && html`<p class="status" style="margin-top:10px"><b>${plural(moved, "season")} seed from the library</b> - ${autoDelete
+          ? html`their original folders (${gb(state.deletable_bytes)}) are deleted by themselves once checked (auto delete is on).`
+          : html`their original folders (${gb(state.deletable_bytes)}) can be deleted: filter "Original can be deleted".`}</p>`}
+        ${swaps > 0 && html`<p class="status" style="margin-top:10px"><b>${plural(swaps, "season")} ready to swap</b> - they seed at 100.0% now; ${ceDry
+          ? "they wait until cross-eyed is live (above)."
+          : autoMove
+          ? (autoDelete ? "each is moved into the library by itself, one at a time, then its original folder is deleted (auto move and auto delete are on)."
+                        : "each is moved into the library by itself, one at a time (auto move is on); the original folders are kept until you delete them.")
+          : (autoDelete ? "nothing moves until you approve each one - once moved, its original folder is deleted by itself (auto delete is on)."
+                        : "your files stay as they are until you approve each one.")}</p>`}
         <small class="status" style="display:block;margin-top:10px">Only single-season packs with every episode you have are used. Seasons are taken in alphabetical order; Prowlarr searches count against the Automatic tab's hourly limit.</small>
       </div>
     </div>
@@ -206,14 +244,63 @@ export function LibraryTab({ active }) {
           ${FILTERS.map(([k, v]) => html`<option value=${k}>${v}</option>`)}
         </select></div>
       <div class="alist">
-        ${shown.length ? shown.map(it => html`<${SeasonRow} key=${it.key} it=${it} act=${act} approve=${approve} deleteOriginal=${deleteOriginal} tracker=${s.indexer} moveWith=${!!s.cross_eyed_url} />`)
+        ${shown.length ? shown.map(it => html`<${SeasonRow} key=${it.key} it=${it} act=${act} approve=${approve} deleteOriginal=${deleteOriginal}
+            tracker=${chosenTrackers(s).length ? trackersText(chosenTrackers(s)) : ""} moveWith=${!!s.cross_eyed_url} ceDry=${ceDry} />`)
           : html`<div class="empty">Nothing here.</div>`}
       </div>
     </div>`;
 }
 
-function SeasonRow({ it, act, approve, deleteOriginal, tracker, moveWith }) {
-  const offer = it.offer && it.offer.indexer === tracker ? it.offer : null;
+/* Several trackers: "your files" and the ticked trackers in the order they are tried (first
+   choice at the top, moved with the arrows), then the trackers not ticked. A season takes
+   the first entry that has a usable pack. */
+function TrackerOrder({ order, all, set }) {
+  const ticked = order;
+  const rest = all.filter(n => !ticked.includes(n)).sort((a, b) => a.localeCompare(b));
+  const move = (i, by) => {
+    const j = i + by;
+    if (j < 0 || j >= ticked.length) return;
+    const next = [...ticked];
+    [next[i], next[j]] = [next[j], next[i]];
+    set(next);
+  };
+  const label = (x) => x === OWN
+    ? html`<b>Your files</b> <small class="status">- the very release you have, on any tracker ticked (nothing downloaded)</small>`
+    : html`${x}${all.length && !all.includes(x) ? html` <small class="status">(not in Prowlarr now)</small>` : null}`;
+  return html`<div class="field"><span>Trackers, first choice at the top</span>
+    <ol class="trackorder">
+      ${ticked.map((x, i) => html`<li key=${x}>
+        ${x === OWN ? html`<span class="tick"></span>`
+          : html`<input type="checkbox" checked aria-label=${`Use ${x}`} onChange=${() => set(ticked.filter(y => y !== x))} />`}
+        <span class="name">${label(x)}</span>
+        <button type="button" class="btn" disabled=${i === 0} aria-label=${`Move ${x} up`} onClick=${() => move(i, -1)}>↑</button>
+        <button type="button" class="btn" disabled=${i === ticked.length - 1} aria-label=${`Move ${x} down`} onClick=${() => move(i, 1)}>↓</button>
+      </li>`)}
+    </ol>
+    ${rest.length ? html`<ul class="trackorder rest">${rest.map(n => html`<li key=${n}>
+        <input type="checkbox" aria-label=${`Use ${n}`} onChange=${() => set([...ticked, n])} /><span class="name">${n}</span></li>`)}</ul>` : null}
+    <small class="status" style="display:block">Each season takes the first entry with a usable pack: <b>Your files</b> is the very
+      release you have on any ticked tracker (linked, nothing downloaded); a tracker is its own best pack (built from Usenet
+      if it is another release). With Your files at the top, any tracker that has your release wins; move it down to
+      prefer a tracker's pack over it. One Prowlarr search covers them all.</small>
+  </div>`;
+}
+
+// cross-eyed's Jobs page, as the browser reaches it: an address on the server itself
+// (127.0.0.1, localhost) is the server's own name seen from here
+function ceJobs(url) {
+  try {
+    const u = new URL(url);
+    if (/^(127\.|localhost$|\[::1\]$|0\.0\.0\.0$)/.test(u.hostname)) u.hostname = location.hostname;
+    return u.origin + u.pathname.replace(/\/+$/, "") + "/jobs";
+  } catch { return url; }
+}
+
+function SeasonRow({ it, act, approve, deleteOriginal, tracker, moveWith, ceDry }) {
+  // waiting on cross-eyed (a move not started yet, dry-run, or its Jobs page wants an answer): in red
+  const ceWait = (it.status === "moving" && !it.move_started) || (it.status === "swap" && moveWith && ceDry)
+    || /cross-eyed needs your answer|cross-eyed's last step is waiting/.test(it.why || "");
+  const offer = it.offer && it.offer_current ? it.offer : null;
   return html`
     <div class="arow">
       <div class="title">${it.show} - season ${it.season}</div>
@@ -228,9 +315,11 @@ function SeasonRow({ it, act, approve, deleteOriginal, tracker, moveWith }) {
         ${it.tracker ? html`<span>${it.tracker}</span>` : null}
         ${it.qbit ? html`<span class=${"qb " + (it.qbit === "seeding" ? "ok" : /^stopped|missing|not in qB/.test(it.qbit) ? "warn" : "")}>qBittorrent: ${it.qbit}</span>` : null}
         ${it.moved_to ? html`<span>in ${it.moved_to.split("/").pop()}</span>` : null}</div>` : null}
-      ${it.why && html`<div class="status">${it.why}</div>`}
+      ${it.why && html`<div class=${"status" + (ceWait ? " ce-wait" : "")}>${it.why}</div>`}
       ${!it.running && html`<div class="actions">
-        ${it.status === "swap" && html`<button type="button" class="btn primary" onClick=${() => approve(it)}>${moveWith ? "Move into the library" : "Approve swap"}</button>
+        ${it.status === "swap" && html`${moveWith && ceDry
+            ? html`<span class="status ce-wait">Waits until cross-eyed is live (dry-run mode is on)</span>`
+            : html`<button type="button" class="btn primary" onClick=${() => approve(it)}>${moveWith ? "Move into the library" : "Approve swap"}</button>`}
           <button type="button" class="btn" onClick=${() => act("keep", it.key)} title="Keep your files; the torrent goes on seeding its own copy">Keep mine</button>`}
         ${it.status === "moved" && html`<button type="button" class="btn" onClick=${() => deleteOriginal(it)}>Delete original (${gb(it.size)})</button>`}
         ${it.status === "moving" && html`<span class="status"><b>Approved</b>${it.move_started ? " - cross-eyed is moving it; it can no longer be cancelled" : ""}</span>
@@ -238,14 +327,14 @@ function SeasonRow({ it, act, approve, deleteOriginal, tracker, moveWith }) {
             onClick=${() => act("cancel_move", it.key)}>Cancel</button>`}`}
         ${["failed", "no_pack", "skipped", "kept", "budget", "short"].includes(it.status) && html`<button type="button" class="btn" onClick=${() => act("retry", it.key)}>Try again</button>`}
         ${["in_client", "already_seeded", "complete_stopped"].includes(it.status) && tracker && !offer && html`<button type="button" class="btn"
-            title="Search ${tracker} for this season once and show its pack - nothing is downloaded" onClick=${() => act("check", it.key)}>Check ${tracker}'s pack</button>`}
+            title="Search ${tracker} for this season once and show the pack it would use - nothing is downloaded" onClick=${() => act("check", it.key)}>Look for a pack on ${tracker}</button>`}
         ${["in_client", "already_seeded", "complete_stopped"].includes(it.status) && tracker && !(offer && offer.none) && html`<button type="button" class="btn"
-            title="Build or link this tracker's season pack even though qBittorrent has this season already" onClick=${() => act("again", it.key)}>Download again for this tracker (${tracker})</button>`}
+            title="Build or link the season pack even though qBittorrent has this season already" onClick=${() => act("again", it.key)}>Download again for ${tracker}</button>`}
         ${["waiting", "budget", "no_pack", "failed", "short"].includes(it.status) && html`<button type="button" class="btn" onClick=${() => act("skip", it.key)}>Skip</button>`}
       </div>`}
       ${["in_client", "already_seeded", "complete_stopped"].includes(it.status) && tracker && html`<div class="status">${!offer
-        ? `${tracker} is not searched for seasons qBittorrent has already by default - "Check ${tracker}'s pack" looks once`
+        ? `${tracker} is not searched for seasons qBittorrent has already by default - "Look for a pack on ${tracker}" looks once`
         : offer.none ? (offer.why || `${tracker} has no single-season pack of it`)
-        : html`${tracker}'s pack: <b>${offer.title}</b> - ${gb(offer.size)}${offer.files != null ? `, ${plural(offer.files, "file")}` : ""}${offer.seeders != null && offer.seeders >= 0 ? `, ${plural(offer.seeders, "seeder")}` : ""}${offer.same ? " - the same release as yours (linked, nothing downloaded)" : ""}`}</div>`}
+        : html`${offer.tracker || tracker}'s pack: <b>${offer.title}</b> - ${gb(offer.size)}${offer.files != null ? `, ${plural(offer.files, "file")}` : ""}${offer.seeders != null && offer.seeders >= 0 ? `, ${plural(offer.seeders, "seeder")}` : ""}${offer.same ? " - the same release as yours (linked, nothing downloaded)" : ""}`}</div>`}
     </div>`;
 }
