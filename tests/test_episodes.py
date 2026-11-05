@@ -7,7 +7,7 @@ import pytest
 from nzb2seed import episodes, metadata
 
 NULL = chr(92) + "N"                    # IMDb's "no value"
-SHOW = {"id": 7, "name": "Kim & Lou", "premiered": "2020-09-28", "imdb": "tt0000007", "tvdb": 70}
+SHOW = {"id": 7, "name": "Ann & Bob", "premiered": "2020-09-28", "imdb": "tt0000007", "tvdb": 70}
 
 TMDB_SEARCH = ('<a href="/tv/555-kim-lou-winter">x</a><span class="release_date">1 september 2022</span>'
                '<a href="/tv/111-kim-lou">x</a><span class="release_date">28 september 2020</span>')

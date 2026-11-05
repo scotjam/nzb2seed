@@ -610,13 +610,13 @@ def test_another_codec_is_another_encode():
 
 
 def test_a_rard_release_takes_its_group_from_the_release_name():
-    """Scene archives are named group first ('btcriso-vbr11011261.r00'): read as a name,
+    """Scene archives are named group first ('iajypzv-vbr11011261.r00'): read as a name,
     the short name looked like the group and every post of the release was turned away."""
-    name = "Veeam.Backup.and.Replication.v11.0.1.1261-BTCRiSO"
-    files = {"btcriso-vbr11011261.rar": rnd(30_000, 1), "btcriso-vbr11011261.r00": rnd(30_000, 2),
-             "btcriso-vbr11011261.sfv": b"; sfv", "btcriso.nfo": b"nfo"}
+    name = "Veeam.Backup.and.Replication.v11.0.1.1261-IAJYpZV"
+    files = {"iajypzv-vbr11011261.rar": rnd(30_000, 1), "iajypzv-vbr11011261.r00": rnd(30_000, 2),
+             "iajypzv-vbr11011261.sfv": b"; sfv", "iajypzv.nfo": b"nfo"}
     t = parse(make_torrent(name, files))
-    assert need_for(t, t.name, True).group == "btcriso"
+    assert need_for(t, t.name, True).group == "iajypzv"
     need = pipeline.build_units(t, t.name).need
-    assert need.group == "btcriso"
+    assert need.group == "iajypzv"
     assert pipeline._fits(need, rel(name + "-xpost", t.total_size + 1000, "p")) is None

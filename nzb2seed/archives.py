@@ -166,5 +166,37 @@ def extract(first_volume: str, members: list[str], dest: str):
     raise RuntimeError(first_error)
 
 
+def salvage(first_volume: str, members: list[str], dest: str) -> list[str]:
+    """Extract ``members`` from a damaged archive set, keeping what comes out: a download
+    SABnzbd could not repair still holds most of its data, and a torrent's piece check
+    finds the good parts of a file unpacked from it. Never overwrites; never raises for a
+    broken set - returns the files it wrote (any, however short)."""
+    t = tool()
+    if t is None:
+        return []
+    kind, exe = t
+    os.makedirs(dest, exist_ok=True)
+    before = _files_in(dest)
+    unrar = shutil.which("unrar")
+    rar = first_volume.lower().endswith(".rar")
+    for pw in _candidates(first_volume):
+        if rar and unrar:                       # -kb: keep broken extracted files
+            cmd = [unrar, "x", "-kb", "-o-", f"-p{pw}", "-y", first_volume, *members, dest + os.sep]
+        elif kind == "7z":
+            cmd = [exe, "x", "-aos", f"-p{pw}", "-y", f"-o{dest}", first_volume, *members]
+        else:
+            cmd = [exe, "x", "-kb", "-o-", f"-p{pw}", "-y", first_volume, *members, dest + os.sep]
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=6 * 3600)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        wrote = sorted(_files_in(dest) - before)
+        if wrote:
+            if pw != "-":
+                _works[first_volume] = pw
+            return wrote
+    return []
+
+
 def _files_in(d: str) -> set[str]:
     return {os.path.join(root, n) for root, _, ns in os.walk(d) for n in ns}

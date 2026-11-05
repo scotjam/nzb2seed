@@ -23,10 +23,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import urlsplit
 
+from . import btledger
 from . import config as config_mod
 from . import report
 from .clients import ApiError, Autobrr, Prowlarr, QBittorrent, Release, SABnzbd
 from . import inbox as inbox_mod
+from . import library as library_mod
 from . import metadata
 from . import season as season_mod
 from . import series as series_mod
@@ -464,6 +466,21 @@ class App:
         except OSError as e:
             print(f"could not learn from the history: {e}", flush=True)
 
+    def start_library(self):
+        """The Library tab's worker (idle while switched off)."""
+        self.library = library_mod.Library(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
+                                                              "library.json"))
+        self.library.state.on_save = lambda: self.events.publish("library")
+        # qBittorrent's on-finished program (cross-seed) goes through nzb2seed while the tab is on
+        from . import hook as hook_mod
+        self.hook = hook_mod.Hook(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "hook.json"))
+        threading.Thread(target=self.hook.sync, name="hook-sync", daemon=True).start()
+
+    def start_mend(self):
+        """Stopped torrents short of 100%: finished from another torrent's good files (mend.py)."""
+        from . import mend as mend_mod
+        self.mend = mend_mod.Mender(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "mend.json"))
+
     def demand_stats(self) -> "worth_mod.Stats":
         return worth_mod.Stats(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
                                             "demand.json"))
@@ -542,7 +559,10 @@ class App:
         size = None
         try:
             with open(x.get("torrent_path") or "", "rb") as fh:
-                size = torrent_mod.parse(fh.read()).total_size
+                t_ = torrent_mod.parse(fh.read())
+            size = t_.total_size
+            if job.kind == "library":
+                name = t_.name               # its title names the season, not the release
         except (OSError, ValueError, torrent_mod.TorrentError):
             pass
         torrents, _ = search(self.cfg, name)
@@ -627,16 +647,29 @@ class App:
     def nearly_limit_text(self, tracker: str) -> str:
         return config_mod.limit_text(self.cfg, tracker)
 
-    def short_enough(self, fraction_missing: float, bytes_missing: int | None, tracker: str) -> bool:
-        """Little enough to download from this tracker - by its own limit (none set: nothing)."""
-        return config_mod.within_limit(self.cfg, tracker, fraction_missing, bytes_missing)
+    def short_enough(self, fraction_missing: float, bytes_missing: int | None, tracker: str,
+                     headroom: float = config_mod.HEADROOM) -> bool:
+        """Little enough to download from this tracker - by its own limit (none set: nothing).
+        ``headroom``: keep that share of the limit free (decisions nzb2seed takes by itself)."""
+        return config_mod.within_limit(self.cfg, tracker, fraction_missing, bytes_missing, headroom)
 
-    def nearly_enough(self, extra: dict | None) -> bool:
+    @staticmethod
+    def counting_earlier(frac: float, short: int | None, total: int | None, before: int):
+        """(share, bytes) to download, counting what earlier starts of the torrent took."""
+        if not before:
+            return 1 - frac, short
+        if not total:
+            return 1 - frac, (short or 0) + before
+        need = (short if short is not None else round(total * (1 - frac))) + before
+        return need / total, need
+
+    def nearly_enough(self, extra: dict | None, headroom: float = config_mod.HEADROOM) -> bool:
         if not extra or extra.get("have") is None:
             return False
         if extra.get("seeders") == 0:
             return False            # nobody to download the rest from: it could never finish
-        return self.short_enough(1 - float(extra["have"]), extra.get("short"), extra.get("tracker") or "")
+        return self.short_enough(1 - float(extra["have"]), extra.get("short"), extra.get("tracker") or "",
+                                 headroom)
 
     @staticmethod
     def client_tag(tracker: str, info: dict | None = None) -> str:
@@ -684,7 +717,10 @@ class App:
             rest = f"{math.ceil((1 - frac) * 1000000) / 10000:.4f}%"
             report.info(f"{pipeline_mod.exact_pct(frac)} is already here; downloading the other {rest} "
                         f"from {rel.indexer} over BitTorrent")
-            if not self.short_enough(1 - frac, short, rel.indexer):
+            info = qb.info(h) or {}
+            before = btledger.taken(cfg, h, info)
+            frac_all, short_all = self.counting_earlier(frac, short, info.get("total_size") or info.get("size"), before)
+            if not self.short_enough(frac_all, short_all, rel.indexer):
                 tag = self.client_tag(rel.indexer)
                 try:
                     qb.remove_tags(h, [t_ for t_ in cfg.qbit_tags if t_])
@@ -693,6 +729,7 @@ class App:
                                 "allows - it may bring seeding obligations there")
                 except ApiError as err:
                     report.warn(f"could not change its tags in qBittorrent: {err}")
+            btledger.record_start(cfg, h, rel.indexer, info, short)
             qb.start(h)
             job.extra = {**(job.extra or {}), "added_via": rel.indexer}
             self.store.changed(urgent=True)
@@ -703,7 +740,8 @@ class App:
         self.watch_clients()
         return nj
 
-    def finish_in_client(self, job: "Job", why: str = "", override: bool = False) -> "Job":
+    def finish_in_client(self, job: "Job", why: str = "", override: bool = False,
+                         headroom: float = config_mod.HEADROOM) -> "Job":
         """Hand a nearly-built torrent to qBittorrent to download the rest - the one place
         nzb2seed starts a torrent that is not 100% complete, and only because the person
         chose it, for this build or for its tracker. ``override``: they chose it knowing it
@@ -740,16 +778,42 @@ class App:
             info = qb.info(h) or {}
             total = info.get("total_size") or info.get("size")
             short = round(total * (1 - frac)) if total else None
-            if not override and not self.short_enough(1 - frac, short, x.get("tracker") or ""):
+            # less than the build expected: files that are there yet fail inside - named, so
+            # "26.8%" says which files are damaged, not only that something is
+            failing = ""
+            expected = x.get("have")
+            if isinstance(expected, (int, float)) and frac < expected - 0.001:
+                try:                            # advice only: never what fails the job
+                    part = [f for f in qb.files(h) if 0 < (f.get("progress") or 0) < 1]
+                except Exception:               # noqa: BLE001
+                    part = []
+                if part:
+                    names = ", ".join(f"{os.path.basename(f.get('name', ''))} ({f['progress'] * 100:.1f}%)"
+                                      for f in part[:6]) + (f" and {len(part) - 6} more" if len(part) > 6 else "")
+                    failing = (f" The build expected {pipeline_mod.exact_pct(expected)}; {len(part)} file(s) "
+                               f"are there but fail inside: {names}.")
+                    report.warn(f"qBittorrent's check found {have}, less than the "
+                                f"{pipeline_mod.exact_pct(expected)} the build expected: {len(part)} file(s) "
+                                f"are there but fail inside - {names}")
+            # the tracker counts the torrent's downloads in total: every earlier start counts
+            before = btledger.taken(cfg, h, info)
+            frac_all, short_all = self.counting_earlier(frac, short, total, before)
+            if not override and not self.short_enough(frac_all, short_all, x.get("tracker") or "", headroom):
                 job.extra = {**(job.extra or {}), "have": frac, "in_client": True, "short": short}
                 self.store.changed(urgent=True)
+                room = f" with {headroom:.0%} of it kept free" if headroom else ""
+                earlier = (f" - on top of {pipeline_mod.exact_gb(before)} it already downloaded over "
+                           "BitTorrent on earlier starts" if before else "")
                 raise Abort(f"qBittorrent's check found only {have} here, so {rest} would have to "
-                            f"be downloaded - more than {x.get('tracker') or 'the tracker'} allows: "
-                            f"{self.nearly_limit_text(x.get('tracker') or '')}. Not "
+                            f"be downloaded{earlier} - more than {x.get('tracker') or 'the tracker'} allows{room}: "
+                            f"{self.nearly_limit_text(x.get('tracker') or '')}.{failing} Not "
                             "started: the torrent stays stopped in qBittorrent (nothing deleted)")
+            if before:
+                report.info(f"earlier starts of this torrent already downloaded {pipeline_mod.exact_gb(before)} "
+                            "over BitTorrent - counted against the limit too")
             report.info(f"{have} is already here from Usenet; downloading the other "
                         f"{rest} over BitTorrent")
-            if not self.short_enough(1 - frac, short, x.get("tracker") or ""):
+            if not self.short_enough(frac_all, short_all, x.get("tracker") or ""):
                 # added by Override, outside your limit: what comes from the tracker may bring
                 # seeding obligations there - tagged after the tracker, not as an nzb2seed build.
                 # (Within the limit - Add, Always add - it is taken to be safe and keeps its tag.)
@@ -762,6 +826,7 @@ class App:
                                 "obligations there")
                 except ApiError as e:
                     report.warn(f"could not change its tags in qBittorrent: {e}")
+            btledger.record_start(cfg, h, x.get("tracker") or "", info, short)
             qb.start(h)
             job.extra = {**(job.extra or {}), "added": True}
             self.watch_clients()                 # tells the page the moment it is complete
@@ -1000,6 +1065,7 @@ class App:
             while True:
                 time.sleep(3600)
                 cfg = self.cfg
+                self.sweep_downloads(cfg)
                 if not cfg.retention_enabled:
                     continue
                 try:
@@ -1012,6 +1078,22 @@ class App:
                         f"removed {len(out['removed'])} build(s), freeing "
                         f"{retention_mod.gb(out['bytes'])}")
         threading.Thread(target=loop, name="retention", daemon=True).start()
+
+    def sweep_downloads(self, cfg):
+        """nzb2seed's own SABnzbd downloads nothing has touched for a few days go (posts
+        tried and dropped, builds that failed): they would otherwise fill the drive."""
+        if not cfg.cleanup or not cfg.sab_url or not cfg.download_keep_days:
+            return
+        from . import pipeline
+        try:
+            n, freed = pipeline.remove_old_downloads(cfg, SABnzbd(cfg.sab_url, cfg.sab_key), self._qbit(),
+                                                     float(cfg.download_keep_days),
+                                                     log=lambda t: print(f"[downloads] {t}", flush=True))
+        except Exception as e:                       # never let the sweep kill its thread
+            print(f"[downloads] sweep failed: {e}", flush=True)
+            return
+        if n:
+            print(f"[downloads] removed {n} old download(s), freeing {pipeline.gb(freed)}", flush=True)
 
     def _retention_log(self, text: str):
         print(f"[retention] {text}", flush=True)
@@ -1118,14 +1200,20 @@ class App:
                 # nearly there: keep everything, and say how near
                 job.status, job.result, job.extra = "failed", str(e), e.details()
                 report.warn(str(e))
-                if self.nearly_enough(job.extra) and self.always_adds(e.tracker):
+                room = config_mod.AUTO_HEADROOM
+                if self.nearly_enough(job.extra, room) and self.always_adds(e.tracker):
                     miss = math.ceil((1 - e.have) * 1000000) / 10000     # never rounded to 0
                     report.info(f"{e.tracker} is set to take builds this close, so it goes to "
                                 f"qBittorrent to download the missing {miss:.4f}%")
                     job.extra = {**job.extra, "auto": True}
                     self.finish_in_client(job, why=f"{e.tracker} is set to always add builds "
-                                                   f"missing less than {self.nearly_limit_text(e.tracker)}")
+                                                   f"missing less than {self.nearly_limit_text(e.tracker)} "
+                                                   f"(with {room:.0%} of that kept free)", headroom=room)
                 else:
+                    if self.nearly_enough(job.extra, 0.0) and self.always_adds(e.tracker):
+                        report.info(f"within {e.tracker}'s limit, but not with {room:.0%} of it to spare - "
+                                    "too close to add by itself (data downloaded twice could tip it over); "
+                                    "looking on your other trackers instead")
                     try:
                         self.look_on_other_trackers(job, e)
                     except Exception as err:       # never lose the job over the lookup
@@ -1227,6 +1315,24 @@ def local_folder(cfg, path: str) -> str:
     return p
 
 
+def _dev_of(path: str):
+    try:
+        return os.stat(path).st_dev
+    except OSError:
+        return None
+
+
+def mount_point(path: str) -> str:
+    """The top folder of the drive ``path`` is on (its mount point)."""
+    p = os.path.realpath(path)
+    while not os.path.ismount(p):
+        up = os.path.dirname(p)
+        if up == p:
+            break
+        p = up
+    return p
+
+
 def within_roots(cfg, path: str) -> bool:
     real = os.path.realpath(path)
     return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in data_roots(cfg))
@@ -1243,6 +1349,11 @@ def build_job(app: "App", body: dict):
     first = app.jobs.get(int(body["other_tracker"])) if str(body.get("other_tracker") or "").isdigit() else None
     if first is not None and (first.extra or {}).get("infohash"):
         opts = dataclasses.replace(opts, related=(first.extra["infohash"],))
+    # ... and so are the files it laid out (a Library build links the library's own files)
+    laid = first_build_dir(app.cfg, first) if first is not None else None
+    if laid:
+        # laid out next to it - on the same drive, so its files are hard-linked, not copied
+        opts = dataclasses.replace(opts, reuse_dirs=(laid,), output_dir=os.path.dirname(laid))
     # a release that already stopped nearly complete - built again from another tracker,
     # or tried again: its Usenet downloads are already made, so it is only placing files
     # and handing the torrent over - not waiting behind a queue of builds that download
@@ -1265,6 +1376,27 @@ def build_job(app: "App", body: dict):
         finally:
             give_slot()          # not held if it was waiting on you when it ended
     return ("auto: " if auto else "") + torrent.title, run
+
+
+def first_build_dir(cfg, job) -> str | None:
+    """The folder a stopped build laid its torrent's files out in, as this machine sees it."""
+    from .assemble import torrent_root
+    from .pathmap import map_path
+    from . import torrent as torrent_mod
+    x = job.extra or {}
+    tp, sp = x.get("torrent_path"), x.get("save_path")
+    if not tp or not sp:
+        return None
+    try:
+        with open(tp, "rb") as fh:
+            t = torrent_mod.parse(fh.read())
+    except (OSError, ValueError, torrent_mod.TorrentError):
+        return None
+    if not t.multi_file:
+        return None
+    local = map_path(sp, [(b, a) for a, b in (cfg.local_to_qbit or [])])
+    d = torrent_root(t, local)
+    return d if os.path.isdir(d) else None
 
 
 def _opts(d: dict) -> Options:
@@ -1398,7 +1530,22 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return None
 
         # -- routes
+        def hook_call(self):
+            # qBittorrent's on-finished program: no login (it cannot give one) - a private
+            # address and the token in the URL instead
+            from urllib.parse import parse_qs
+            hk = getattr(app, "hook", None)
+            q = parse_qs(urlsplit(self.path).query)
+            if hk is None or not _is_local_client(self.client_address[0]) \
+                    or not hk.check_token((q.get("token") or [""])[0]):
+                return self._send(403, b"forbidden", "text/plain")
+            lib = getattr(app, "library", None)
+            msg = hk.received((q.get("h") or [""])[0], bool(lib and lib.busy()))
+            return self._send(200, msg.encode(), "text/plain; charset=utf-8")
+
         def do_GET(self):
+            if urlsplit(self.path).path == "/api/hook/finished":
+                return self.hook_call()
             if not self._guard():
                 return
             path = urlsplit(self.path).path
@@ -1626,9 +1773,9 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     q = (body.get("query") or "").strip()
                     if not q:
                         return self._err("type a release name or search text")
-                    torrents, nzbs = search(app.cfg, q)
-                    if body.get("protocol") == "usenet":
-                        torrents = []
+                    only_usenet = body.get("protocol") == "usenet"     # no tracker is searched then
+                    trackers = [str(t) for t in (body.get("trackers") or []) if str(t).strip()]
+                    torrents, nzbs = search(app.cfg, q, trackers=trackers or None, torrents=not only_usenet)
                     return self._json({"torrents": [dataclasses.asdict(r) for r in torrents],
                                        "usenet": [dataclasses.asdict(r) for r in nzbs]})
                 if path == "/api/pair":
@@ -1648,6 +1795,8 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     return self.series_grab(body)
                 if path.startswith("/api/auto/"):
                     return self._json(self.auto(path.rsplit("/", 1)[1], body))
+                if path.startswith("/api/library/"):
+                    return self._json(self.library(path.rsplit("/", 1)[1], body))
                 if path == "/api/series/options":
                     return self.series_options(body)
                 if path == "/api/folders":
@@ -1742,14 +1891,14 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                "options": [o.summary(wanted) for o in opts]})
 
         def _library(self, body) -> tuple[bool, str | None]:
-            """(skip owned episodes?, the show's folder) - the folder must lie inside one of the
-            configured data folders."""
+            """(skip owned episodes?, the show's folder) - any folder on this machine; it is
+            only read."""
             if not body.get("skip_owned"):
                 return False, None
             lib = (body.get("library") or "").strip() or None
             lib = local_folder(app.cfg, lib) if lib else None
-            if lib and not within_roots(app.cfg, lib):
-                raise ValueError("choose a folder inside one of the configured data folders")
+            if lib and not os.path.isdir(lib):
+                raise ValueError(f"{lib} is not a folder")
             return True, lib
 
         def season_grab(self, body):
@@ -1932,10 +2081,96 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     if (other is not job and other.status in ("failed", "cancelled", "interrupted")
                             and app.tracker_key(ox.get("tracker", "")) == app.tracker_key(x["tracker"])
                             and not ox.get("added") and not ox.get("abandoned")
-                            and app.nearly_enough(ox)):
+                            and app.nearly_enough(ox, config_mod.AUTO_HEADROOM)):
                         why = f"{x['tracker']} is set to always add builds this close"
-                        also.append(app.finish_in_client(other, why).id)
+                        also.append(app.finish_in_client(other, why, headroom=config_mod.AUTO_HEADROOM).id)
             return self._json({"id": nj.id, "also": also})
+
+        LIBRARY_FIELDS = {"enabled": ("library_enabled", bool), "indexer": ("library_indexer", str),
+                          "roots": ("library_roots", list), "output_dir": ("library_output_dir", str),
+                          "daily_gb": ("library_daily_gb", float),
+                          "keep_replaced_days": ("library_keep_replaced_days", float),
+                          "redownload": ("library_redownload", bool),
+                          "cross_eyed_url": ("library_cross_eyed_url", str),
+                          "auto_move": ("library_auto_move", bool), "auto_delete": ("library_auto_delete", bool),
+                          "hold_cross_seed": ("library_hold_hook", bool)}
+
+        def _library_state(self):
+            cfg = app.cfg
+            lib = getattr(app, "library", None)
+            hk = getattr(app, "hook", None)
+            return {"settings": {k: getattr(cfg, f) for k, (f, _) in self.LIBRARY_FIELDS.items()},
+                    "hook": hk.status() if hk else None,
+                    "output_used": library_mod.output_dir(cfg), "default_output": cfg.output_dir,
+                    **(lib.items() if lib else {"seasons": [], "counts": {}})}
+
+        def library(self, what, body):
+            cfg = app.cfg
+            lib = getattr(app, "library", None)
+            key = body.get("key") or ""
+            if what == "state":
+                return self._library_state()
+            if what == "indexers":
+                pr = app.prowlarr()
+                if not pr:
+                    raise ValueError("set up Prowlarr in Settings first")
+                return {"indexers": sorted({n for _, n in pr.indexers() if n}, key=str.lower)}
+            if what == "save":
+                changes = {}
+                for k, (field_, typ) in self.LIBRARY_FIELDS.items():
+                    if k not in body:
+                        continue
+                    if typ is list:
+                        v = body[k] if isinstance(body[k], list) else str(body[k]).splitlines()
+                        changes[field_] = [local_folder(cfg, x) for x in v if str(x).strip()]
+                    elif typ is bool:
+                        changes[field_] = bool(body[k])
+                    else:
+                        changes[field_] = typ(body[k])
+                if changes.get("library_output_dir"):
+                    changes["library_output_dir"] = local_folder(cfg, changes["library_output_dir"])
+                new = dataclasses.replace(cfg, **changes)
+                if new.library_enabled:
+                    if not new.library_indexer:
+                        raise ValueError("choose the tracker first")
+                    if not new.library_roots:
+                        raise ValueError("add the library's TV folder(s) first")
+                    out = library_mod.output_dir(new)
+                    if not out:
+                        raise ValueError(f"choose where the torrents go - the usual torrents folder "
+                                         f"({new.output_dir or 'none set'}) is not on the drive of "
+                                         f"{new.library_roots[0]}")
+                    first = new.library_roots[0]
+                    for r in new.library_roots[1:]:
+                        if os.path.isdir(r) and os.path.isdir(first) and os.stat(r).st_dev != os.stat(first).st_dev:
+                            raise ValueError(f"{r} is on another drive than {first} - every TV library folder "
+                                             "has to be on the same drive")
+                    for r in new.library_roots:
+                        if not os.path.isdir(r):
+                            raise ValueError(f"{r} is not a folder")
+                        if not out or not os.path.isdir(out) or os.stat(out).st_dev != os.stat(r).st_dev:
+                            raise ValueError(f"the torrents' folder must be on the same disk as {r}, so "
+                                             "the library's files can be hard-linked rather than copied")
+                config_mod.save(new)
+                was_on = cfg.library_enabled
+                app.cfg = new
+                if lib:
+                    lib.state.scanned_at = 0            # the tracker or "redownload" may have changed
+                    lib.wake.set()
+                if (new.library_enabled != was_on or new.library_hold_hook != cfg.library_hold_hook) \
+                        and getattr(app, "hook", None):
+                    # on: qBittorrent's on-finished program is routed through here; off: put back
+                    threading.Thread(target=app.hook.sync, name="hook-sync", daemon=True).start()
+                return self._library_state()
+            if lib is None:
+                raise ValueError("the Library is not running")
+            if what == "scan":
+                lib.rescan()
+                return self._library_state()
+            if what in ("approve", "keep", "retry", "skip", "again", "check", "delete_original", "cancel_move"):
+                getattr(lib, what)(key)
+                return self._library_state()
+            raise ValueError(f"unknown request {what}")
 
         def _auto_state(self):
             cfg = app.cfg
@@ -2068,22 +2303,34 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             raise ValueError(f"unknown request {what!r}")
 
         def list_folders(self, body):
+            """Any folder on this machine (behind the GUI's login): the names of the folders
+            in it, its parent, and the configured data folders as shortcuts. No path: /.
+            ``within``: only the drive that folder is on - starting at the drive's top, never
+            above it, and never into another drive mounted inside it."""
             roots = data_roots(app.cfg)
-            path = (body.get("path") or "").strip()
-            if not path:
-                return self._json({"path": "", "parent": None, "roots": roots,
-                                   "dirs": [{"name": r, "path": r} for r in roots]})
-            if not within_roots(app.cfg, path) or not os.path.isdir(path):
-                return self._err("not a folder inside the configured data folders")
+            within = (body.get("within") or "").strip()
+            drive = dev = None
+            if within:
+                if not os.path.isdir(within):
+                    return self._err(f"{within} is not a folder")
+                drive, dev = mount_point(within), os.stat(within).st_dev
+            path = (body.get("path") or "").strip() or drive or os.path.abspath(os.sep)
+            if not os.path.isdir(path):
+                return self._err(f"{path} is not a folder")
             real = os.path.realpath(path)
+            same = (lambda p: dev is None or _dev_of(p) == dev)
+            if not same(real):
+                return self._err(f"{real} is not on the drive {drive}")
             try:
                 names = sorted((n for n in os.listdir(real)
-                                if not n.startswith(".") and os.path.isdir(os.path.join(real, n))), key=str.casefold)
+                                if not n.startswith(".") and os.path.isdir(os.path.join(real, n))
+                                and same(os.path.join(real, n))), key=str.casefold)
             except OSError as e:
                 return self._err(f"cannot list {path}: {e.strerror}")
             parent = os.path.dirname(real)
-            return self._json({"path": real, "roots": roots,
-                               "parent": parent if within_roots(app.cfg, parent) else "",
+            up = parent if parent != real and (drive is None or real != drive) and same(parent) else ""
+            return self._json({"path": real, "roots": [r for r in roots if same(r)], "drive": drive or "",
+                               "parent": up,
                                "dirs": [{"name": n, "path": os.path.join(real, n)} for n in names]})
 
         def season_file(self, path):
@@ -2235,7 +2482,10 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
           open_browser: bool, extra_hosts=(), username: str | None = None) -> int:
     allowed = own_names(host) | {h.lower() for h in extra_hosts}
     app = App(config_path)
+    app.gui_port = port
     app.start_inbox()
+    app.start_library()
+    app.start_mend()
     app.resume_builds()
     app.start_retention()
     app.start_space_guard()

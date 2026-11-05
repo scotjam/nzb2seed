@@ -135,6 +135,9 @@ class Source:
     def search(self, *a, **kw):
         return self.pr.search(*a, **kw)
 
+    def usenet_ids(self):
+        return self.pr.usenet_ids()
+
     def fetch(self, rel: Release) -> bytes:
         if rel.protocol != "usenet":
             return self.pr.fetch(rel)        # .torrent: Prowlarr fetches it itself

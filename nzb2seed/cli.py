@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import os
 import argparse
 import datetime as dt
 import re
@@ -346,6 +347,9 @@ def main(argv=None) -> int:
     pr.add_argument("--apply", action="store_true",
                     help="actually remove them (without this it only lists what would go)")
 
+    sub.add_parser("restore-qbit-hook",
+                   help="put qBittorrent's own on-finished program back (run before removing nzb2seed)")
+
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         try:
@@ -357,6 +361,21 @@ def main(argv=None) -> int:
         from .gui import serve
         return serve(args.config, args.host, args.port, args.password, not args.no_browser,
                      args.allowed_host, args.username)
+
+    if args.cmd == "restore-qbit-hook":
+        from .gui import App
+        from . import hook as hook_mod
+        app = App(args.config)
+        hk = hook_mod.Hook(app, os.path.join(os.path.dirname(os.path.abspath(app.cfg.path)), "hook.json"))
+        print(f"qBittorrent's on-finished program: {hk.restore()}")
+        held = list(hk.data.get("queue") or [])
+        if held:
+            print(f"{len(held)} held call(s) are run now, through the restored program")
+            for h in held:
+                hk.forward(h)
+            hk.data["queue"] = []
+            hk._save()
+        return 0
 
     from . import report
     report.interactive = not getattr(args, "yes", False) and sys.stdin.isatty()

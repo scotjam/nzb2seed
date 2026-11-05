@@ -37,7 +37,7 @@ export const LANGUAGES = [
 ];
 
 // a tag counts only as a whole dot/space/dash-separated part of the name - and only after the
-// year, season or resolution, where groups put it: "The.French.Dispatch.2021..." is in English
+// year, season or resolution, where groups put it: "The.Example.Film.2021..." is in English
 const TAG = new Map(LANGUAGES.flatMap(([key, , tags]) => tags.map(t => [t, key])));
 const MARK = /^((19|20)\d\d|s\d{1,3}(e\d{1,4})?|\d{3,4}p|complete)$/;
 

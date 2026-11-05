@@ -3,6 +3,7 @@
 A job keeps the request that started it, so "try again" is that same call made again -
 no guessing at what a build was for, and nothing to re-enter.
 """
+import time
 import os
 import sys
 
@@ -105,6 +106,10 @@ def test_a_retry_that_starts_nothing_leaves_the_job_free(server):  # noqa: F811
     job.status = "failed"
     job.repeat = {"path": "/api/build", "body": {"torrent": {"title": ""}}}    # refused
     call(url + "/api/jobs/retry", *AUTH, body={"id": job.id})
+    # the server frees it just after its answer is sent: give that a moment
+    deadline = time.time() + 5
+    while job.retried_as is not None and time.time() < deadline:
+        time.sleep(0.01)
     assert job.retried_as is None
 
 

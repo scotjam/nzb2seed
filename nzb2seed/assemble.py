@@ -395,6 +395,27 @@ def _place_copy(src: str, dst: str, owned: Owned, progress=None) -> str:
     return how
 
 
+def own_copy(path: str) -> bool:
+    """Give ``path`` bytes of its own when it shares them with another name (a hard link to
+    a library file, made by assemble): writing a repaired piece into it would otherwise
+    change the library's file too. Same disk, so the copy is written beside it and renamed
+    over the link. True if a copy was made."""
+    try:
+        if os.stat(path).st_nlink < 2:
+            return False
+    except OSError:
+        return False
+    tmp = path + ".nzb2seed-own"
+    with open(path, "rb") as fi, open(tmp, "wb") as fo:
+        shutil.copyfileobj(fi, fo, COPY_CHUNK)
+        fo.flush()
+        os.fsync(fo.fileno())
+    shutil.copystat(path, tmp)
+    os.replace(tmp, path)
+    shareable(path)
+    return True
+
+
 def _under(path: str, dirs) -> bool:
     k = _key(path)
     return any(k == _key(d) or k.startswith(_key(d).rstrip("/\\") + os.sep.lower()) or

@@ -8,13 +8,16 @@ import { JobsTab } from "./tabs/jobs.js";
 import { SeasonsTab } from "./tabs/seasons.js";
 import { AssembleTab } from "./tabs/assemble.js";
 import { AutoTab } from "./tabs/auto.js";
+import { LibraryTab } from "./tabs/library.js";
 import { DemandTab } from "./tabs/demand.js";
 import { SettingsTab } from "./tabs/settings.js";
+import { HelpTab } from "./tabs/help.js";
+import { Tour, maybeStartTour, tourStep } from "./components/tour.js";
 
 const VIEWS = { build: BuildTab, jobs: JobsTab, seasons: SeasonsTab, assemble: AssembleTab,
-                auto: AutoTab, demand: DemandTab, settings: SettingsTab };
+                auto: AutoTab, library: LibraryTab, demand: DemandTab, settings: SettingsTab, help: HelpTab };
 const NAMES = { build: "Build", jobs: "Jobs", seasons: "Seasons", assemble: "Assemble",
-                auto: "Automatic", demand: "Demand", settings: "Settings" };
+                auto: "Automatic", library: "Library", demand: "Demand", settings: "Settings", help: "Help" };
 
 function App() {
   const now = useStore(tab);
@@ -22,6 +25,7 @@ function App() {
   const on = useStore(autoOn);
   const cfg = useStore(settings);
   const msg = useStore(toastMsg);
+  const touring = useStore(tourStep) != null;
   const running = all.filter(j => j.status === "running" || j.status === "waiting").length;
 
   useEffect(() => { if (now !== "jobs") jobScreen.set(false); }, [now]);
@@ -30,7 +34,8 @@ function App() {
     <header>
       <div class="brand"><span class="u">nzb</span>2<span class="t">seed</span></div>
       <nav>${TABS.map(name => html`
-        <a href=${"#" + name} aria-current=${name === now ? "page" : null}>${NAMES[name]}${
+        <a href=${"#" + name} aria-current=${name === now ? "page" : null}
+           class=${touring && name === now ? "tour-here" : null}>${NAMES[name]}${
           name === "jobs" && running > 0 && html`<span class="count">${running}</span>`}${
           name === "auto" && html`<span class=${"autodot" + (on ? " on" : "")}
             title=${on ? "Automatic builds are on" : "Automatic builds are off"}></span>`}</a>`)}
@@ -45,7 +50,8 @@ function App() {
           <${View} active=${name === now} /></section>`;
       })}
     </main>
-    ${msg && html`<div class="toast" role="status">${msg}</div>`}`;
+    ${msg && html`<div class="toast" role="status">${msg}</div>`}
+    <${Tour} />`;
 }
 
 (async () => {
@@ -54,4 +60,5 @@ function App() {
   if (s && !s.exists && !location.hash) location.hash = "#settings";
   render(html`<${App} />`, document.getElementById("app"));
   refreshJobs(); refreshAuto();
+  maybeStartTour();                       // first launch only; Help -> Take the tour again
 })();

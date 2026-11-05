@@ -9,7 +9,7 @@ from helpers import BASE, NAME, make_torrent, nzb_job, scene_layout
 quiet = dict(log=lambda *_: None)
 
 
-def setup(tmp_path):
+def scenario(tmp_path):
     t = parse(make_torrent(NAME, scene_layout()))
     job = tmp_path / "ssd" / "job"
     nzb_job(str(job))
@@ -18,7 +18,7 @@ def setup(tmp_path):
 
 
 def test_foreign_file_of_other_size_blocks_and_nothing_moves(tmp_path):
-    t, job, out = setup(tmp_path)
+    t, job, out = scenario(tmp_path)
     theirs = out / NAME / f"{BASE}.r00"
     theirs.parent.mkdir(parents=True)
     theirs.write_bytes(b"someone else's data")
@@ -30,7 +30,7 @@ def test_foreign_file_of_other_size_blocks_and_nothing_moves(tmp_path):
 
 
 def test_foreign_extras_in_existing_torrent_folder_survive_cleanup(tmp_path):
-    t, job, out = setup(tmp_path)
+    t, job, out = scenario(tmp_path)
     (out / NAME).mkdir(parents=True)
     (out / NAME / "my-notes.txt").write_bytes(b"mine")
     (out / NAME / "Extras").mkdir()
@@ -45,7 +45,7 @@ def test_foreign_extras_in_existing_torrent_folder_survive_cleanup(tmp_path):
 
 
 def test_foreign_file_with_right_size_is_used_untouched(tmp_path):
-    t, job, out = setup(tmp_path)
+    t, job, out = scenario(tmp_path)
     sample = next(f for f in t.real_files if "Sample" in f.relpath)
     theirs = out / sample.relpath
     theirs.parent.mkdir(parents=True)
@@ -61,7 +61,7 @@ def test_foreign_file_with_right_size_is_used_untouched(tmp_path):
 
 
 def test_assemble_mode_never_deletes_from_user_folders(tmp_path):
-    t, job, out = setup(tmp_path)
+    t, job, out = scenario(tmp_path)
     owned = asm.Owned()
     res = asm.assemble(t, [str(job)], str(out), owned=owned, **quiet)
     asm.cleanup(t, res, [], str(out), owned, **quiet)       # sources are not ours
@@ -69,7 +69,7 @@ def test_assemble_mode_never_deletes_from_user_folders(tmp_path):
 
 
 def test_only_our_stale_files_and_part_files_are_removed(tmp_path):
-    t, job, out = setup(tmp_path)
+    t, job, out = scenario(tmp_path)
     record = tmp_path / "torrents" / "x.owned.json"
     owned = asm.Owned(str(record))
     res = asm.assemble(t, [str(job)], str(out), owned=owned, **quiet)
@@ -89,9 +89,17 @@ def test_only_our_stale_files_and_part_files_are_removed(tmp_path):
 
 
 def test_rerun_after_interruption_uses_our_placed_files(tmp_path):
-    t, job, out = setup(tmp_path)
+    t, job, out = scenario(tmp_path)
     owned = asm.Owned(str(tmp_path / "rec.json"))
     asm.assemble(t, [str(job)], str(out), owned=owned, **quiet)
     owned.save()
     res = asm.assemble(t, [str(job)], str(out), owned=asm.Owned(str(tmp_path / "rec.json")), **quiet)
     assert res.complete and asm.verify_all(t, res) == []
+
+
+def scenario(tmp_path):
+    t = parse(make_torrent(NAME, scene_layout()))
+    job = tmp_path / "ssd" / "job"
+    nzb_job(str(job))
+    out = tmp_path / "hdd" / "complete"
+    return t, job, out

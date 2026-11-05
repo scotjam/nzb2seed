@@ -409,3 +409,64 @@ details.log summary { cursor: pointer; color: var(--ink-2); margin-top: 8px; }
 .rtip { padding: 8px 16px; margin: 0; }
 .digest .dtoggle { border: 0; background: none; padding: 0; font: inherit; font-weight: 700; color: inherit; cursor: pointer; }
 .digest .dtoggle .arrow { display: inline-block; width: 1.1em; color: var(--ink-2); }
+.ahead select { width: auto; }
+.pathlist { list-style: none; margin: 4px 0; padding: 0; }
+.pathlist li { display: flex; gap: 10px; align-items: center; justify-content: space-between; padding: 4px 0; word-break: break-all; }
+.folders .recent { padding: 8px 12px; border-bottom: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.folders .recent small { width: 100%; }
+.folders .chip { border: 1px solid var(--rule); border-radius: 999px; padding: 3px 10px; background: none; cursor: pointer; font: inherit; font-size: .85rem; word-break: break-all; text-align: left; }
+.folders .chip:hover, .folders .chip:focus-visible { background: var(--slate); }
+
+/* the Build tab's tracker choice: a drop-down of ticks under its button */
+details.trackers { position: relative; }
+details.trackers > summary { list-style: none; cursor: pointer; white-space: nowrap; }
+details.trackers > summary::-webkit-details-marker { display: none; }
+details.trackers .trackerlist { position: absolute; z-index: 20; top: calc(100% + 4px); left: 0; min-width: 240px;
+  max-height: 60vh; overflow: auto; padding: 8px 10px; background: var(--sheet); color: var(--ink); border: 1px solid var(--rule); max-width: calc(100vw - 32px);
+  border-radius: 8px; box-shadow: 0 6px 24px rgba(0, 0, 0, .35); display: grid; gap: 4px; }
+details.trackers .trackerlist label.check { display: flex; gap: 8px; align-items: center; white-space: nowrap; }
+details.trackers .trackerlist label.check { color: var(--ink); padding: 4px 0; }
+/* phones: the search box gets its own full-width line, the buttons wrap below it */
+@media (max-width: 640px) {
+  .search { flex-wrap: wrap; }
+  .search > input[type=text] { flex: 1 0 100%; min-width: 0; }
+}
+
+/* the Library tab's automatic ticks, under its On/Off line */
+.autoticks { display: grid; gap: 8px; margin: 4px 0 16px; }
+.autoticks label.check { display: flex; gap: 8px; align-items: baseline; }
+.autoticks label.danger b { color: var(--bad); }
+.alist .arow .meta .qb.ok { color: var(--ok); }
+.alist .arow .meta .qb.warn { color: var(--warn); }
+
+/* ---------- the tour (first launch; Help -> Take the tour again) */
+.tour { position: fixed; left: 0; right: 0; bottom: 24px; display: flex; justify-content: center; z-index: 20; pointer-events: none; }
+.tour-card { pointer-events: auto; width: min(560px, calc(100vw - 32px)); background: var(--sheet); color: var(--ink);
+  border: 1px solid var(--rule); border-top: 4px solid var(--torrent); border-radius: 10px; padding: 16px 20px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .25); }
+.tour-card h2 { margin: 2px 0 6px; font-size: 1.15rem; }
+.tour-card p { margin: 0 0 10px; }
+.tour-count { color: var(--ink-2); font-size: .85rem; }
+.tour-dots { display: flex; gap: 5px; margin: 6px 0 12px; }
+.tour-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--idle); }
+.tour-dots span.on { background: var(--torrent); }
+.tour-buttons { display: flex; justify-content: space-between; gap: 8px; }
+.tour-buttons span { display: flex; gap: 8px; }
+.btn.ghost { background: transparent; }
+nav a.tour-here { outline: 2px solid var(--torrent); outline-offset: 2px; }
+
+/* ---------- Help */
+.help { max-width: 860px; padding: 8px 4px 40px; }
+.help .lead { color: var(--ink-2); font-size: 1.05rem; }
+.help-tabs > div { display: grid; grid-template-columns: 140px 1fr; gap: 4px 18px; padding: 12px 0; border-top: 1px solid var(--rule); }
+.help-tabs dt { font-weight: 700; }
+.help-tabs dd { margin: 0; }
+.help-tabs dd p { margin: 0 0 6px; }
+.help-tabs .use { color: var(--ink-2); }
+.help details { border-top: 1px solid var(--rule); padding: 10px 0; }
+.help summary { cursor: pointer; font-weight: 700; }
+.help details p { margin: 8px 0 0; }
+@media (max-width: 640px) { .help-tabs > div { grid-template-columns: 1fr; } }
+
+.csvbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+.csvbar label.btn { display: inline-block; }

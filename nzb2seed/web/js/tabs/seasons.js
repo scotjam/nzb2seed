@@ -5,6 +5,7 @@ import { html, useEffect, useReducer, useRef } from "../lib.js";
 import { api } from "../api.js";
 import { openJob, settings, toast, useStore } from "../store.js";
 import { keep, pad2, plural, remember, size } from "../util.js";
+import { Folders } from "../components/folders.js";
 
 const SOURCES = [["all", "All sources - per season the longest list"], ["tvmaze", "TVmaze"], ["tmdb", "TMDB"],
                  ["tvdb", "TheTVDB"], ["imdb", "IMDb (official dataset)"]];
@@ -114,7 +115,7 @@ export function SeasonsTab({ active }) {
         <div class="panel">
           <h2>Find the season</h2>
           <form class="search" style="margin:0" onSubmit=${findShows}>
-            <input type="text" ref=${qRef} placeholder="Show name, e.g. Doctor Who" aria-label="Show name" />
+            <input type="text" ref=${qRef} placeholder="Show name" aria-label="Show name" />
             <button class="btn primary" disabled=${s.searching}>Search</button>
           </form>
           ${s.shows && html`<div class="picklist" role="radiogroup" aria-label="Shows">
@@ -135,7 +136,7 @@ export function SeasonsTab({ active }) {
                 ${SOURCES.map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select></label>
             <label class="check" style="margin-top:8px"><input type="checkbox" checked=${s.matchNames}
               onChange=${(e) => { s.matchNames = e.target.checked; keep("matchNames." + s.show.id, s.matchNames ? "1" : "0"); redraw(); }} /> Also find posts named only by episode title</label>
-            <small class="status" style="display:block;margin:2px 0 0 26px">For shows posted as "Show De Dierenwinkel - GRP" instead of S01E14: matched by the episode names on TMDB, TheTVDB and TVmaze (only when a name belongs to exactly one episode); files named that way in your folder count as yours. Takes more indexer API searches. Remembered per show.</small>
+            <small class="status" style="display:block;margin:2px 0 0 26px">For shows posted as "Show De Bakkerij - GRP" instead of S01E14: matched by the episode names on TMDB, TheTVDB and TVmaze (only when a name belongs to exactly one episode); files named that way in your folder count as yours. Takes more indexer API searches. Remembered per show.</small>
             <label class="field" style="margin-top:8px"><span>Season</span>
               <select style="width:auto" value=${s.season} onChange=${(e) => { s.season = e.target.value; redraw(); }}>
                 <option value="all">All seasons (${s.seasons.length})</option>
@@ -150,7 +151,7 @@ export function SeasonsTab({ active }) {
                 <div class="chosen"><span>Show folder:</span> <code>${s.library || "none chosen - only qBittorrent is checked"}</code>
                   <button type="button" class="btn" onClick=${() => browse(s.library || "")}>Choose folder…</button></div>
                 ${s.browsing && html`<${Folders} at=${s.browsing} browse=${browse}
-                  use=${() => { s.library = s.browsing.path; s.browsing = null; redraw(); }} />`}
+                  use=${(p) => { s.library = p; s.browsing = null; redraw(); }} />`}
               </fieldset>
             </div>
             <div class="actions" style="margin-top:10px">
@@ -171,19 +172,6 @@ export function SeasonsTab({ active }) {
               <div class="s">${`${r.episodes}/${r.total} episodes · ` + (r.created ? new Date(r.created * 1000).toLocaleDateString() : "")}</div></button>`)
             : html`<div class="empty">Nothing grabbed yet.</div>`}
         </div>
-      </div>
-    </div>`;
-}
-
-function Folders({ at, browse, use }) {
-  return html`
-    <div class="folders">
-      <div class="here"><span>${at.path || "Data folders"}</span>
-        <span class="actions"><button type="button" class="btn" disabled=${at.parent === null} onClick=${() => browse(at.parent || "")}>Up</button>
-          <button type="button" class="btn primary" disabled=${!at.path} onClick=${use}>Use this folder</button></span></div>
-      <div class="list" role="list">
-        ${at.dirs.length ? at.dirs.map(d => html`<button type="button" role="listitem" onClick=${() => browse(d.path)}>${d.name + "/"}</button>`)
-          : html`<div class="empty" style="padding:8px 12px">${at.path ? "No folders inside." : "No data folders configured (Settings → Paths)."}</div>`}
       </div>
     </div>`;
 }
