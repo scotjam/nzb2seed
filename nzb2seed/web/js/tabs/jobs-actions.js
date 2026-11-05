@@ -47,6 +47,27 @@ ${w.parts} part(s) stopped with only small files missing `
   } catch (err) { toast("Could not start it: " + err.message); }
 }
 
+/* posts SABnzbd stopped downloading part-way: download them in full and build it again -
+   just this time (its abort goes off while they download, then back on), or for good */
+export async function fullPosts(j, keep) {
+  const posts = (j.extra || {}).aborted || [];
+  const total = posts.reduce((n, p) => n + (p.size || 0), 0);
+  const names = posts.slice(0, 3).map(p => p.title).join(", ") + (posts.length > 3 ? ` and ${posts.length - 3} more` : "");
+  const ask = `Download ${posts.length === 1 ? "the post" : `the ${posts.length} posts`} SABnzbd gave up on in full, and build ${j.title} again?\n\n`
+    + `SABnzbd stopped downloading ${names} part-way, because it could tell ${posts.length === 1 ? "it" : "they"} could not be repaired. `
+    + `Most of a broken post usually still checks out piece by piece. This downloads the rest (up to ${size(total)}), `
+    + `then builds again with everything already downloaded reused.\n\n`
+    + (keep ? `SABnzbd's "Abort jobs that cannot be completed" is turned off and stays off, so every later download is fetched in full too. `
+              + `With it off, SABnzbd still tries each article a few times on each news server (max_art_tries, 3 by default), then marks the job "Failed - Repair failed, not enough repair blocks" in its History, so it never retries forever; it only means the whole post is downloaded, even when it cannot be repaired.`
+            : `SABnzbd's "Abort jobs that cannot be completed" is turned off only while ${posts.length === 1 ? "it downloads" : "they download"}, then back on.`);
+  if (!confirm(ask)) return;
+  try {
+    const r = await api("/api/jobs/full_posts", { id: j.id, keep });
+    await refreshJobs();
+    toast(`Downloading in full and building it again - job ${r.id}.`);
+  } catch (err) { toast("Could not start it: " + err.message); }
+}
+
 export async function addToClient(j, where, always = false) {
   // "always" also hands over the ones from that tracker already waiting (the server does the same)
   const key = (t) => trackerName(t).trim().toLowerCase();

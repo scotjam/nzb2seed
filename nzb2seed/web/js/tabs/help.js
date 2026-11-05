@@ -91,6 +91,14 @@ const IDEAS = [
    "downloaded: each file from a complete download when one has it, the incomplete posts last, closest " +
    "first - including what can be unpacked from a broken RAR set. The gaps they leave are counted before " +
    "anything is decided, and come over BitTorrent only within your limit."],
+  ["Posts SABnzbd gives up on",
+   "SABnzbd's Abort jobs that cannot be completed (on by default) stops downloading a post the moment it can " +
+   "tell it cannot be repaired - yet most of a broken post usually still checks out piece by piece. When a " +
+   "build used such a post, its job offers to download the rest: just this time (the abort goes off only while " +
+   "it downloads), or always. Settings warns while the abort is on. With it off, SABnzbd still tries each " +
+   "article a few times on each news server (max_art_tries, 3 by default), then marks the job Failed - Repair " +
+   "failed, not enough repair blocks in its History, so it never retries forever; it only means the whole post " +
+   "is downloaded, even when it cannot be repaired."],
   ["Every piece is checked",
    "The torrent's pieces are checked against the files laid out. Pieces that fail make nzb2seed try " +
    "other posts of the same files, and qBittorrent's recheck has the last word."],

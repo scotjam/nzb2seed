@@ -470,3 +470,8 @@ nav a.tour-here { outline: 2px solid var(--torrent); outline-offset: 2px; }
 
 .csvbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
 .csvbar label.btn { display: inline-block; }
+
+/* a setting elsewhere (SABnzbd) working against nzb2seed, with the fix next to it */
+.warnbox { border: 1px solid var(--warn, #c8902a); border-radius: 6px; padding: .6em .8em; margin-top: .6em;
+  background: color-mix(in srgb, var(--warn, #c8902a) 10%, transparent); }
+.warnbox p { margin: 0 0 .5em; }
