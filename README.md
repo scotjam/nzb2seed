@@ -93,6 +93,16 @@ under other names (`/downloads`, `/data`). Tell nzb2seed in **Settings**:
 *SABnzbd path -> path on this machine* and *Path on this machine ->
 qBittorrent path* (for example `/data` -> `/srv/disk1`).
 
+**SABnzbd stops downloading posts it cannot repair** (*Config -> Switches ->
+Abort jobs that cannot be completed*, on by default). Most of a broken post
+usually still checks out piece by piece, so nzb2seed can build from it - if it
+was downloaded. nzb2seed's Settings warns while it is on and can turn it off;
+a job that used such a post offers to download the rest, just that once or
+always. With it off, SABnzbd still tries each article a few times on each news
+server (`max_art_tries`, 3 by default), then marks the job *Failed - Repair
+failed, not enough repair blocks* in its History, so it never retries forever;
+it only means the whole post is downloaded, even when it cannot be repaired.
+
 ### Prowlarr
 
 nzb2seed finds everything through [Prowlarr](https://prowlarr.com/): it

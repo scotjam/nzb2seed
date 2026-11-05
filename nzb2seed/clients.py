@@ -361,6 +361,12 @@ class SABnzbd:
                    pp=str(pp), script="None", priority="-100")
         return True
 
+    def retry(self, nzo_id: str) -> str:
+        """Put a failed job back in the queue: what it downloaded is kept, the rest is
+        fetched. Returns its id in the queue (SABnzbd may give it a new one)."""
+        data = self._call("retry", value=nzo_id)
+        return str(data.get("nzo_id") or nzo_id)
+
     def delete_history(self, nzo_id: str, files: bool = False):
         """Forget a finished job. Its files are kept unless ``files`` - which is only ever
         asked for about nzb2seed's own peek jobs, whose files are nobody else's."""

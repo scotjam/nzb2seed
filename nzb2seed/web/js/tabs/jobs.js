@@ -7,7 +7,7 @@ import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, tr
 import { SortSelect } from "../components/sort.js";
 import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, trackersOf, viaTracker } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
-import { addFromTrackers, addToClient, cancelMany, clearAndDelete, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
+import { addFromTrackers, addToClient, cancelMany, clearAndDelete, fullPosts, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
 export function JobsTab({ active }) {
   const all = useStore(jobs);
@@ -193,6 +193,13 @@ function JobActions({ j, all }) {
         ${x.tracker && html`<${Act} label=${`Always add nearly complete for ${where}`}
           title=${`From now on, every build from ${where} that stops less than ${limit} short goes to qBittorrent to download the rest, without asking. Undo it in Settings.`}
           onPress=${() => addToClient(j, where, true)} />`}`}
+      ${x.aborted?.length > 0 && !j.retried_as && html`
+        <${Act} label=${`Download what SABnzbd gave up on (${x.aborted.length} post${x.aborted.length === 1 ? "" : "s"}), just this time`}
+          title="SABnzbd stopped downloading these posts part-way because it could tell they could not be repaired - but most of a broken post usually still checks out piece by piece. Download the rest of them and build it again; SABnzbd's abort goes off only while they download."
+          onPress=${() => fullPosts(j, false)} />
+        <${Act} label="Always download posts in full"
+          title="Turn SABnzbd's 'Abort jobs that cannot be completed' off for good - better completion rates for every build - and build this one again. With it off, SABnzbd still tries each article a few times on each news server (max_art_tries, 3 by default), then marks the job 'Failed - Repair failed, not enough repair blocks' in its History, so it never retries forever; it only means the whole post is downloaded, even when it cannot be repaired."
+          onPress=${() => fullPosts(j, true)} />`}
       ${x.settled?.length > 0 && !j.retried_as && html`<${Act}
         label=${`Try whole posts (${wholePostsText(x).parts} part${x.settled.length === 1 ? "" : "s"}, ${wholePostsText(x).miss} missing)`}
         title=${`Only small files were missing from ${wholePostsText(x).names}, so no other whole post was downloaded for them. Build it again trying whole posts - about ${wholePostsText(x).post} or more - to see if they hold the rest.`}

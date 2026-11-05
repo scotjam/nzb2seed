@@ -27,13 +27,22 @@ export function SettingsTab({ active }) {
   const [status, setStatus] = useState({});
   const [tests, setTests] = useState(null);
   const [ret, setRet] = useState(null);
-  const [trackers, setTrackers] = useState(null);  // Prowlarr's torrent indexers: {trackers, error}
+  const [trackers, setTrackers] = useState(null);
+  const [sabAborts, setSabAborts] = useState(null); // SABnzbd's "abort jobs that cannot be completed": true / false / null  // Prowlarr's torrent indexers: {trackers, error}
 
   const fill = (s) => {
     const f = {};
     for (const [k] of FIELDS) f[k] = get(s.settings, k);
     setForm(f);
     setMaps({ sab: (s.settings.paths.sab_to_local || []).map(p => [...p]), qb: (s.settings.paths.local_to_qbit || []).map(p => [...p]) });
+  };
+  useEffect(() => {
+    if (!active) return;
+    api("/api/sab/abort").then(r => setSabAborts(r.aborts)).catch(() => setSabAborts(null));
+  }, [active]);
+  const fullPostsOn = async () => {
+    try { await api("/api/sab/abort", { aborts: false }); setSabAborts(false); toast("SABnzbd now downloads posts in full."); }
+    catch (err) { toast("Could not change SABnzbd: " + err.message); }
   };
   useEffect(() => {
     if (!active) return;
@@ -139,6 +148,14 @@ export function SettingsTab({ active }) {
         ${two(T("sabnzbd.category", "Category", {}, "Use one Sonarr and Radarr do not watch."),
               html`<label class="field"><span>Priority</span>${S("sabnzbd.priority", [["-1", "Low"], ["0", "Normal"], ["1", "High"], ["2", "Force"]])}</label>`)}
         ${C("sabnzbd.delete_history", "Remove finished jobs from SABnzbd history (files are kept)")}
+        ${sabAborts === true && html`<div class="warnbox">
+          <p><b>SABnzbd stops downloading posts it cannot repair.</b> Its <i>Abort jobs that cannot be completed</i>
+          is on, so a post with articles missing is abandoned part-way - yet most of a broken post usually still
+          checks out piece by piece, and could build most of the torrent. Downloading posts in full gives
+          better completion rates.</p>
+          <p class="status">With it off, SABnzbd still tries each article a few times on each news server (<i>max_art_tries</i>, 3 by default), then marks the job <i>Failed - Repair failed, not enough repair blocks</i> in its History, so it never retries forever; it only means the whole post is downloaded, even when it cannot be repaired.</p>
+          <button type="button" onClick=${fullPostsOn}>Download posts in full</button>
+        </div>`}
       </fieldset>
       <hr />
       <fieldset><legend>qBittorrent</legend>

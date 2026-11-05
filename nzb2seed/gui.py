@@ -23,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
 from urllib.parse import urlsplit
 
+from . import hopeless
 from . import btledger
 from . import config as config_mod
 from . import report
@@ -1223,6 +1224,8 @@ class App:
                         self.replaced(job, self.jobs[nid], job.extra.get("replaced_via", ""))
             except (Abort, ApiError, ValueError, OSError) as e:
                 job.status, job.result = "failed", str(e)
+                if pipeline_mod.aborted_posts():
+                    job.extra = {**(job.extra or {}), "aborted": pipeline_mod.aborted_posts()}
                 report.warn(str(e))
             except Exception as e:  # keep the server alive and show what broke
                 job.status, job.result = "failed", f"{type(e).__name__}: {e}"
@@ -1405,7 +1408,8 @@ def _opts(d: dict) -> Options:
                    no_qbit=bool(d.get("no_qbit")), start=bool(d.get("start")),
                    dry_run=bool(d.get("dry_run")),
                    retry_bad=None if d.get("retry_bad") is None else bool(d.get("retry_bad")),
-                   fetch_missing=bool(d.get("fetch_missing")), whole_posts=bool(d.get("whole_posts")))
+                   fetch_missing=bool(d.get("fetch_missing")), whole_posts=bool(d.get("whole_posts")),
+                   full_posts=bool(d.get("full_posts")))
 
 
 def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts: set[str]):
@@ -1558,6 +1562,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._send(200, *found)
             if path == "/api/settings":
                 return self._json(self.settings_payload())
+            if path == "/api/sab/abort":
+                # is SABnzbd's "abort jobs that cannot be completed" on? (None: not known)
+                if not app.cfg.sab_url or not app.cfg.sab_key:
+                    return self._json({"aborts": None})
+                return self._json({"aborts": hopeless.aborts(SABnzbd(app.cfg.sab_url, app.cfg.sab_key))})
             if path == "/api/trackers":
                 # the torrent indexers Prowlarr has - to tick the ones nearly complete builds
                 # are always added for. Prowlarr's own list: nothing reaches a tracker
@@ -1687,6 +1696,17 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._json({"auto_remove": retention_mod.removable(app.cfg, h)})
             if path == "/api/jobs/whole_posts":
                 return self.whole_posts(body)
+            if path == "/api/jobs/full_posts":
+                return self.full_posts(body)
+            if path == "/api/sab/abort":
+                # Settings: download posts in full from now on
+                if body.get("aborts") is not False:
+                    return self._err("only turning it off is offered here")
+                try:
+                    hopeless.turn_off(app.cfg, SABnzbd(app.cfg.sab_url, app.cfg.sab_key))
+                except (ApiError, OSError) as e:
+                    return self._err(f"SABnzbd could not be changed: {e}", 502)
+                return self._json({"aborts": False})
             if path == "/api/jobs/remove":
                 # take finished jobs off the list; one still running (or waiting for an
                 # answer) is never removed. Only the list entry goes - unless its Usenet
@@ -2020,6 +2040,51 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self._err(f"{title} is already being built (job {busy.id})", 409)
             app.request.asked = {"path": "/api/build", "body": again}
             app.request.retrying = job                  # this job is the one tried again
+            nj = app.start_job(title, "build", run)
+            return self._json({"id": nj.id})
+
+        def full_posts(self, body):
+            """A build where SABnzbd stopped downloading posts part-way: build it again with
+            those posts downloaded in full. ``keep``: SABnzbd's abort is turned off for good
+            first (every later download benefits); otherwise it is off only while they download."""
+            job = self._nearly(body)
+            if job is None:
+                return
+            if not (job.extra or {}).get("aborted"):
+                return self._err("SABnzbd did not stop any of its posts part-way")
+            if job.retried_as:
+                return self._err(f"it was already tried again, as job {job.retried_as}", 409)
+            keep = bool(body.get("keep"))
+            if keep:
+                try:
+                    hopeless.turn_off(app.cfg, SABnzbd(app.cfg.sab_url, app.cfg.sab_key))
+                except (ApiError, OSError) as e:
+                    return self._err(f"SABnzbd could not be changed: {e}", 502)
+            if job.kind == "auto":
+                box = getattr(app, "inbox", None)
+                h = box.retryable_job(job.id) if box else None
+                if not h:
+                    return self._err("it is not waiting on the Automatic tab to be tried again", 409)
+                box.retry(h, full_posts=True)
+                job.retried_as = box.running.get(h) or box.state.items[h].get("job")
+                app.store.changed(urgent=True)
+                return self._json({"id": job.retried_as})
+            rq = job.repeat or {}
+            again = json.loads(json.dumps(rq.get("body") or {}))
+            if rq.get("path") == "/api/assemble":
+                again.setdefault("options", {})["full_posts"] = True
+                app.request.asked = {"path": "/api/assemble", "body": again}
+                app.request.retrying = job
+                return self.assemble(again)
+            if rq.get("path") != "/api/build":
+                return self._err("this job was not started by a request that can be repeated")
+            again.setdefault("options", {})["full_posts"] = True
+            title, run = build_job(app, again)
+            busy = app.active_build(title)
+            if busy:
+                return self._err(f"{title} is already being built (job {busy.id})", 409)
+            app.request.asked = {"path": "/api/build", "body": again}
+            app.request.retrying = job
             nj = app.start_job(title, "build", run)
             return self._json({"id": nj.id})
 
@@ -2486,6 +2551,13 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     app.start_inbox()
     app.start_library()
     app.start_mend()
+    try:
+        if app.cfg.sab_url and app.cfg.sab_key and \
+                hopeless.restore_after_restart(app.cfg, SABnzbd(app.cfg.sab_url, app.cfg.sab_key)):
+            print("SABnzbd: \"abort jobs that cannot be completed\" put back on (a restart came while a "
+                  "post downloaded in full)", flush=True)
+    except Exception as e:                      # noqa: BLE001 - never stops the GUI starting
+        print(f"SABnzbd: could not check its abort setting: {e}", flush=True)
     app.resume_builds()
     app.start_retention()
     app.start_space_guard()

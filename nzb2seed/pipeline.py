@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from . import metadata
 from . import assemble as asm
 from . import archives, grab, matching, nzbinfo, space
+from . import hopeless
 from .clients import (PP_NONE, PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
                       Prowlarr, QBittorrent, Release, SABnzbd)
 from .config import Config
@@ -60,13 +61,16 @@ class Incomplete(Abort):
         # parts only small files were missing from, left without downloading another whole
         # post: a whole post may still hold them (a Sample inside an obfuscated RAR set)
         self.settled = list(getattr(_this_build, "settled", []) or [])
+        # posts SABnzbd stopped downloading part-way (its "abort jobs that cannot be
+        # completed"): downloaded in full, they may hold much more of the torrent
+        self.aborted = aborted_posts()
 
     def details(self) -> dict:
         # unrounded: a few KB short of a season rounds to 1.0, which then reads as 100%
         return {"have": self.have, "infohash": self.infohash,
                 "torrent_path": self.torrent_path, "save_path": self.save_path,
                 "in_client": self.in_client, "tracker": self.tracker, "short": self.short,
-                "seeders": self.seeders, "settled": self.settled}
+                "seeders": self.seeders, "settled": self.settled, "aborted": self.aborted}
 
 
 @dataclass
@@ -83,6 +87,7 @@ class Options:
     unattended: bool = False       # automatic builds: never ask the person to pick a post
     peek: bool | None = None       # look inside a RAR post first (None = behaviour.peek_archives)
     whole_posts: bool = False      # a small file missing: try whole posts for it before settling
+    full_posts: bool = False       # posts SABnzbd gave up on part-way are downloaded in full
     related: tuple = ()            # infohashes of torrents of the same release built before
     reuse_dirs: tuple = ()         # folders an earlier build of the release laid out (read, never cleaned)
 
@@ -312,6 +317,11 @@ def ledger_for(cfg: Config) -> Ledger:
 _this_build = threading.local()
 
 
+def aborted_posts() -> list[dict]:
+    """Posts this build used or tried that SABnzbd stopped downloading part-way."""
+    return list(getattr(_this_build, "aborted", []) or [])
+
+
 def _torrent_now() -> str:
     return getattr(_this_build, "torrent", "")
 
@@ -468,6 +478,19 @@ def salvage_archives(d: str, wanted: list) -> bool:
                         fh.truncate(f.length)     # the missing tail: zeros, read as a gap
                 got = True
     return got
+
+
+def failed_earlier(cfg: Config, sab: SABnzbd, rel: Release) -> tuple[str, dict] | None:
+    """The earlier nzb2seed download of this same NZB that failed in SABnzbd, as
+    (nzo, history slot); None when there is none."""
+    for j in ledger_for(cfg).matches(rel.title, rel.guid, rel.size):
+        try:
+            status, slot = sab.status(j["nzo"])
+        except ApiError:
+            continue
+        if status in SAB_FAILED:
+            return j["nzo"], slot
+    return None
 
 
 def failed_before(cfg: Config, sab: SABnzbd, rel: Release) -> bool:
@@ -1810,6 +1833,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     settled = getattr(_this_build, "settled", None)
     if settled is None:
         settled = _this_build.settled = []
+    refetched: set[str] = set()                # posts taken up again in full, this build
+    holding = getattr(_this_build, "abort_holds", None)   # of those, the ones holding the abort off
+    if holding is None:
+        holding = _this_build.abort_holds = set()
 
     def fill(d: str, missing: list) -> bool:
         return packed_release(t) and scenefill.fill(t, d, missing, fetcher)
@@ -1900,6 +1927,48 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
              "of it missing or damaged")
         verdicts.mark(t.infohash, u.need.label, rel, f"SABnzbd failed it ({why}); {gb(short)} missing")
         return d
+
+    def note_aborted(rel: Release, slot: dict):
+        if not hopeless.is_aborted(slot):
+            return
+        ab = getattr(_this_build, "aborted", None)
+        if ab is None:
+            ab = _this_build.aborted = []
+        if all(a["title"] != rel.title for a in ab):
+            ab.append({"title": rel.title, "indexer": rel.indexer, "size": rel.size})
+
+    def refetch(u: Unit, rel: Release, nzo: str, slot: dict) -> bool:
+        """A post SABnzbd stopped part-way (it could tell it could not be repaired) is
+        downloaded in full - asked to for this build (``opts.full_posts``: its abort goes off
+        only until the post finishes), or when the abort is off in SABnzbd now. True when it
+        is back in SABnzbd's queue. Each post at most once a build."""
+        if not hopeless.is_aborted(slot) or nzo in refetched:
+            return False
+        held = False
+        if opts.full_posts:
+            if not hopeless.hold(cfg, sab):
+                warn(f"{rel.title}: SABnzbd's abort could not be turned off - not downloading the rest of it")
+                return False
+            held = True
+        elif hopeless.aborts(sab) is not False:
+            return False
+        try:
+            new = sab.retry(nzo)
+        except Exception as e:                  # noqa: BLE001
+            if held:
+                hopeless.release(cfg, sab)
+            warn(f"SABnzbd could not take {rel.title} up again: {e}")
+            return False
+        refetched.update((nzo, new))
+        if held:
+            holding.add(new)
+        if new != nzo:
+            old = next(iter(ledger_for(cfg).matches(rel.title, rel.guid, rel.size)), {})
+            ledger_for(cfg).record(new, rel.title, rel.guid, rel.indexer, rel.size, _torrent_now(), old.get("ids"))
+        warn(f"{rel.title} ({rel.indexer}): SABnzbd stopped downloading it part-way - downloading the rest"
+             + (", with SABnzbd's \"abort jobs that cannot be completed\" off until it finishes" if held else ""))
+        pending[new] = (u, rel)
+        return True
 
     def use_holed(u: Unit):
         """No complete post: build from everything downloaded - each file from a complete
@@ -2117,6 +2186,20 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     raise Abort(f"no Usenet post could supply {u.need.label}")
             u.tried.append(rel)
             attempted.add(rel.guid)
+            # a post that failed in SABnzbd before: downloaded in full if asked to, else what it
+            # holds is a last resort - never skipped outright (nor by what an earlier run said of it)
+            failed = failed_earlier(cfg, sab, rel)
+            if failed:
+                fnzo, fslot = failed
+                if refetch(u, rel, fnzo, fslot):
+                    return
+                info(f"{rel.title} ({rel.indexer}): failed in SABnzbd before ({fnzo}) - not downloading "
+                     "it again; what it holds is kept as a last resort")
+                note_aborted(rel, fslot)
+                d = salvage(u, rel, fslot)
+                if d and all(h[0] != d for h in u.holed):
+                    u.holed.append((d, fnzo, shortfall(u, d)))
+                continue
             known = verdicts.seen(t.infohash, u.need.label, rel)
             if known and known.startswith("its archive holds a different release") and packed_inner(u):
                 # judged before the video inside the torrent's scene RARs counted as a match:
@@ -2141,8 +2224,6 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                         partials.append((old[1], rel.title))
                         if settle_small(u, old[1], old[0]):
                             return
-                continue
-            if failed_before(cfg, sab, rel):
                 continue
             if hasattr(pr, "kept"):
                 pr.kept(rel)                     # an earlier download's archive password, from its NZB
@@ -2198,6 +2279,9 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         results = sab_wait(sab, {nzo: rel.title for nzo, (_, rel) in batch.items()})
         for nzo, (status, slot_info) in results.items():
             u, rel = batch[nzo]
+            if nzo in holding:
+                holding.discard(nzo)
+                hopeless.release(cfg, sab)
             if status in SAB_DONE:
                 d = job_dir(cfg, slot_info, rel.title)
                 # "Completed" without repair data can still be missing articles: SABnzbd
@@ -2227,6 +2311,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 if settle_small(u, d, nzo):
                     continue
             else:
+                if status in SAB_FAILED and refetch(u, rel, nzo, slot_info):
+                    continue
+                if status in SAB_FAILED:
+                    note_aborted(rel, slot_info)
                 d = salvage(u, rel, slot_info) if status in SAB_FAILED else None
                 if d:
                     u.holed.append((d, nzo, shortfall(u, d)))
@@ -3190,6 +3278,8 @@ def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[
     """Everything after the releases have been chosen. ``torrent_data``: a .torrent the
     user supplied, used instead of downloading one."""
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
+    _this_build.aborted = []
+    _this_build.abort_holds = set()
     pr = grab.Source(cfg, Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key), sab)
     qb = None if opts.no_qbit else QBittorrent(cfg.qbit_url, cfg.qbit_user, cfg.qbit_pass)
     info(f"SABnzbd {sab.version()}")
@@ -3203,6 +3293,9 @@ def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[
         pr.close()                      # paused NZB-check jobs of posts not used
         _sweep_peeks(cfg, sab)          # a build ending: its torrent is complete, or given up on
         _building.discard(getattr(_this_build, "torrent", None))
+        for _ in getattr(_this_build, "abort_holds", None) or ():
+            hopeless.release(cfg, sab)          # a build cancelled while a post downloaded in full
+        _this_build.abort_holds = set()
         metadata.close_session()
 
 
