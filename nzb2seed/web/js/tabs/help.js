@@ -30,7 +30,8 @@ const TABS = [
          "from the moment they appear, when they are most in demand, without downloading them over " +
          "BitTorrent - hands-off." },
   { id: "library", name: "Library", does:
-      "Seeds your TV library from one tracker, a season at a time. A season the tracker has as the very " +
+      "Seeds your TV library from one tracker - or several, in an order you set - a season at a time. " +
+      "A season a tracker has as the very " +
       "same release is linked into a torrent with nothing downloaded; the others are built from Usenet " +
       "within a daily budget and offered as a swap you approve. While it builds or moves a season, " +
       "qBittorrent's on-finished program (cross-seed) is held back so the disk is not swamped.",
@@ -63,7 +64,8 @@ const IDEAS = [
    Settings. <b>Prowlarr</b> searches your trackers and indexers (below). If SABnzbd or qBittorrent run in
    Docker, fill in the path translations in Settings too. The README has a docker-compose file for each
    (<a href="https://docs.linuxserver.io/images/docker-sabnzbd/" target="_blank" rel="noopener noreferrer">SABnzbd</a>,
-   <a href="https://docs.linuxserver.io/images/docker-qbittorrent/" target="_blank" rel="noopener noreferrer">qBittorrent</a>).`],
+   <a href="https://docs.linuxserver.io/images/docker-qbittorrent/" target="_blank" rel="noopener noreferrer">qBittorrent</a>).
+   Recommended too: <b>cross-seed</b> (see below).`],
   ["Setting up Prowlarr (needed before anything else)",
    html`nzb2seed finds everything through
    <a href="https://prowlarr.com/" target="_blank" rel="noopener noreferrer">Prowlarr</a>: your torrent trackers
@@ -77,6 +79,16 @@ const IDEAS = [
    covers every step
    (<a href="https://wiki.servarr.com/prowlarr/installation" target="_blank" rel="noopener noreferrer">installing</a>,
    <a href="https://wiki.servarr.com/prowlarr/indexers" target="_blank" rel="noopener noreferrer">indexers</a>).`],
+  ["cross-seed (recommended)",
+   html`Not needed to build anything, but recommended:
+   <a href="https://www.cross-seed.org" target="_blank" rel="noopener noreferrer">cross-seed</a> finds the same
+   release on your other trackers and adds it to qBittorrent seeding from the files you already have (hard
+   links, nothing downloaded). Every torrent nzb2seed builds - from Build, Automatic or Library - then seeds on
+   each tracker that has it, so one Usenet download grows your stats on all of them. Point qBittorrent's "Run
+   external program on torrent finished" at cross-seed's webhook so each build is searched for as soon as it
+   is complete. The README has a ready docker-compose file and the settings that matter; the
+   <a href="https://www.cross-seed.org/docs/basics/getting-started" target="_blank" rel="noopener noreferrer">cross-seed documentation</a>
+   covers the rest.`],
   ["Nothing over BitTorrent unless you allow it",
    "A build that is not 100% from Usenet stays stopped in qBittorrent. It downloads the rest only when you " +
    "choose to, or if, within nzb2seed's settings, its tracker is manually set to download nearly complete " +
@@ -104,12 +116,21 @@ const IDEAS = [
    "other posts of the same files, and qBittorrent's recheck has the last word."],
   ["Can my library boost my tracker stats?",
    "Yes - that is what the Library tab is for, wherever the library came from: Usenet, Sonarr/Radarr, " +
-   "a tracker that has since closed, etc. Pick the tracker whose stats you want to grow and your TV " +
+   "a tracker that has since closed, etc. Pick the tracker whose stats you want to grow (or several, " +
+   "in order) and your TV " +
    "folders. Seasons the tracker has as the very same release start seeding straight away from your files, " +
    "with nothing downloaded. The others are built from Usenet as that tracker's release, within a daily " +
    "budget, and offered as a swap for your copy. Each season seeded adds to your seeding size, and to your " +
-   "ratio, bonus points and seeding time as it is downloaded by others. Add cross-seed and the same files " +
-   "seed on your other trackers too."],
+   "ratio, bonus points and seeding time as it is downloaded by others. With cross-seed (recommended, " +
+   "above) the same files seed on your other trackers too."],
+  ["One tracker or several (Library)",
+   "One tracker is the recommended default: every season pack comes from it. Choose Several trackers to " +
+   "tick more and put them in order, first choice at the top. The list also holds Your files - the very " +
+   "release you have, on any ticked tracker - at the top by default, so a season any of them has as your " +
+   "release is linked with nothing downloaded; otherwise the first tracker with a pack builds it from " +
+   "Usenet. Move Your files down to prefer a tracker's own pack over it. One Prowlarr search covers them " +
+   "all, and a new order makes waiting seasons search again. Ticking another tracker puts seasons left as " +
+   "No season pack back in the queue to try it."],
   ["Not much of a library? Start with Automatic",
    "The Library tab grows your stats from shows you already have. With few of those, the Automatic tab is " +
    "the better start: link autobrr, tick the filters for the trackers you want to grow, and each new " +
@@ -135,11 +156,11 @@ const IDEAS = [
    <a href="https://codeberg.org/cross-eyed/cross-eyed" target="_blank" rel="noopener noreferrer">cross-eyed</a>
    - a separate, self-hosted app that tracks which torrents share which files - approving a season moves the
    torrent itself, and its cross-seed copies, into the show's folder, and qBittorrent rechecks it there.
-   To use it: install cross-seed first, then run cross-eyed's Docker container next to qBittorrent (the
-   README's "Moving seasons into your library with cross-eyed" walks through both, with ready docker-compose
-   files), open it on port 8765, then put its address in
-   Library, under "cross-eyed address", and save. cross-eyed starts in dry-run each time: approved moves wait
-   until you switch it to live in its header. "Auto delete the existing library files" then removes your old
+   To use it: set up cross-seed first (above), then run cross-eyed's Docker container next to qBittorrent (the
+   README's "Moving seasons into your library with cross-eyed" walks through it, with a ready docker-compose
+   file), open it on port 8765, then put its address in
+   Library, under "cross-eyed address", and save. cross-eyed starts in dry-run each time: while it is, the Library tab says so
+   and nothing is moved (auto move waits too) until you switch it to live in its header. "Auto delete the existing library files" then removes your old
    season folder once the moved torrent seeds at 100.0% - it may cause data loss, so watch a few moves first.`],
   ["Only its own files",
    "nzb2seed only removes what it created itself, keeps a record of it, and never deletes from your " +

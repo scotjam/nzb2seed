@@ -2152,6 +2152,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             return self._json({"id": nj.id, "also": also})
 
         LIBRARY_FIELDS = {"enabled": ("library_enabled", bool), "indexer": ("library_indexer", str),
+                          "multi": ("library_multi", bool), "order": ("library_order", "names"),
                           "roots": ("library_roots", list), "output_dir": ("library_output_dir", str),
                           "daily_gb": ("library_daily_gb", float),
                           "keep_replaced_days": ("library_keep_replaced_days", float),
@@ -2185,7 +2186,16 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 for k, (field_, typ) in self.LIBRARY_FIELDS.items():
                     if k not in body:
                         continue
-                    if typ is list:
+                    if typ == "names":
+                        # tracker names (and "your files"), in order: short, unique, a bounded list
+                        v = body[k] if isinstance(body[k], list) else []
+                        names = []
+                        for x in v[:library_mod.MAX_TRACKERS + 1]:
+                            x = config_mod.clean_tracker_name(str(x)) if isinstance(x, str) else ""
+                            if x and x not in names:
+                                names.append(x)
+                        changes[field_] = names
+                    elif typ is list:
                         v = body[k] if isinstance(body[k], list) else str(body[k]).splitlines()
                         changes[field_] = [local_folder(cfg, x) for x in v if str(x).strip()]
                     elif typ is bool:
@@ -2194,10 +2204,15 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                         changes[field_] = typ(body[k])
                 if changes.get("library_output_dir"):
                     changes["library_output_dir"] = local_folder(cfg, changes["library_output_dir"])
+                if "indexer" in body:
+                    changes["library_indexer"] = config_mod.clean_tracker_name(str(body["indexer"] or ""))
                 new = dataclasses.replace(cfg, **changes)
+                if new.library_multi and library_mod.trackers(new) and "library_indexer" not in changes:
+                    # one tracker again later starts from the first of the list
+                    new = dataclasses.replace(new, library_indexer=library_mod.trackers(new)[0])
                 if new.library_enabled:
-                    if not new.library_indexer:
-                        raise ValueError("choose the tracker first")
+                    if not library_mod.trackers(new):
+                        raise ValueError("tick a tracker first" if new.library_multi else "choose the tracker first")
                     if not new.library_roots:
                         raise ValueError("add the library's TV folder(s) first")
                     out = library_mod.output_dir(new)
