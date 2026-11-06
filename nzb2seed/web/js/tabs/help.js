@@ -114,6 +114,14 @@ const IDEAS = [
   ["Every piece is checked",
    "The torrent's pieces are checked against the files laid out. Pieces that fail make nzb2seed try " +
    "other posts of the same files, and qBittorrent's recheck has the last word."],
+  ["Torrents short of 100%, and kept originals",
+   "A tracker's copy of a release can differ in a few pieces from the Usenet post, so a cross-seed of it (or a " +
+   "Library season) can sit stopped short of 100%. Every half hour nzb2seed tries the missing files from " +
+   "another torrent of the same name, or from an original it kept, as a hard link (never written into), and " +
+   "starts the torrent once it rechecks at 100.0%. Originals: before a repair or a BitTorrent download changes " +
+   "a built file, nzb2seed keeps the Usenet version in .nzb2seed-originals on the same disk - often exactly " +
+   "what your other trackers have - and the change goes into a copy of its own. They are kept for " +
+   "keep_originals_days (3 by default; 0 keeps none), then let go; a torrent finished from one keeps its bytes."],
   ["Can my library boost my tracker stats?",
    "Yes - that is what the Library tab is for, wherever the library came from: Usenet, Sonarr/Radarr, " +
    "a tracker that has since closed, etc. Pick the tracker whose stats you want to grow (or several, " +

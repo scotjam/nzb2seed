@@ -25,6 +25,7 @@ from . import metadata
 from . import assemble as asm
 from . import archives, grab, matching, nzbinfo, space
 from . import hopeless
+from . import originals
 from .clients import (PP_NONE, PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
                       Prowlarr, QBittorrent, Release, SABnzbd)
 from .config import Config
@@ -2605,6 +2606,8 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
 
     def swap(rel: str, path: str, used: Release):
         dst = res.placed[rel]
+        # this post's version may be what other trackers carry: keep it before it goes
+        originals.keep(rt.cfg, dst, rel, t.infohash, f"replaced by the copy from {used.title}")
         os.remove(dst)
         owned.forget_file(dst)
         asm._move(path, dst, owned)
@@ -2625,7 +2628,8 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
         f = by_rel[r]
         start, end = t.piece_span(i)
         lo, hi = max(start, f.offset), min(end, f.offset + f.length)
-        asm.own_copy(res.placed[r])     # never write into a file shared with a library
+        originals.keep(rt.cfg, res.placed[r], r, t.infohash, f"piece {i} patched")
+        asm.own_copy(res.placed[r])     # never write into a file shared with a library (or a kept original)
         with open(src, "rb") as fi, open(res.placed[r], "r+b") as fo:
             fi.seek(lo - f.offset)
             fo.seek(lo - f.offset)

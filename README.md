@@ -205,6 +205,40 @@ autoResumeMaxDownload: 0,           // never let a near-match download into shar
   in the Library tab), then puts your setting back when the Library is
   switched off.
 
+### Torrents left short of 100%, and the originals kept for them
+
+The same release is not always byte for byte the same everywhere: a tracker's
+copy of an episode can differ in a few pieces from the Usenet post (a re-mux,
+a fixed header). A cross-seed of such a release, or a Library season, then
+sits stopped in qBittorrent short of 100%.
+
+Every half hour nzb2seed looks at the stopped torrents short of 100% and tries
+the files they are missing from elsewhere: another torrent of the same name in
+qBittorrent, or an original nzb2seed kept (below). The file is replaced by a
+hard link to that copy - never written into, so the library and the torrents
+sharing the old file keep theirs - and rechecked. A copy that comes out no
+better is put back. At 100.0% the torrent is started: it only seeds, nothing
+was downloaded.
+
+**Originals.** A build changes its own files in two cases: when pieces fail
+and another post's copy replaces a file (or patches a piece of it), and when
+a build a little short of 100% is handed to qBittorrent to download the rest
+over BitTorrent. The Usenet version of those files is often the very version
+other trackers carry, so before either change nzb2seed keeps it - a second
+name for the same bytes in `.nzb2seed-originals` at the top of the same disk -
+and the change goes into a copy of the file of its own. Keeping it is instant;
+what it costs is the room for that copy, and only for the files about to
+change, not the whole torrent (without room for it, nothing is kept and the
+build goes on as before). Your other trackers' cross-seeds of the release are
+then finished from it, with nothing downloaded.
+
+Originals are kept for `keep_originals_days` (3 by default, in
+`[behaviour]`; 0 keeps none) - long enough for cross-seed to find the release
+on your other trackers and for the next rounds to finish them. After that only
+the name in `.nzb2seed-originals` goes: a torrent that was finished from an
+original keeps its bytes. What was kept is listed in `originals.json` next to
+the config.
+
 ## Running it
 
 Python 3.10+ with `requests`. Run it on the machine that holds the

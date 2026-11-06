@@ -3,8 +3,9 @@
 A torrent left stopped short of 100% (a cross-seed partial match, or a Library season whose
 episode differs from the tracker's) often has its missing files whole in another torrent of
 the same name in qBittorrent - another tracker's copy, or the copy nzb2seed built for another
-tracker from Usenet. Every so often each such torrent gets that version of its incomplete
-files and a recheck:
+tracker from Usenet - or in the version of a file nzb2seed kept before a repair or a
+BitTorrent download changed it (originals.py). Every so often each such torrent gets that
+version of its incomplete files and a recheck:
 
 * the file is replaced by a hard link to the other copy (or a copy of it, from another drive)
   - never written into, so the library and any torrent sharing the old file keep theirs;
@@ -21,6 +22,7 @@ import shutil
 import threading
 import time
 
+from . import originals
 from .clients import CHECKING, ApiError
 
 INTERVAL = 30 * 60
@@ -136,11 +138,16 @@ class Mender:
             if r.get("progress", 0) >= 1 and r.get("state") not in CHECKING:
                 whole.setdefault(r.get("name") or "", []).append(r)
         busy = self.busy()
+        try:
+            originals.prune(cfg)
+        except OSError as e:
+            print(f"mend: could not let go of old originals: {e}", flush=True)
+        kept = originals.kept_roots(cfg)
         for r in rows:
             if (r.get("state") in STOPPED and 0 < r.get("progress", 0) < 1 and r["hash"] not in busy
-                    and whole.get(r.get("name") or "")):
+                    and (whole.get(r.get("name") or "") or (r.get("name") or "") in kept)):
                 try:
-                    self.mend(qb, r, whole[r["name"]], back, map_path)
+                    self.mend(qb, r, whole.get(r["name"], []), back, map_path)
                 except (ApiError, OSError) as e:
                     self.state.note(f"{r['name']}: {e}")
 
@@ -157,13 +164,20 @@ class Mender:
             dst = os.path.join(here, *name.split("/"))
             if not os.path.isfile(dst):
                 continue
-            for o in others:
-                if o["hash"] not in listed:
-                    listed[o["hash"]] = {x["name"]: x for x in qb.files(o["hash"])}
-                x = listed[o["hash"]].get(name)
-                if not x or x.get("size") != f.get("size"):
-                    continue
-                src = os.path.join(map_path(o.get("save_path") or "", back), *name.split("/"))
+
+            def sources():
+                """Another torrent's copy of this file first, then a kept original of it."""
+                for o in others:
+                    if o["hash"] not in listed:
+                        listed[o["hash"]] = {x["name"]: x for x in qb.files(o["hash"])}
+                    x = listed[o["hash"]].get(name)
+                    if x and x.get("size") == f.get("size"):
+                        yield (os.path.join(map_path(o.get("save_path") or "", back), *name.split("/")),
+                               f"{o.get('name') or o['hash']}'s files")
+                for p in originals.candidates(self.app.cfg, name, f.get("size")):
+                    yield p, "the version kept before it was changed"
+
+            for src, label in sources():
                 try:
                     ino = _inode(src)
                 except OSError:
@@ -175,7 +189,7 @@ class Mender:
                     free = shutil.disk_usage(os.path.dirname(dst)).free
                     if free < f["size"] * 1.1 + 1024 ** 3:
                         continue                            # no room for a copy
-                swaps.append((name, dst, src, mark, o.get("name") or o["hash"]))
+                swaps.append((name, dst, src, mark, label))
                 break
         if not swaps:
             return False
@@ -215,13 +229,13 @@ class Mender:
         pct = info.get("progress", 0) * 100
         if info.get("progress", 0) >= 1:
             qb.start(h)
-            self.state.note(f"{r['name']}: finished from {swaps[0][4]}'s files - 100.0%, seeding "
+            self.state.note(f"{r['name']}: finished from {swaps[0][4]} - 100.0%, seeding "
                             f"(was {r['progress'] * 100:.4f}%)")
             lib = getattr(self.app, "library", None)
             if lib:                                         # a Library season that was short settles
                 lib.state.scanned_at = 0
                 lib.wake.set()
         else:
-            self.state.note(f"{r['name']}: tried {len(done)} file(s) from another torrent, {better} "
+            self.state.note(f"{r['name']}: tried {len(done)} file(s) from {swaps[0][4]}, {better} "
                             f"better - now {pct:.4f}% (was {r['progress'] * 100:.4f}%)")
         return info.get("progress", 0) >= 1
