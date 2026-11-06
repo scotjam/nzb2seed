@@ -30,6 +30,7 @@ from . import report
 from .clients import ApiError, Autobrr, Prowlarr, QBittorrent, Release, SABnzbd
 from . import inbox as inbox_mod
 from . import library as library_mod
+from . import originals as originals_mod
 from . import metadata
 from . import season as season_mod
 from . import series as series_mod
@@ -827,6 +828,7 @@ class App:
                                 "obligations there")
                 except ApiError as e:
                     report.warn(f"could not change its tags in qBittorrent: {e}")
+            self.keep_originals(cfg, qb, h, x.get("save_path") or info.get("save_path") or "")
             btledger.record_start(cfg, h, x.get("tracker") or "", info, short)
             qb.start(h)
             job.extra = {**(job.extra or {}), "added": True}
@@ -836,6 +838,41 @@ class App:
             return {"result": f"in qBittorrent, downloading the last {rest}"}
 
         return self.start_job(f"Finish in qBittorrent: {job.title}", "client", run)
+
+    def keep_originals(self, cfg, qb, h: str, save_path: str):
+        """Before qBittorrent downloads into a build's short files, keep their bytes as built:
+        the pieces it fetches replace them, and other trackers often carry the release with
+        exactly those bytes (see originals.py). Each short file gets its own copy to write
+        into; the kept original is never written."""
+        try:                                    # a precaution: never what fails the job
+            files = qb.files(h)
+        except Exception as e:                  # noqa: BLE001
+            report.warn(f"could not list its files to keep their originals: {e}")
+            return
+        here = map_path(save_path, [(b, a) for a, b in (cfg.local_to_qbit or [])])
+        kept, skipped = [], []
+        for f in files:
+            if (f.get("progress") or 0) >= 1 or f.get("priority", 1) == 0:
+                continue
+            path = os.path.join(here, *f["name"].split("/"))
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                continue
+            try:
+                ok = originals_mod.keep_before_writes(cfg, path, f["name"], h, "downloaded into over BitTorrent")
+            except OSError as e:
+                report.warn(f"could not keep the built version of {os.path.basename(f['name'])}: {e}")
+                continue
+            if ok:
+                kept.append(os.path.basename(f["name"]))
+            elif float(getattr(cfg, "keep_originals_days", 3) or 0):
+                skipped.append(os.path.basename(f["name"]))
+        if kept:
+            report.info(f"kept the built version of {len(kept)} file(s) before qBittorrent changes them "
+                        f"(for other trackers' copies of this release): {', '.join(kept[:4])}"
+                        + (f" and {len(kept) - 4} more" if len(kept) > 4 else ""))
+        if skipped:
+            report.warn(f"not enough free space to keep the built version of {', '.join(skipped[:4])}"
+                        " - qBittorrent will change it in place")
 
     # ------------------------------------------------ clearing what builds leave behind
     def clean_downloads(self, log=print) -> tuple[int, int]:

@@ -112,6 +112,7 @@ class Config:
     match_episode_names: bool = False  # place posts/files named only by episode title (more searches)
     episode_source: str = "all"       # where a show's episode list comes from: all | tvmaze | tmdb | tvdb | imdb
     season_packing: str = "scene"     # "scene" = keep scene RARs (rebuild them from srrDB) | "unpack"
+    keep_originals_days: float = 3.0   # a built file's own bytes, kept before a repair or download changes them
     gui_username: str = DEFAULT_GUI_USER
     gui_password: str = DEFAULT_GUI_PASSWORD   # empty = no login, LAN-only
 
@@ -164,6 +165,7 @@ LAYOUT = [
     ("retention", "enabled", "retention_enabled"),
     ("retention", "days", "retention_days"),
     ("behaviour", "season_packing", "season_packing"),
+    ("behaviour", "keep_originals_days", "keep_originals_days"),
     ("behaviour", "episode_source", "episode_source"),
     ("behaviour", "match_episode_names", "match_episode_names"),
     ("flaresolverr", "url", "flaresolverr_url"),
