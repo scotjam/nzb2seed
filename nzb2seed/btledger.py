@@ -57,6 +57,16 @@ def taken(cfg, infohash: str, info: dict | None) -> int:
     return total
 
 
+def need(frac: float, short: int | None, total: int | None, before: int):
+    """(share, bytes) a start would download, counting what earlier starts took."""
+    if not before:
+        return 1 - frac, short
+    if not total:
+        return 1 - frac, (short or 0) + before
+    n = (short if short is not None else round(total * (1 - frac))) + before
+    return n / total, n
+
+
 def record_start(cfg, infohash: str, tracker: str, info: dict, short: int | None):
     """A start of a torrent that is ``short`` bytes from complete."""
     with _lock:

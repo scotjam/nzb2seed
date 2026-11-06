@@ -220,7 +220,20 @@ same name in qBittorrent. The file is replaced by a
 hard link to that copy - never written into, so the library and the torrents
 sharing the old file keep theirs - and rechecked. A copy that comes out no
 better is put back. At 100.0% the torrent is started: it only seeds, nothing
-was downloaded.
+was downloaded. Torrents match by name even when one tracker names a
+single-file torrent after its file and another after a folder, and an
+unfinished torrent's files are looked for in qBittorrent's download folder
+too.
+
+When nothing here is left to try, the rest can come from the torrent's own
+tracker - only a tracker ticked **always add** (Settings, "Builds that stop a
+few percent short"), and only while what is missing is within the limit you
+set for it, counting what earlier starts of the torrent downloaded, with 10%
+of the limit kept free. Before it starts, each short file gets a copy of its
+own (cross-seeded files are usually shared with other torrents, which would
+otherwise change too) and its present version is kept as an original. Each
+torrent is started this way once - one you stop again stays stopped - and
+nothing starts while the free-space guard is holding downloads.
 
 **Originals.** A build changes its own files in two cases: when pieces fail
 and another post's copy replaces a file (or patches a piece of it), and when

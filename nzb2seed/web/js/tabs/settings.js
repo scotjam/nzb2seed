@@ -415,7 +415,7 @@ function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
   };
   return html`<div class="field"><span>What each tracker lets you download</span>
     ${known === null ? html`<small class="status">Asking Prowlarr for its trackers…</small>` : html`
-      <table class="limits"><thead><tr><th>tracker</th><th>%</th><th>MB</th><th title="Builds from it within its limit go to qBittorrent without asking">always add</th></tr></thead>
+      <table class="limits"><thead><tr><th>tracker</th><th>%</th><th>MB</th><th title="Builds from it within its limit go to qBittorrent without asking - and stopped torrents from it that nothing on disk can finish download the rest, within its limit">always add</th></tr></thead>
         <tbody>${names.map(n => html`<tr>
           <td>${n}</td>
           <td><input type="number" min="0" max="100" step="0.1" placeholder="-" aria-label=${`Percent ${n} allows`}
@@ -425,7 +425,7 @@ function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
           <td><input type="checkbox" aria-label=${`Always add for ${n}`} checked=${on.has(trackerKey(n))}
             onChange=${(e) => flip(n, e.target.checked)} /></td></tr>`)}</tbody></table>`}
     <small class="status">${err ? `Prowlarr's trackers could not be listed (${err}) - only the ones with a limit are shown. `
-      : ""}Left blank, a tracker lets you download nothing: its builds that stop short go to the torrent client only by Override. With a % and/or MB set, a build missing less than that can be added - by itself, with always add ticked. A build that stops short on a tracker with nothing set asks you on the Jobs tab.</small>
+      : ""}Left blank, a tracker lets you download nothing: its builds that stop short go to the torrent client only by Override. With a % and/or MB set, a build missing less than that can be added - by itself, with always add ticked. Always add also lets a stopped torrent from that tracker download what it is missing, within the limit, when no copy on disk finishes it. A build that stops short on a tracker with nothing set asks you on the Jobs tab.</small>
     <div class="csvbar">
       <button type="button" class="btn" onClick=${exportCsv}
         title="Save these limits as a CSV file (tracker, percent, MB) to share with others - your always add ticks are not included">Export CSV</button>

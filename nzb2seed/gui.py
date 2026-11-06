@@ -658,12 +658,7 @@ class App:
     @staticmethod
     def counting_earlier(frac: float, short: int | None, total: int | None, before: int):
         """(share, bytes) to download, counting what earlier starts of the torrent took."""
-        if not before:
-            return 1 - frac, short
-        if not total:
-            return 1 - frac, (short or 0) + before
-        need = (short if short is not None else round(total * (1 - frac))) + before
-        return need / total, need
+        return btledger.need(frac, short, total, before)
 
     def nearly_enough(self, extra: dict | None, headroom: float = config_mod.HEADROOM) -> bool:
         if not extra or extra.get("have") is None:

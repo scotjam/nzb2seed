@@ -157,6 +157,6 @@ def test_a_kept_original_is_tried_before_another_torrents_copy(tmp_path, cfg):
     m.app = SimpleNamespace(cfg=cfg, _qbit=lambda: qb, jobs={})
     m.state = mend.State(str(tmp_path / "mend.json"))
     from nzb2seed.pathmap import map_path
-    assert m.mend(qb, qb.torrents()[0], [whole], [], map_path)
+    assert m.mend(qb, qb.torrents()[0], [whole], [], map_path) == "done"
     assert rechecks == ["short"] and xs.read_bytes() == BUILT
     assert other.read_bytes() == FIXED
