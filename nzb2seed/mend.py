@@ -4,8 +4,8 @@ A torrent left stopped short of 100% (a cross-seed partial match, or a Library s
 episode differs from the tracker's) often has its missing files whole in another torrent of
 the same name in qBittorrent - another tracker's copy, or the copy nzb2seed built for another
 tracker from Usenet - or in the version of a file nzb2seed kept before a repair or a
-BitTorrent download changed it (originals.py). Every so often each such torrent gets that
-version of its incomplete files and a recheck:
+BitTorrent download changed it (originals.py), which is tried first. Every so often each
+such torrent gets that version of its incomplete files and a recheck:
 
 * the file is replaced by a hard link to the other copy (or a copy of it, from another drive)
   - never written into, so the library and any torrent sharing the old file keep theirs;
@@ -166,7 +166,12 @@ class Mender:
                 continue
 
             def sources():
-                """Another torrent's copy of this file first, then a kept original of it."""
+                """A kept original of this file first, then another torrent's copy. A torrent
+                stuck a little short was usually linked from the files already here - the
+                other torrents' version - so the version it has not had yet is the original
+                kept before a repair or download changed them."""
+                for p in originals.candidates(self.app.cfg, name, f.get("size")):
+                    yield p, "the version kept before it was changed"
                 for o in others:
                     if o["hash"] not in listed:
                         listed[o["hash"]] = {x["name"]: x for x in qb.files(o["hash"])}
@@ -174,8 +179,6 @@ class Mender:
                     if x and x.get("size") == f.get("size"):
                         yield (os.path.join(map_path(o.get("save_path") or "", back), *name.split("/")),
                                f"{o.get('name') or o['hash']}'s files")
-                for p in originals.candidates(self.app.cfg, name, f.get("size")):
-                    yield p, "the version kept before it was changed"
 
             for src, label in sources():
                 try:

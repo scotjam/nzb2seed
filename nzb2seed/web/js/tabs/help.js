@@ -117,7 +117,7 @@ const IDEAS = [
   ["Torrents short of 100%, and kept originals",
    "A tracker's copy of a release can differ in a few pieces from the Usenet post, so a cross-seed of it (or a " +
    "Library season) can sit stopped short of 100%. Every half hour nzb2seed tries the missing files from " +
-   "another torrent of the same name, or from an original it kept, as a hard link (never written into), and " +
+   "an original it kept first, then from another torrent of the same name, as a hard link (never written into), and " +
    "starts the torrent once it rechecks at 100.0%. Originals: before a repair or a BitTorrent download changes " +
    "a built file, nzb2seed keeps the Usenet version in .nzb2seed-originals on the same disk - often exactly " +
    "what your other trackers have - and the change goes into a copy of its own. They are kept for " +

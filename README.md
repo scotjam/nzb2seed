@@ -213,8 +213,10 @@ a fixed header). A cross-seed of such a release, or a Library season, then
 sits stopped in qBittorrent short of 100%.
 
 Every half hour nzb2seed looks at the stopped torrents short of 100% and tries
-the files they are missing from elsewhere: another torrent of the same name in
-qBittorrent, or an original nzb2seed kept (below). The file is replaced by a
+the files they are missing from elsewhere: first an original nzb2seed kept
+(below) - a torrent stuck a little short was linked from the files already
+here, so their version is the one it has had - then another torrent of the
+same name in qBittorrent. The file is replaced by a
 hard link to that copy - never written into, so the library and the torrents
 sharing the old file keep theirs - and rechecked. A copy that comes out no
 better is put back. At 100.0% the torrent is started: it only seeds, nothing

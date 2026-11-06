@@ -131,3 +131,32 @@ def test_short_files_are_kept_before_a_build_is_handed_to_qbittorrent(tmp_path, 
     assert os.stat(kept).st_ino != os.stat(short).st_ino      # the torrent writes into its own copy
     assert originals.candidates(cfg, "Rel/a.mkv", len(FIXED)) == []
     assert os.stat(good).st_nlink == 1
+
+
+def test_a_kept_original_is_tried_before_another_torrents_copy(tmp_path, cfg):
+    """Stuck a little short, the torrent was linked from the files already here - the
+    whole torrent's version - so the kept original goes first and one recheck does it."""
+    built = _file(tmp_path / "drive" / "torrents" / "Rel" / "ep.mkv", BUILT)
+    originals.keep_before_writes(cfg, str(built), REL, "z" * 40)
+    with open(built, "r+b") as fh:
+        fh.write(FIXED)
+    other = _file(tmp_path / "drive" / "elsewhere" / "Rel" / "ep.mkv", FIXED)   # another copy, same version
+    xs = tmp_path / "drive" / "cross-seed" / "T2" / "Rel" / "ep.mkv"
+    xs.parent.mkdir(parents=True)
+    os.link(built, xs)
+    qb = FakeQb(str(tmp_path / "drive" / "cross-seed" / "T2"))
+    rechecks = []
+    real = qb.recheck
+    qb.recheck = lambda h: (rechecks.append(h), real(h))
+    whole = {"hash": "whole", "name": "Rel", "save_path": str(tmp_path / "drive" / "elsewhere")}
+    qb.files_of = {"whole": [{"name": REL, "size": len(FIXED), "progress": 1.0, "priority": 1}]}
+    files = qb.files
+    qb.files = lambda h: qb.files_of[h] if h in qb.files_of else files(h)
+
+    m = object.__new__(mend.Mender)
+    m.app = SimpleNamespace(cfg=cfg, _qbit=lambda: qb, jobs={})
+    m.state = mend.State(str(tmp_path / "mend.json"))
+    from nzb2seed.pathmap import map_path
+    assert m.mend(qb, qb.torrents()[0], [whole], [], map_path)
+    assert rechecks == ["short"] and xs.read_bytes() == BUILT
+    assert other.read_bytes() == FIXED
