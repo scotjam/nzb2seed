@@ -118,7 +118,9 @@ const IDEAS = [
    "A tracker's copy of a release can differ in a few pieces from the Usenet post, so a cross-seed of it (or a " +
    "Library season) can sit stopped short of 100%. Every half hour nzb2seed tries the missing files from " +
    "an original it kept first, then from another torrent of the same name, as a hard link (never written into), and " +
-   "starts the torrent once it rechecks at 100.0%. Originals: before a repair or a BitTorrent download changes " +
+   "starts the torrent once it rechecks at 100.0%. With nothing left to try, a torrent on a tracker ticked always add " +
+   "is started to download the rest - only within that tracker's limit, once, after its short files get a copy of " +
+   "their own so the torrents sharing them are not changed. Originals: before a repair or a BitTorrent download changes " +
    "a built file, nzb2seed keeps the Usenet version in .nzb2seed-originals on the same disk - often exactly " +
    "what your other trackers have - and the change goes into a copy of its own. They are kept for " +
    "keep_originals_days (3 by default; 0 keeps none), then let go; a torrent finished from one keeps its bytes."],

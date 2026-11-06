@@ -78,6 +78,41 @@ def test_complete_files_come_first_and_the_incomplete_post_fills_the_rest(tmp_pa
     assert by_name[ep_name(1, 3)].startswith(db)      # only the incomplete post has it
 
 
+class OtherCutSAB(HoledSAB):
+    """``other``: {guid: {file name}} - that post carries another cut of the file (another
+    size), as complete posts of a season sometimes do for one episode."""
+
+    def __init__(self, *a, other=None, **k):
+        super().__init__(*a, **k)
+        self.other = other or {}
+
+    def add_nzb(self, nzb, name, cat, pp, prio):
+        nzo = super().add_nzb(nzb, name, cat, pp, prio)
+        for base in self.other.get(self.jobs[nzo], ()):
+            with open(os.path.join(self.root, nzo, base), "ab") as fh:
+                fh.write(b"" * 5000)
+        return nzo
+
+
+def test_complete_posts_with_another_cut_of_one_episode_still_supply_the_rest(tmp_path):
+    """Two complete posts carry another cut of episode 3; the only post with the torrent's
+    episode 3 is missing articles all through. The other episodes come from the complete
+    posts - not all of them from the damaged one."""
+    t, cfg, files, size = world(tmp_path)
+    a, b = rel(NAME, size, "A"), rel(NAME + ".1", size, "B")
+    c = rel(NAME + "-xpost", size, "C")
+    sab = OtherCutSAB(str(tmp_path / "dl"), t, files,
+                      other={"A": {ep_name(1, 3)}, "B": {ep_name(1, 3)}},
+                      holes={"C": {ep_name(1, 1): (8000, 20000), ep_name(1, 2): (3000, 9000),
+                                   ep_name(1, 3): (2000, 6000)}})
+    dirs, _, _, _ = plan_and_fetch(cfg, Options(), PR([a, b, c]), sab, t, t.name, [], 2)
+    dc = os.path.join(str(tmp_path / "dl"), "nzo3")
+    by_name = {os.path.basename(r): p for r, p in asm.find_sources(t, dirs).items()}
+    assert not by_name[ep_name(1, 1)].startswith(dc)
+    assert not by_name[ep_name(1, 2)].startswith(dc)
+    assert by_name[ep_name(1, 3)].startswith(dc)
+
+
 def test_the_closest_incomplete_post_is_the_one_built_from(tmp_path):
     t, cfg, files, size = world(tmp_path)
     b, c = rel(NAME + "-a", size, "B"), rel(NAME + "-b", size, "C")

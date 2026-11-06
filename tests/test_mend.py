@@ -93,6 +93,84 @@ def test_a_swap_cut_off_by_a_restart_is_undone(tmp_path):
 
 
 
+def test_a_torrent_named_after_its_file_is_finished_from_one_named_after_a_folder(tmp_path):
+    m, qb, lib_file, mine = _setup(tmp_path)
+    whole = tmp_path / "whole"
+    os.replace(whole / "Rel" / "ep.mkv", whole / "ep.mkv")       # a single-file torrent
+    names = {"short": "Rel", "whole": "Rel.mkv"}
+    paths = {"short": "Rel/ep.mkv", "whole": "ep.mkv"}
+    rows = qb.torrents
+    qb.torrents = lambda: [dict(r, name=names[r["hash"]]) for r in rows()]
+    qb.files = lambda h: [{"name": paths[h], "size": len(GOOD), "progress": qb.prog[h], "priority": 1}]
+    m.round()
+    assert qb.prog["short"] == 1.0 and mine.read_bytes() == GOOD
+
+
+def test_an_unfinished_torrents_files_are_found_in_its_download_folder(tmp_path):
+    m, qb, lib_file, mine = _setup(tmp_path)
+    rows = qb.torrents
+    qb.torrents = lambda: [dict(r, save_path=str(tmp_path / "later"), download_path=r["save_path"],
+                                content_path=os.path.join(r["save_path"], "Rel"))
+                           if r["hash"] == "short" else r for r in rows()]
+    m.round()
+    assert qb.prog["short"] == 1.0 and mine.read_bytes() == GOOD
+
+
+def _alone(tmp_path, monkeypatch, ticked=("TrackerX",), percent=10, progress=0.99):
+    """Only the short torrent, its file linked from the library: nothing here to try."""
+    from nzb2seed import originals
+    monkeypatch.setattr(originals, "_drive_root", lambda p: str(tmp_path))
+    m, qb, lib_file, mine = _setup(tmp_path)
+    del qb.dirs["whole"]
+    qb.prog["short"] = progress
+    rows = qb.torrents
+    qb.torrents = lambda: [dict(r, tracker="https://tracker.example/announce", total_size=1000,
+                                amount_left=round(1000 * (1 - qb.prog[r["hash"]])), added_on=1)
+                           for r in rows()]
+    m.app.cfg = SimpleNamespace(local_to_qbit=[], path=str(tmp_path / "nzb2seed.toml"), keep_originals_days=3,
+                                nearly_auto_trackers=list(ticked),
+                                nearly_limits=[{"tracker": "TrackerX", "percent": percent, "mb": None}])
+    m.tracker = lambda r: "TrackerX"
+    return m, qb, lib_file, mine
+
+
+def test_nothing_here_to_try_downloads_the_rest_from_a_ticked_tracker_within_its_limit(tmp_path, monkeypatch):
+    from nzb2seed import btledger
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    m.round()
+    assert qb.started == ["short"]
+    assert os.stat(mine).st_ino != os.stat(lib_file).st_ino     # its own bytes to write into
+    with open(mine, "r+b") as fh:                               # what qBittorrent's download does
+        fh.write(GOOD)
+    assert lib_file.read_bytes() == BAD                         # the library's file is untouched
+    assert btledger.taken(m.app.cfg, "short", None) == 10       # counted against the tracker
+    assert "downloading the last" in m.state.log[-1][1]
+    qb.state["short"] = "stoppedDL"                             # stopped again by you: left alone
+    from nzb2seed.pathmap import map_path
+    assert m.download_rest(qb, qb.info("short"), [], map_path) is False
+
+
+def test_a_tracker_not_ticked_is_not_downloaded_from(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch, ticked=())
+    m.round()
+    assert qb.started == [] and os.stat(mine).st_ino == os.stat(lib_file).st_ino
+
+
+def test_more_missing_than_the_tracker_allows_is_not_downloaded(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch, progress=0.905)    # 9.5%: over 90% of 10%
+    m.round()
+    assert qb.started == [] and os.stat(mine).st_ino == os.stat(lib_file).st_ino
+
+
+def test_nothing_is_downloaded_while_a_copy_here_is_left_to_try(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    qb.dirs["whole"] = str(tmp_path / "whole")
+    qb.prog["whole"], qb.state["whole"] = 1.0, "stalledUP"
+    m.round()
+    assert qb.started == ["short"] and qb.prog["short"] == 1.0  # finished from the copy, not downloaded
+    assert "finished from" in m.state.log[-1][1]
+
+
 def test_a_search_for_posts_goes_to_the_usenet_indexers_only():
     from nzb2seed import pipeline
     cfg = SimpleNamespace(indexer_ids=[])

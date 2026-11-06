@@ -13,6 +13,19 @@ such torrent gets that version of its incomplete files and a recheck:
 * at 100.0% the torrent is started - it only seeds, nothing was downloaded.
 
 A copy that was tried is not tried again. ``mend.json`` keeps what was tried and done.
+
+With nothing here left to try, the rest can come from the torrent's own tracker: a tracker
+ticked "always add" in Settings, and only while what is missing - with what earlier starts
+of the torrent downloaded - is within the limit set for it (the same check as a build
+handed to qBittorrent). Before it starts, each short file gets bytes of its own (shared
+with a library file or other torrents, it would change theirs too), and its present
+version is kept as an original. A torrent is started this way once; one stopped again
+after that is left as it is, and nothing starts while the space guard is holding downloads.
+
+Torrents match by name, ignoring a video extension (one tracker names a single-file torrent
+after its file, another after a folder holding it); files match by path, else by file name
+and size. A torrent's files are looked for where qBittorrent has them: an unfinished
+torrent's may still be in its download folder rather than where it will be saved.
 """
 from __future__ import annotations
 
@@ -22,13 +35,15 @@ import shutil
 import threading
 import time
 
-from . import originals
+from . import btledger, originals
+from . import config as config_mod
 from .clients import CHECKING, ApiError
 
 INTERVAL = 30 * 60
 FIRST_ROUND = 3 * 60
 STOPPED = {"stoppedDL", "pausedDL"}
 ORIG = ".nzb2seed-orig"
+VIDEO = (".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts")
 
 
 class State:
@@ -41,12 +56,14 @@ class State:
             d = {}
         self.tried: dict[str, list] = d.get("tried", {})      # infohash -> ["file|dev:ino", ...]
         self.pending: list = d.get("pending", [])             # [[file, its original kept aside]] mid-swap
+        self.started: dict = d.get("started", {})             # infohash -> when its tracker was asked for the rest
         self.log: list = d.get("log", [])
 
     def save(self):
         tmp = f"{self.path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump({"tried": self.tried, "pending": self.pending, "log": self.log[-200:]}, fh, indent=1)
+            json.dump({"tried": self.tried, "pending": self.pending, "started": self.started,
+                       "log": self.log[-200:]}, fh, indent=1)
         os.replace(tmp, self.path)
 
     def note(self, text: str):
@@ -58,6 +75,37 @@ class State:
 def _inode(path: str):
     st = os.stat(path)
     return st.st_dev, st.st_ino
+
+
+def title(name: str) -> str:
+    """A torrent's name without a video extension."""
+    low = name.lower()
+    for ext in VIDEO:
+        if low.endswith(ext):
+            return name[:-len(ext)]
+    return name
+
+
+def locate(r: dict, name: str, back, map_path) -> str | None:
+    """Where torrent ``r``'s file ``name`` is on this machine: under the folder its content
+    is in now, else its save or download folder."""
+    cp = (r.get("content_path") or "").rstrip("/")
+    bases = [os.path.dirname(cp), cp, r.get("save_path") or "", r.get("download_path") or ""]
+    for b in dict.fromkeys(x for x in bases if x):
+        p = os.path.join(map_path(b, back), *name.split("/"))
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def same_file(files: dict[str, dict], name: str, size) -> dict | None:
+    """Another torrent's entry for file ``name``: the same path, else the one file of the
+    same name and size."""
+    if name in files:
+        return files[name] if files[name].get("size") == size else None
+    base = name.rsplit("/", 1)[-1]
+    hits = [x for n, x in files.items() if n.rsplit("/", 1)[-1] == base and x.get("size") == size]
+    return hits[0] if len(hits) == 1 else None
 
 
 def put_in(src: str, dst: str):
@@ -136,7 +184,7 @@ class Mender:
         whole: dict[str, list[dict]] = {}
         for r in rows:
             if r.get("progress", 0) >= 1 and r.get("state") not in CHECKING:
-                whole.setdefault(r.get("name") or "", []).append(r)
+                whole.setdefault(title(r.get("name") or ""), []).append(r)
         busy = self.busy()
         try:
             originals.prune(cfg)
@@ -144,16 +192,87 @@ class Mender:
             print(f"mend: could not let go of old originals: {e}", flush=True)
         kept = originals.kept_roots(cfg)
         for r in rows:
-            if (r.get("state") in STOPPED and 0 < r.get("progress", 0) < 1 and r["hash"] not in busy
-                    and (whole.get(r.get("name") or "") or (r.get("name") or "") in kept)):
-                try:
-                    self.mend(qb, r, whole.get(r["name"], []), back, map_path)
-                except (ApiError, OSError) as e:
-                    self.state.note(f"{r['name']}: {e}")
+            if not (r.get("state") in STOPPED and 0 < r.get("progress", 0) < 1 and r["hash"] not in busy):
+                continue
+            try:
+                got = "none"
+                if whole.get(title(r.get("name") or "")) or (r.get("name") or "") in kept:
+                    got = self.mend(qb, r, whole.get(title(r["name"]), []), back, map_path)
+                if got == "none":
+                    self.download_rest(qb, r, back, map_path)
+            except (ApiError, OSError) as e:
+                self.state.note(f"{r['name']}: {e}")
 
-    def mend(self, qb, r: dict, others: list[dict], back, map_path) -> bool:
+    def tracker(self, r: dict) -> str:
+        """The torrent's tracker, by the name Prowlarr gives it (the name Settings uses)."""
+        if not r.get("tracker"):
+            return ""
+        from .clients import Prowlarr
+        from .pipeline import tracker_name
+        cfg = self.app.cfg
+        pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key) if getattr(cfg, "prowlarr_url", "") else None
+        return tracker_name([r["tracker"]], pr)
+
+    def download_rest(self, qb, r: dict, back, map_path) -> bool:
+        """Start a torrent nothing here can finish, to download the rest from its tracker -
+        ticked "always add", within its limit, once (see the module's notes)."""
+        cfg, h = self.app.cfg, r["hash"]
+        if h in self.state.started:
+            return False
+        guard = getattr(self.app, "guard", None)
+        if guard is not None and guard().holding():
+            return False                                    # the disk is low
+        tracker = self.tracker(r)
+        want = config_mod.tracker_key(tracker)
+        if not want or not any(config_mod.tracker_key(t) == want for t in cfg.nearly_auto_trackers or []):
+            return False
+        info = qb.info(h) or r
+        if info.get("state") not in STOPPED:
+            return False
+        frac = info.get("progress", 0)
+        total = info.get("total_size") or info.get("size")
+        short = info.get("amount_left")
+        if short is None and total:
+            short = round(total * (1 - frac))
+        before = btledger.taken(cfg, h, info)
+        if not config_mod.within_limit(cfg, tracker, *btledger.need(frac, short, total, before),
+                                       config_mod.AUTO_HEADROOM):
+            return False
+        # every short file needs bytes of its own before qBittorrent writes into it
+        files = []
+        for f in qb.files(h):
+            if f.get("progress", 0) >= 1 or f.get("priority", 1) == 0:
+                continue
+            p = locate(info, f["name"], back, map_path)
+            if p:
+                files.append((f["name"], p))
+        shared = [(n, p) for n, p in files if os.stat(p).st_nlink > 1]
+        for d in {os.path.dirname(p) for _, p in shared}:
+            room = sum(os.path.getsize(p) for _, p in shared if os.path.dirname(p) == d)
+            if shutil.disk_usage(d).free < room * 1.05 + 1024 ** 3:
+                self.state.started[h] = time.time()
+                self.state.note(f"{r['name']}: not started - no room to give its short files a copy "
+                                "of their own (they are shared with other files)")
+                return False
+        from .assemble import own_copy
+        for n, p in files:
+            try:
+                originals.keep_before_writes(cfg, p, n, h, "downloaded into over BitTorrent by mend")
+            except OSError:
+                pass
+            own_copy(p)                                     # nothing to do once it has its own
+        btledger.record_start(cfg, h, tracker, info, short)
+        qb.start(h)
+        self.state.started[h] = time.time()
+        self.state.note(f"{r['name']}: nothing here finishes it - downloading the last "
+                        f"{(1 - frac) * 100:.4f}% from {tracker} (within its limit: "
+                        f"{config_mod.limit_text(cfg, tracker)})")
+        return True
+
+    def mend(self, qb, r: dict, others: list[dict], back, map_path) -> str:
+        """"done": finished; "tried": copies were tried (more may be left for the next
+        round); "none": nothing here left to try."""
         h = r["hash"]
-        here = map_path(r.get("save_path") or "", back)
         before = {f["name"]: f for f in qb.files(h)}
         tried = set(self.state.tried.get(h, []))
         swaps = []                                          # (file name, local path, the copy's mark)
@@ -161,8 +280,8 @@ class Mender:
         for name, f in before.items():
             if f.get("progress", 0) >= 1 or f.get("priority", 1) == 0:
                 continue
-            dst = os.path.join(here, *name.split("/"))
-            if not os.path.isfile(dst):
+            dst = locate(r, name, back, map_path)
+            if dst is None:
                 continue
 
             def sources():
@@ -175,10 +294,10 @@ class Mender:
                 for o in others:
                     if o["hash"] not in listed:
                         listed[o["hash"]] = {x["name"]: x for x in qb.files(o["hash"])}
-                    x = listed[o["hash"]].get(name)
-                    if x and x.get("size") == f.get("size"):
-                        yield (os.path.join(map_path(o.get("save_path") or "", back), *name.split("/")),
-                               f"{o.get('name') or o['hash']}'s files")
+                    x = same_file(listed[o["hash"]], name, f.get("size"))
+                    p = x and locate(o, x["name"], back, map_path)
+                    if p:
+                        yield p, f"{o.get('name') or o['hash']}'s files"
 
             for src, label in sources():
                 try:
@@ -195,9 +314,9 @@ class Mender:
                 swaps.append((name, dst, src, mark, label))
                 break
         if not swaps:
-            return False
+            return "none"
         if (qb.info(h) or {}).get("state") not in STOPPED:
-            return False                                    # started meanwhile
+            return "tried"                                  # started meanwhile
         self.state.pending = [[dst, dst + ORIG] for _, dst, *_ in swaps]
         self.state.save()
         done = []
@@ -241,4 +360,4 @@ class Mender:
         else:
             self.state.note(f"{r['name']}: tried {len(done)} file(s) from {swaps[0][4]}, {better} "
                             f"better - now {pct:.4f}% (was {r['progress'] * 100:.4f}%)")
-        return info.get("progress", 0) >= 1
+        return "done" if info.get("progress", 0) >= 1 else "tried"
