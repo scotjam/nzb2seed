@@ -328,7 +328,11 @@ function Question({ id, q }) {
   const [how, setHow] = useState(() => remember("asksort", "best"));
   useEffect(() => { setPick(null); setFilter(""); }, [id, q.prompt]);     // a new question: nothing picked yet
   // filtered and sorted - each keeps its place in the question, which is what the answer names
-  const shown = sortBy(q.choices.map((c, i) => ({ ...c, i })).filter(c => filterMatch(c.title + " " + c.indexer, filter)), how);
+  // "go on without it" is a choice of its own, not one of the NZBs
+  const all = q.choices.map((c, i) => ({ ...c, i }));
+  const goOn = all.filter(c => c.go_on);
+  const nzbs = all.filter(c => !c.go_on);
+  const shown = sortBy(nzbs.filter(c => filterMatch(c.title + " " + c.indexer, filter)), how);
   const answer = async (choice) => {
     setBusy(true);
     try { await api(`/api/jobs/${id}/answer`, { choice }); } catch (err) { toast(err.message); }
@@ -342,7 +346,7 @@ function Question({ id, q }) {
         <input type="text" placeholder="Filter these NZBs" aria-label="Filter these NZBs" value=${filter}
           onInput=${(e) => setFilter(e.target.value)} />
         <${SortSelect} label="Sort these NZBs" value=${how} grabs onChange=${(e) => { setHow(e.target.value); keep("asksort", e.target.value); }} />
-        <small class="status">${shown.length === q.choices.length ? `${q.choices.length} NZBs` : `${shown.length} of ${q.choices.length} NZBs`}</small>
+        <small class="status">${shown.length === nzbs.length ? `${nzbs.length} NZBs` : `${shown.length} of ${nzbs.length} NZBs`}</small>
       </div>
       <div class="rows" role="radiogroup" aria-label="Search results">
         ${!shown.length && html`<div class="empty">Nothing matches the filter.</div>`}
@@ -358,6 +362,7 @@ function Question({ id, q }) {
       </div>
       <div class="actions">
         <button class="btn primary" disabled=${pick == null || busy} onClick=${() => answer(pick)}>Download this NZB</button>
+        ${goOn.map(c => html`<button class="btn" key=${c.i} disabled=${busy} title=${c.note} onClick=${() => answer(c.i)}>${c.title}</button>`)}
         <button class="btn danger" disabled=${busy} onClick=${() => answer(null)}>Stop the build</button>
       </div>
     </div>`;
