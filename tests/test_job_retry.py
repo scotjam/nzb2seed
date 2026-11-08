@@ -169,6 +169,31 @@ def test_removing_with_downloads_needs_qbittorrent_to_say_what_is_in_use(server)
     assert status == 400 and job.id in app.jobs
 
 
+def test_clearing_with_delete_files_says_why_nothing_was_deleted(server):  # noqa: F811
+    """Delete files that finds nothing says so, job by job: one never downloaded anything,
+    another's files are its torrent's in qBittorrent."""
+    import time
+    app, url = server
+    empty = app.start_job("Show.S05", "search", lambda cfg: (_ for _ in ()).throw(ValueError("no usable season pack")))
+    seeding = app.start_job("Show.S02", "build", lambda cfg: {"result": "done"})
+    end = time.time() + 5
+    while time.time() < end and "running" in (empty.status, seeding.status):
+        time.sleep(0.05)
+    seeding.infohash = "5" * 40
+
+    class Qb:
+        def torrents(self):
+            return [{"hash": "5" * 40, "content_path": "/nowhere/Show.S02"}]
+
+        def info(self, h):
+            return {"hash": h} if h == "5" * 40 else None
+    app._qbit = lambda: Qb()
+    status, r = call(url + "/api/jobs/remove", *AUTH, body={"ids": [empty.id, seeding.id], "delete_downloads": True})
+    assert status == 200 and r["removed"] == 2 and r["placed_files"] == 0 and r["deleted"] == 0
+    assert sorted(r["nothing"]) == ["Show.S02: its files are its torrent's in qBittorrent",
+                                    "Show.S05: nothing was downloaded for it"]
+
+
 def test_what_the_jobs_still_need(server):  # noqa: F811
     from nzb2seed.pipeline import release_key as pipeline_release_key
     """A failed job may be tried again, so its downloads are kept; a running one is using
@@ -216,3 +241,11 @@ def test_cleared_with_keep_files_its_downloads_are_never_cleared(server):  # noq
     assert "4" * 40 in again.downloads_in_use()[0]
     app.forget_kept({"4" * 40}, {release_key("Film.2020.1080p-GRP")})
     assert "4" * 40 not in app.downloads_in_use()[0]
+
+
+def test_the_jobs_tab_can_show_what_mend_did_newest_first(server):  # noqa: F811
+    from types import SimpleNamespace
+    app, url = server
+    app.mend = SimpleNamespace(state=SimpleNamespace(log=[[1.0, "first"], [2.0, "left alone - cross-eyed job 7"]]))
+    status, r = call(url + "/api/mend", *AUTH)
+    assert status == 200 and [t for _, t in r["log"]] == ["left alone - cross-eyed job 7", "first"]

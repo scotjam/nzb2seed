@@ -805,6 +805,65 @@ def test_the_next_tracker_when_the_first_has_no_pack(tmp_path, library, monkeypa
     assert (p.release.indexer, same) == ("TB", False)
 
 
+def packs_size(data: bytes) -> int:
+    from nzb2seed import torrent as torrent_mod
+    return torrent_mod.parse(data).total_size
+
+
+def test_a_pack_no_usenet_post_supplies_hands_over_to_the_next(tmp_path, library, monkeypatch):
+    """The chosen pack is a release Usenet does not carry at all: the season's next pack is
+    built instead, in the same run, and the first is passed over from then on."""
+    from nzb2seed import pipeline
+    w, cfg, s, _ = _picker(tmp_path, library, monkeypatch, {"TL": "other", "TB": "other"},
+                           path=str(tmp_path / "c.toml"), library_output_dir=str(tmp_path / "out"),
+                           output_dir="", library_daily_gb=1000, library_roots=[library.root])
+    packs = {n: make_torrent(f"Alpha.2009.S04.1080p.WEB-DL.x264-{n}",
+                             {f"Alpha.2009.S04E0{e}.1080p.WEB-DL.x264-{n}.mkv": rnd(30_000 + e, e + len(n)) for e in (1, 2, 3)})
+             for n in ("TL", "TB")}
+    monkeypatch.setattr(lib.Prowlarr, "fetch", lambda self, r: packs[r.indexer])
+    monkeypatch.setattr(lib, "swap_plan", lambda *a: [])
+    built = []
+
+    def build(cfg_, opts, key, t, data, p):
+        built.append(p.release.indexer)
+        w.state.spend(t.total_size)                       # as the real build does, before downloading
+        if p.release.indexer == "TL":
+            raise pipeline.Abort("no Usenet post could supply S04E01")
+        return {"result": "done"}
+    w.build = build
+    assert w.run(cfg, s.key) == {"result": "done"}
+    assert built == ["TL", "TB"] and w.state.seasons[s.key]["tracker"] == "TB"
+    assert w.state.spent_today() == packs_size(packs["TB"])               # nothing came down for TL
+    assert w.kept_pick(cfg, s.key)[0].release.indexer == "TB"
+
+
+def test_a_pack_partly_found_but_too_far_short_is_swapped_too(tmp_path, library, monkeypatch):
+    """Part of it was downloaded, but more is missing than its tracker's limit allows (the
+    build stopped: within the limit it would have stopped short instead): the next pack."""
+    from nzb2seed import pipeline
+    w, cfg, s, _ = _picker(tmp_path, library, monkeypatch, {"TL": "other", "TB": "other"},
+                           path=str(tmp_path / "c.toml"), library_output_dir=str(tmp_path / "out"),
+                           output_dir="", library_daily_gb=1000, library_roots=[library.root])
+    packs = {n: make_torrent(f"Alpha.2009.S04.1080p.WEB-DL.x264-{n}",
+                             {f"Alpha.2009.S04E0{e}.1080p.WEB-DL.x264-{n}.mkv": rnd(30_000 + e, e + len(n)) for e in (1, 2, 3)})
+             for n in ("TL", "TB")}
+    monkeypatch.setattr(lib.Prowlarr, "fetch", lambda self, r: packs[r.indexer])
+    monkeypatch.setattr(lib, "swap_plan", lambda *a: [])
+    built = []
+
+    def build(cfg_, opts, key, t, data, p):
+        built.append(p.release.indexer)
+        w.state.spend(t.total_size)
+        if p.release.indexer == "TL":
+            pipeline.ledger_for(cfg).record("nzo1", "Alpha.S04E02", torrent=t.infohash)
+            raise pipeline.Abort("no Usenet post could supply S04E01")
+        return {"result": "done"}
+    w.build = build
+    assert w.run(cfg, s.key) == {"result": "done"} and built == ["TL", "TB"]
+    # what TL's build downloaded counts against the budget: it was downloaded
+    assert w.state.spent_today() == packs_size(packs["TL"]) + packs_size(packs["TB"])
+
+
 def test_one_tracker_searches_only_that_tracker(tmp_path, library, monkeypatch):
     w, cfg, s, searched = _picker(tmp_path, library, monkeypatch, {"TL": "other", "TB": "same"},
                                   library_multi=False)
@@ -844,3 +903,38 @@ def test_a_season_one_of_the_ticked_trackers_has_is_left_alone(tmp_path, library
     w, s = _client_worker(tmp_path, library, [("Alpha.2009.S04.720p.WEB-DL-UAi", "TB")],
                           library_redownload=True, library_multi=True, library_order=[lib.OWN, "TL", "TB"])
     assert w.client_status(s, w.client(), w.app.cfg)[0] == lib.IN_CLIENT
+
+
+def test_a_seasons_job_a_restart_cut_off_says_done_once_the_season_got_there(tmp_path, library):
+    """A restart came during its final recheck; the Library settled the season
+    once nzb2seed was back - its job still said interrupted."""
+    cut = SimpleNamespace(id=1, title="library: Alpha (2009) S04", status="interrupted", result="the GUI stopped")
+    other = SimpleNamespace(id=2, title="library: Beta S01", status="interrupted", result="the GUI stopped")
+    changed = []
+    w = object.__new__(lib.Library)
+    w.app = SimpleNamespace(cfg=SimpleNamespace(library_roots=[library.root]), jobs={1: cut, 2: other},
+                            store=SimpleNamespace(changed=lambda urgent=False: changed.append(urgent)))
+    w.state = lib.State(str(tmp_path / "library.json"))
+    w.state.seasons["gone"] = {"show": "Alpha (2009)", "season": 4, "status": lib.ORIGINAL_DELETED}
+    w.state.seasons["beta"] = {"show": "Beta", "season": 1, "status": lib.FAILED}
+    w.client = lambda: None
+    w.rescan()
+    assert cut.status == "done" and "original deleted" in cut.result and changed
+    assert other.status == "interrupted"                     # its season did not get there
+
+
+def test_copies_of_one_outcome_leave_the_job_list(tmp_path):
+    """One season built by one job after two restarts cut off two others - one entry
+    stays. Another with two cut-off jobs and no other - the newest stays, marked done."""
+    J = lambda i, t, st, r="": SimpleNamespace(id=i, title=t, status=st, result=r)
+    ww = "library: Gamma S01"
+    wd = "library: Delta S07"
+    jobs = {1: J(1, ww, "interrupted"), 2: J(2, ww, "done", "finished after nzb2seed restarted - x"),
+            3: J(3, ww, "done", "100.0% (seeding)"), 4: J(4, wd, "interrupted"), 5: J(5, wd, "interrupted"),
+            6: J(6, "library: Other S01", "interrupted")}
+    w = object.__new__(lib.Library)
+    w.app = SimpleNamespace(jobs=jobs, store=SimpleNamespace(changed=lambda urgent=False: None))
+    w.close_cut_off_jobs({ww: lib.SWAP, wd: lib.ORIGINAL_DELETED})
+    assert sorted(jobs) == [3, 5, 6]
+    assert jobs[5].status == "done" and "original deleted" in jobs[5].result
+    assert jobs[6].status == "interrupted"                   # its season is not finished

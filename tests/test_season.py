@@ -344,6 +344,43 @@ def test_sample_fetch_when_sab_reports_the_file_itself(world, tmp_path):
     assert dest.read_bytes() == sample and not any((tmp_path / "dl").iterdir())
 
 
+def test_a_wrong_copy_of_a_file_is_not_downloaded_again_this_run_or_the_next(world, tmp_path):
+    """A post whose copy of the sample is not the original (same size, other CRC) is
+    downloaded once: asked again - for the next download folder, or after a restart - it
+    is neither fetched from the indexer nor downloaded."""
+    _, cfg = world
+    name = "test.show.2016.s01e01.720p.hdtv.x264-grp-sample.mkv"
+    good = f"{zlib.crc32(b's' * 5000) & 0xFFFFFFFF:08X}"
+    fetched = []
+
+    class P(PR):
+        def fetch(self, r):
+            fetched.append(r.guid)
+            return NZB_WITH_SAMPLE
+
+    class BadSAB:
+        added = []
+
+        def add_nzb(self, nzb, job, *a):
+            self.added.append(job)
+            self.job = job
+            d = tmp_path / "dl" / job
+            d.mkdir(parents=True, exist_ok=True)
+            (d / name).write_bytes(b"x" * 5000)                   # right size, damaged
+            return "nzo1"
+
+        def status(self, nzo):
+            return "Completed", {"storage": f"/dl/{self.job}"}
+    dest = str(tmp_path / "rel" / "Sample" / name)
+    sab = BadSAB()
+    fetch = season.FileFetcher(cfg, P([rel(ep_title(1), "p")]), sab, set())
+    assert not fetch(ep_title(1), "Sample/" + name, 5000, good, dest)
+    assert not fetch(ep_title(1), "Sample/" + name, 5000, good, dest)       # the next folder
+    assert not season.FileFetcher(cfg, P([rel(ep_title(1), "p")]), sab, set())(
+        ep_title(1), "Sample/" + name, 5000, good, dest)                      # after a restart
+    assert fetched == ["p"] and len(sab.added) == 1
+
+
 # ---------------------------------------------------------------- keep / rebuild the scene RARs
 
 VOL = b"R" * 50000                                        # the one RAR volume srrdb_for() lists

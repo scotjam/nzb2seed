@@ -94,6 +94,9 @@ class FakeQb:
     def start(self, h):
         self.started.append(h)
 
+    def piece_states(self, h):
+        return [2 if self.prog >= 1 else 0]
+
 
 def test_a_cross_seed_wanting_the_built_version_is_finished_from_the_kept_original(tmp_path, cfg):
     # the build: kept, then changed by qBittorrent into the tracker's version
@@ -123,8 +126,9 @@ def test_short_files_are_kept_before_a_build_is_handed_to_qbittorrent(tmp_path, 
     good = _file(tmp_path / "drive" / "out" / "Rel" / "a.mkv", FIXED)
     short = _file(tmp_path / "drive" / "out" / "Rel" / "ep.mkv", BUILT)
     qb = SimpleNamespace(files=lambda h: [
-        {"name": "Rel/a.mkv", "size": len(FIXED), "progress": 1.0, "priority": 1},
-        {"name": REL, "size": len(BUILT), "progress": 0.99, "priority": 1}])
+        {"name": "Rel/a.mkv", "size": len(FIXED), "progress": 1.0, "priority": 1, "piece_range": [0, 0]},
+        {"name": REL, "size": len(BUILT), "progress": 0.99, "priority": 1, "piece_range": [1, 1]}],
+        piece_states=lambda h: [2, 0])
     app = object.__new__(gui.App)
     app.keep_originals(cfg, qb, "h" * 40, str(tmp_path / "drive" / "out"))
     [kept] = originals.candidates(cfg, REL, len(BUILT))
@@ -160,3 +164,20 @@ def test_a_kept_original_is_tried_before_another_torrents_copy(tmp_path, cfg):
     assert m.mend(qb, qb.torrents()[0], [whole], [], map_path) == "done"
     assert rechecks == ["short"] and xs.read_bytes() == BUILT
     assert other.read_bytes() == FIXED
+
+
+def test_a_build_whose_file_stays_shared_is_not_handed_to_qbittorrent(tmp_path, cfg, monkeypatch):
+    """No room for a copy of its own: a download would write into the library's file too -
+    the torrent stays stopped instead."""
+    import pytest
+    from nzb2seed import gui
+    from nzb2seed.pipeline import Abort
+    short = _file(tmp_path / "drive" / "out" / "Rel" / "ep.mkv", BUILT)
+    os.link(short, tmp_path / "drive" / "library-ep.mkv")
+    monkeypatch.setattr(originals.shutil, "disk_usage", lambda p: SimpleNamespace(free=0))
+    qb = SimpleNamespace(files=lambda h: [{"name": REL, "size": len(BUILT), "progress": 0.99, "priority": 1}],
+                         piece_states=lambda h: [0])
+    app = object.__new__(gui.App)
+    with pytest.raises(Abort, match="shared with other files"):
+        app.keep_originals(cfg, qb, "h" * 40, str(tmp_path / "drive" / "out"))
+    assert os.stat(short).st_nlink == 2

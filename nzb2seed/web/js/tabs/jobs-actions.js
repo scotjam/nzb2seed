@@ -192,8 +192,14 @@ export async function clearAndDelete(list, done) {
     if (list.some(j => j.id === openJobId.get())) { openJobId.set(null); jobScreen.set(false); }
     done?.();
     await refreshJobs();
-    toast(`Cleared ${plural(r.removed, "job")}: deleted ${plural(r.placed_files || 0, "placed file")} and `
-      + `${plural(r.deleted || 0, "Usenet download")}, freeing ${gb((r.placed_bytes || 0) + (r.bytes || 0))}`
+    const none = r.nothing || [];
+    const some = (r.placed_files || 0) + (r.deleted || 0) > 0;
+    const why = none.length ? none.slice(0, 3).join("; ") + (none.length > 3 ? `; and ${none.length - 3} more` : "") : "";
+    toast(`Cleared ${plural(r.removed, "job")}`
+      + (some ? `: deleted ${plural(r.placed_files || 0, "placed file")} and `
+          + `${plural(r.deleted || 0, "Usenet download")}, freeing ${gb((r.placed_bytes || 0) + (r.bytes || 0))}`
+          + (why ? `. Nothing to delete for ${why}` : "")
+        : ` - nothing ${r.kept?.length ? "deleted" : "to delete"}${why ? `: ${why}` : ""}`)
       + (r.kept?.length ? `; kept ${r.kept.length}: ${r.kept[0]}` : "") + ".");
   } catch (err) { toast("Could not clear them: " + err.message); }
 }

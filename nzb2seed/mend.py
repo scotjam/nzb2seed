@@ -22,6 +22,19 @@ with a library file or other torrents, it would change theirs too), and its pres
 version is kept as an original. A torrent is started this way once; one stopped again
 after that is left as it is, and nothing starts while the space guard is holding downloads.
 
+A torrent cross-eyed has a job open on (anything but done or rolled back - a failed one
+too: it can leave a safety copy linked to the files, or a torrent stopped on purpose) is
+left alone, as the files of others' copies to try, and mend says which job it waits on -
+and when cross-eyed is in dry-run, that the job only runs once you run it there.
+
+Before downloading the rest, mend asks cross-eyed (its download-check, worked out from
+piece hashes): "repairable" - cross-eyed repairs it from other copies on disk, nothing is
+downloaded; "in_job" or "shared_breaks_others" (its files are shared with torrents that
+verify those bytes as they are) - left alone; "shared_same_version" - downloaded into the
+shared files, which fixes them all; "not_shared", "shared_other_names" (a library or
+backup holds the files too) or no answer - each file it writes into gets bytes of its own
+first. cross-eyed not answering: no files are swapped in that round either.
+
 Torrents match by name, ignoring a video extension (one tracker names a single-file torrent
 after its file, another after a folder holding it); files match by path, else by file name
 and size. A torrent's files are looked for where qBittorrent has them: an unfinished
@@ -40,6 +53,7 @@ from . import config as config_mod
 from .clients import CHECKING, ApiError
 
 INTERVAL = 30 * 60
+CHECK_AGAIN = 6 * 3600       # cross-eyed's download-check (and a repair asked for) kept this long
 FIRST_ROUND = 3 * 60
 STOPPED = {"stoppedDL", "pausedDL"}
 ORIG = ".nzb2seed-orig"
@@ -57,12 +71,17 @@ class State:
         self.tried: dict[str, list] = d.get("tried", {})      # infohash -> ["file|dev:ino", ...]
         self.pending: list = d.get("pending", [])             # [[file, its original kept aside]] mid-swap
         self.started: dict = d.get("started", {})             # infohash -> when its tracker was asked for the rest
+        self.waiting: dict = d.get("waiting", {})             # what was last said of each torrent left alone
+        self.checked: dict = d.get("checked", {})             # infohash -> cross-eyed's last download-check
+        self.repairs: dict = d.get("repairs", {})             # infohash -> when cross-eyed was asked to repair it
         self.log: list = d.get("log", [])
+        self.on_note = None                                   # told of each note (the page follows the log)
 
     def save(self):
         tmp = f"{self.path}.{os.getpid()}.tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump({"tried": self.tried, "pending": self.pending, "started": self.started,
+                       "waiting": self.waiting, "checked": self.checked, "repairs": self.repairs,
                        "log": self.log[-200:]}, fh, indent=1)
         os.replace(tmp, self.path)
 
@@ -70,6 +89,11 @@ class State:
         print(f"mend: {text}", flush=True)
         self.log.append([time.time(), text])
         self.save()
+        if self.on_note:
+            try:
+                self.on_note()
+            except Exception:                   # noqa: BLE001 - telling the page never stops mend
+                pass
 
 
 def _inode(path: str):
@@ -168,23 +192,86 @@ class Mender:
         return {j.infohash for j in list(getattr(self.app, "jobs", {}).values())
                 if getattr(j, "infohash", "") and j.status in ("running", "waiting")}
 
+    @property
+    def flagged(self) -> dict[str, str]:
+        """What was last said of each torrent left alone (said again only when it changes):
+        its infohash, or "src:" + it for one not used as another's source; "" for cross-eyed
+        not answering. Kept in mend.json, so a restart still says when one is picked up again."""
+        return self.state.waiting
+
+    def say(self, key: str, text: str):
+        if self.flagged.get(key) != text:
+            self.flagged[key] = text
+            self.state.note(text)
+
+    def picked_up(self, rows: list[dict], moving: dict):
+        """Torrents left alone for cross-eyed whose job is over now: said, and forgotten."""
+        names = {r["hash"].lower(): r.get("name") or r["hash"][:8] for r in rows}
+        for key in [k for k in self.flagged if k and not k.startswith("dl:")]:
+            h = key[4:] if key.startswith("src:") else key
+            if h.lower() in moving:
+                continue
+            self.flagged.pop(key, None)
+            if h.lower() in names:
+                self.state.note(f"{names[h.lower()]}: cross-eyed's job on it is over - "
+                                + ("mend can use its files again" if key.startswith("src:") else
+                                   "mend looks at it again"))
+        self.state.save()
+
+    def cross_eyed(self, cfg):
+        """({infohash: open job}, dry-run?) from cross-eyed; ({}, False) when it is not set
+        up; None when it is set up and did not answer (said once until it answers again)."""
+        url = getattr(cfg, "library_cross_eyed_url", "")
+        if not url:
+            return {}, False
+        from .library import CrossEyed
+        try:
+            out = CrossEyed(url, getattr(cfg, "library_cross_eyed_prefix", "")).open_jobs()
+        except (ApiError, OSError, ValueError) as e:
+            if self.flagged.get("") != "down":
+                self.flagged[""] = "down"
+                self.state.note(f"cross-eyed did not answer ({e}) - until it does, no files are swapped in "
+                                "and a download only goes into files of their own")
+            return None
+        self.flagged.pop("", None)
+        return out
+
+    def left_alone(self, r: dict, job: dict, dry: bool):
+        """Say (once, until it changes) why a torrent is left alone."""
+        state = job.get("state") or "?"
+        what = f"cross-eyed job {job.get('id')} ({job.get('job_type') or 'move'})"
+        if dry and state not in ("failed", "awaiting_user", "mirror_failed", "delete_interrupted"):
+            text = (f"{r['name']}: left alone - {what} is waiting to run, and cross-eyed is in dry-run: "
+                    "it only runs once you run it there or switch cross-eyed to live")
+        else:
+            text = (f"{r['name']}: left alone - {what} is {state.replace('_', ' ')}"
+                    + ("; a failed job can leave a safety copy linked to its files" if state == "failed" else "")
+                    + ". Once it is done, rolled back or cleared in cross-eyed, mend looks at it again")
+        self.say(r["hash"], text)
+
     def round(self):
         from .pathmap import map_path
         cfg = self.app.cfg
         qb = self.app._qbit()
         if qb is None:
             return
+        ce = self.cross_eyed(cfg)
+        down = ce is None                           # set up, but not answering
+        moving, dry = ({}, False) if down else ce
         back = [(b, a) for a, b in (cfg.local_to_qbit or [])]
         rows = qb.torrents()
+        self.picked_up(rows, moving)
         try:
             from . import btledger
             btledger.observe(cfg, rows)             # what each started torrent has downloaded
         except Exception:                           # bookkeeping never stops a round
             pass
         whole: dict[str, list[dict]] = {}
+        held: dict[str, list[dict]] = {}            # whole, but cross-eyed is working on them
         for r in rows:
             if r.get("progress", 0) >= 1 and r.get("state") not in CHECKING:
-                whole.setdefault(title(r.get("name") or ""), []).append(r)
+                (held if r["hash"].lower() in moving else whole).setdefault(
+                    title(r.get("name") or ""), []).append(r)
         busy = self.busy()
         try:
             originals.prune(cfg)
@@ -194,14 +281,87 @@ class Mender:
         for r in rows:
             if not (r.get("state") in STOPPED and 0 < r.get("progress", 0) < 1 and r["hash"] not in busy):
                 continue
+            if r["hash"].lower() in moving:
+                self.left_alone(r, moving[r["hash"].lower()], dry)
+                continue
+            for o in held.get(title(r.get("name") or ""), []):
+                j = moving[o["hash"].lower()]
+                self.say("src:" + o["hash"],
+                         f"{o['name']}: the complete copy is not used to finish the stopped one - "
+                         f"cross-eyed job {j.get('id')} ({j.get('job_type') or 'move'}) is "
+                         f"{(j.get('state') or '?').replace('_', ' ')}. Once it is done, rolled back or cleared "
+                         "in cross-eyed, mend can use its files again")
             try:
                 got = "none"
-                if whole.get(title(r.get("name") or "")) or (r.get("name") or "") in kept:
+                if not down and (whole.get(title(r.get("name") or "")) or (r.get("name") or "") in kept):
                     got = self.mend(qb, r, whole.get(title(r["name"]), []), back, map_path)
                 if got == "none":
-                    self.download_rest(qb, r, back, map_path)
+                    self.finish_rest(qb, r, back, map_path, down)
             except (ApiError, OSError) as e:
                 self.state.note(f"{r['name']}: {e}")
+
+    def finish_rest(self, qb, r: dict, back, map_path, down: bool):
+        """Nothing mend has finishes it: cross-eyed is asked first (see module notes) - it
+        may repair the torrent from other copies on disk, or say whether downloading the
+        rest would change files other torrents need as they are."""
+        cfg, h = self.app.cfg, r["hash"]
+        v = None if down else self.ask_cross_eyed(cfg, r)
+        verdict, summary = (v or {}).get("verdict"), (v or {}).get("summary") or ""
+        if verdict == "complete":
+            return
+        if verdict == "in_job":
+            self.say("dl:" + h, f"{r['name']}: left alone - {summary}")
+            return
+        if verdict == "repairable":
+            self.ask_repair(cfg, r, summary)
+            return
+        if verdict == "shared_breaks_others":
+            self.say("dl:" + h, f"{r['name']}: not downloaded - {summary}")
+            return
+        # shared with torrents needing the same bytes: written where they are, fixing them
+        # all. Anything else - its own files, files a library or backup holds too, or no
+        # answer - gets bytes of its own first: never written into a file with other names
+        self.download_rest(qb, r, back, map_path, in_place=verdict == "shared_same_version")
+
+    def ask_cross_eyed(self, cfg, r: dict) -> dict | None:
+        """cross-eyed's download-check, kept a while (the same progress, under CHECK_AGAIN):
+        its piece check reads the files. None: not set up, or no answer."""
+        url = getattr(cfg, "library_cross_eyed_url", "")
+        if not url:
+            return None
+        h, prog = r["hash"], round(float(r.get("progress", 0)), 6)
+        c = self.state.checked.get(h)
+        if c and c.get("progress") == prog and time.time() - c.get("at", 0) < CHECK_AGAIN \
+                and c.get("verdict") != "in_job":
+            return c
+        from .library import CrossEyed
+        try:
+            d = CrossEyed(url, getattr(cfg, "library_cross_eyed_prefix", "")).download_check(h)
+        except (ApiError, OSError, ValueError):
+            return None
+        c = {"verdict": d.get("verdict") or "unknown", "summary": d.get("summary") or "",
+             "job_id": d.get("job_id"), "progress": prog, "at": time.time()}
+        self.state.checked[h] = c
+        self.state.save()
+        return c
+
+    def ask_repair(self, cfg, r: dict, summary: str):
+        """cross-eyed has the missing pieces right in other copies on disk: it repairs the
+        torrent - nothing downloaded, nothing counted on the tracker. Asked once a while."""
+        h = r["hash"]
+        if time.time() - self.state.repairs.get(h, 0) < CHECK_AGAIN:
+            return
+        from .library import CrossEyed
+        self.state.repairs[h] = time.time()
+        try:
+            d = CrossEyed(cfg.library_cross_eyed_url, getattr(cfg, "library_cross_eyed_prefix", "")).repair(h)
+        except (ApiError, OSError) as e:
+            self.state.note(f"{r['name']}: {summary} - but cross-eyed would not repair it: {e}")
+            return
+        self.state.note(f"{r['name']}: {summary} - cross-eyed is repairing it from them (job "
+                        f"{d.get('job_id')}); nothing is downloaded"
+                        + ("; cross-eyed is in dry-run, so the repair waits until you run it there or "
+                           "switch it to live" if d.get("dry_run") else ""))
 
     def tracker(self, r: dict) -> str:
         """The torrent's tracker, by the name Prowlarr gives it (the name Settings uses)."""
@@ -213,7 +373,7 @@ class Mender:
         pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key) if getattr(cfg, "prowlarr_url", "") else None
         return tracker_name([r["tracker"]], pr)
 
-    def download_rest(self, qb, r: dict, back, map_path) -> bool:
+    def download_rest(self, qb, r: dict, back, map_path, in_place: bool = False) -> bool:
         """Start a torrent nothing here can finish, to download the rest from its tracker -
         ticked "always add", within its limit, once (see the module's notes)."""
         cfg, h = self.app.cfg, r["hash"]
@@ -238,35 +398,21 @@ class Mender:
         if not config_mod.within_limit(cfg, tracker, *btledger.need(frac, short, total, before),
                                        config_mod.AUTO_HEADROOM):
             return False
-        # every short file needs bytes of its own before qBittorrent writes into it
-        files = []
-        for f in qb.files(h):
-            if f.get("progress", 0) >= 1 or f.get("priority", 1) == 0:
-                continue
-            p = locate(info, f["name"], back, map_path)
-            if p:
-                files.append((f["name"], p))
-        shared = [(n, p) for n, p in files if os.stat(p).st_nlink > 1]
-        for d in {os.path.dirname(p) for _, p in shared}:
-            room = sum(os.path.getsize(p) for _, p in shared if os.path.dirname(p) == d)
-            if shutil.disk_usage(d).free < room * 1.05 + 1024 ** 3:
-                self.state.started[h] = time.time()
-                self.state.note(f"{r['name']}: not started - no room to give its short files a copy "
-                                "of their own (they are shared with other files)")
+        if not in_place:
+            # every file qBittorrent may write into gets bytes of its own first (see originals)
+            _, why = originals.ready_to_download(cfg, qb, h, lambda n: locate(info, n, back, map_path),
+                                                 "downloaded into over BitTorrent by mend")
+            if why:
+                self.say("dl:" + h, f"{r['name']}: not started - {why}")
                 return False
-        from .assemble import own_copy
-        for n, p in files:
-            try:
-                originals.keep_before_writes(cfg, p, n, h, "downloaded into over BitTorrent by mend")
-            except OSError:
-                pass
-            own_copy(p)                                     # nothing to do once it has its own
         btledger.record_start(cfg, h, tracker, info, short)
         qb.start(h)
         self.state.started[h] = time.time()
         self.state.note(f"{r['name']}: nothing here finishes it - downloading the last "
                         f"{(1 - frac) * 100:.4f}% from {tracker} (within its limit: "
-                        f"{config_mod.limit_text(cfg, tracker)})")
+                        f"{config_mod.limit_text(cfg, tracker)})"
+                        + ("; into the files it shares with other torrents, which need the same bytes"
+                           if in_place else ""))
         return True
 
     def mend(self, qb, r: dict, others: list[dict], back, map_path) -> str:

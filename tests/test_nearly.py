@@ -263,6 +263,12 @@ class RecheckQbit:
     def start(self, h):
         self.started.append(h)
 
+    def files(self, h):
+        return []
+
+    def piece_states(self, h):
+        return []
+
     def add_tags(self, h, tags):
         self.tags.append(("+", tags))
 
@@ -621,6 +627,8 @@ def test_a_job_ticked_via_another_tracker_goes_to_qbittorrent_as_that_torrent(se
     class Q:
         def info(self, h): return None
         def start(self, h): started.append(h)
+        def files(self, h): return []
+        def piece_states(self, h): return []
         def add_tags(self, h, t): tags.append(("+", t))
         def remove_tags(self, h, t): tags.append(("-", t))
     monkeypatch.setattr(app, "_qbit", lambda: Q())

@@ -32,7 +32,7 @@ class Ledger:
         os.replace(tmp, self.path)
 
     def record(self, nzo: str, title: str, guid: str = "", indexer: str = "", size: int | None = None,
-               torrent: str = "", ids: list[str] | None = None):
+               torrent: str = "", ids: list[str] | None = None, part: bool = False):
         with _lock:
             jobs = [j for j in self._load() if j.get("nzo") != nzo]
             job = {"nzo": nzo, "title": title, "guid": guid, "indexer": indexer,
@@ -42,6 +42,8 @@ class Ledger:
                    "own": True}
             if ids:
                 job["ids"] = ids            # nzbinfo.post_ids: which post this was
+            if part:
+                job["part"] = True          # a few files trimmed out of the post, never all of it
             jobs.append(job)
             self._save(jobs)
 
@@ -58,9 +60,12 @@ class Ledger:
     def matches(self, title: str, guid: str = "", size: int | None = None) -> list[dict]:
         """Earlier submissions of the same NZB, newest first: same indexer entry (guid), or
         same title and size (the same post on another indexer). Entries recorded without a
-        size match on the title alone - the files are verified before anything is reused."""
+        size match on the title alone - the files are verified before anything is reused.
+        A download of a few files trimmed out of a post is never the post."""
         out = []
         for j in self._load():
+            if j.get("part") or str(j.get("title", "")).endswith(".extras"):
+                continue
             if guid and j.get("guid") == guid:
                 out.append(j)
             elif j.get("title") == title and (j.get("size") is None or size is None or j.get("size") == size):

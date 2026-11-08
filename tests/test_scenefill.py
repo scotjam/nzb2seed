@@ -206,3 +206,14 @@ def test_srrdb_is_asked_by_the_names_the_release_goes_by(tmp_path, monkeypatch):
     d = job(tmp_path, {"v.mkv": VIDEO})
     assert scenefill.fill(t, d, list(t.real_files))
     assert asked[:2] == [REL + "-xpost", "Some Folder Name"] and seen["release"] == REL.lower()
+
+
+def test_a_build_starting_does_not_wipe_another_builds_record():
+    """Builds run side by side: one starting forgot what the other had already got, which
+    then fetched it all again."""
+    scenefill.reset()
+    scenefill._have["a" * 40] = {"x-sample.mkv"}
+    scenefill._done[("a" * 40, "/d", "Rel")] = True
+    scenefill._have["b" * 40] = {"y.nfo"}
+    scenefill.reset("b" * 40)
+    assert scenefill._have == {"a" * 40: {"x-sample.mkv"}} and ("a" * 40, "/d", "Rel") in scenefill._done

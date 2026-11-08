@@ -275,7 +275,7 @@ class _Sink:
 
 
 # a build that stops at least this complete looks on your other trackers by itself
-AUTO_OTHERS_AT = 0.9
+AUTO_OTHERS_AT = pipeline_mod.AUTO_OTHERS_AT
 
 
 class App:
@@ -482,6 +482,7 @@ class App:
         """Stopped torrents short of 100%: finished from another torrent's good files (mend.py)."""
         from . import mend as mend_mod
         self.mend = mend_mod.Mender(self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "mend.json"))
+        self.mend.state.on_note = lambda: self.events.publish("mend")
 
     def demand_stats(self) -> "worth_mod.Stats":
         return worth_mod.Stats(os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)),
@@ -726,6 +727,7 @@ class App:
                                 "allows - it may bring seeding obligations there")
                 except ApiError as err:
                     report.warn(f"could not change its tags in qBittorrent: {err}")
+            self.keep_originals(cfg, qb, h, info.get("save_path") or "")
             btledger.record_start(cfg, h, rel.indexer, info, short)
             qb.start(h)
             job.extra = {**(job.extra or {}), "added_via": rel.indexer}
@@ -835,39 +837,21 @@ class App:
         return self.start_job(f"Finish in qBittorrent: {job.title}", "client", run)
 
     def keep_originals(self, cfg, qb, h: str, save_path: str):
-        """Before qBittorrent downloads into a build's short files, keep their bytes as built:
-        the pieces it fetches replace them, and other trackers often carry the release with
-        exactly those bytes (see originals.py). Each short file gets its own copy to write
-        into; the kept original is never written."""
-        try:                                    # a precaution: never what fails the job
-            files = qb.files(h)
-        except Exception as e:                  # noqa: BLE001
-            report.warn(f"could not list its files to keep their originals: {e}")
-            return
+        """Before qBittorrent downloads into a torrent's files: every file it may write into
+        gets bytes of its own, and its present version is kept as an original (other trackers
+        often carry the release with exactly those bytes - see originals.py). Raises Abort,
+        the torrent left stopped, when a file would stay shared with the library or another
+        torrent - a download would change theirs too."""
         here = map_path(save_path, [(b, a) for a, b in (cfg.local_to_qbit or [])])
-        kept, skipped = [], []
-        for f in files:
-            if (f.get("progress") or 0) >= 1 or f.get("priority", 1) == 0:
-                continue
-            path = os.path.join(here, *f["name"].split("/"))
-            if not os.path.isfile(path) or os.path.getsize(path) == 0:
-                continue
-            try:
-                ok = originals_mod.keep_before_writes(cfg, path, f["name"], h, "downloaded into over BitTorrent")
-            except OSError as e:
-                report.warn(f"could not keep the built version of {os.path.basename(f['name'])}: {e}")
-                continue
-            if ok:
-                kept.append(os.path.basename(f["name"]))
-            elif float(getattr(cfg, "keep_originals_days", 3) or 0):
-                skipped.append(os.path.basename(f["name"]))
+        kept, why = originals_mod.ready_to_download(
+            cfg, qb, h, lambda n: os.path.join(here, *n.split("/")), "downloaded into over BitTorrent")
         if kept:
-            report.info(f"kept the built version of {len(kept)} file(s) before qBittorrent changes them "
-                        f"(for other trackers' copies of this release): {', '.join(kept[:4])}"
+            report.info(f"kept the version here of {len(kept)} file(s) before qBittorrent changes them "
+                        f"(for other trackers' copies of this release): "
+                        f"{', '.join(os.path.basename(n) for n in kept[:4])}"
                         + (f" and {len(kept) - 4} more" if len(kept) > 4 else ""))
-        if skipped:
-            report.warn(f"not enough free space to keep the built version of {', '.join(skipped[:4])}"
-                        " - qBittorrent will change it in place")
+        if why:
+            raise Abort(f"not started: {why}. The torrent stays stopped in qBittorrent (nothing deleted)")
 
     # ------------------------------------------------ clearing what builds leave behind
     def clean_downloads(self, log=print) -> tuple[int, int]:
@@ -934,6 +918,26 @@ class App:
         except OSError:
             pass
         return n, freed, kept
+
+    def nothing_to_delete(self, job: "Job", h: str, out: dict, qb) -> str:
+        """Why clearing a job with "delete files" found nothing of it to delete."""
+        if not h:
+            return "nothing was downloaded for it"
+        if any(self.torrent_of(j) == h for j in self.jobs.values() if j.status in ("running", "waiting")):
+            return "a running build uses its downloads"
+        if h in (out.get("had") or []):
+            if out.get("kept"):
+                return "its Usenet downloads are in use, so they stay"
+            return "its Usenet downloads were already cleared"
+        try:
+            seeding = qb is not None and bool(qb.info(h))
+        except (ApiError, OSError):
+            seeding = False
+        if seeding:
+            return "its files are its torrent's in qBittorrent"
+        if job.status == "done":
+            return "nothing of it is left to delete"
+        return "nothing it downloaded or placed is left"
 
     def keep_downloads_of(self, jobs: list["Job"]):
         """Cleared from the list with "keep files": what the jobs downloaded from Usenet stays
@@ -1639,6 +1643,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                    "min_sample": app.cfg.demand_min_sample,
                                    "age_days": app.cfg.demand_age_days,
                                    "nzb2seed": ours})
+            if path == "/api/mend":
+                # what mend did and why it left torrents alone - newest first (the Jobs tab)
+                m = getattr(app, "mend", None)
+                log = list(m.state.log[-100:]) if m else []
+                return self._json({"log": log[::-1]})
             if path == "/api/space":
                 try:
                     out = space_mod.check(app.cfg, app._sab())
@@ -1758,6 +1767,7 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                         return self._err(f"nothing was removed: {e}")
                     # and the files each stopped build placed for its torrent
                     files = freed = 0
+                    nothing = []
                     for i in gone:
                         try:
                             n, b, why = app.delete_placed(app.jobs[i], qb)
@@ -1765,7 +1775,13 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                             n, b, why = 0, 0, [f"{app.jobs[i].title}: {e}"]
                         files, freed = files + n, freed + b
                         out["kept"] = list(out.get("kept") or []) + why
+                        h = app.torrent_of(app.jobs[i])
+                        if not n and not why and not (out.get("by") or {}).get(h):
+                            nothing.append(f"{app.jobs[i].title}: {app.nothing_to_delete(app.jobs[i], h, out, qb)}")
                     out["placed_files"], out["placed_bytes"] = files, freed
+                    out["nothing"] = nothing
+                    out.pop("by", None)
+                    out.pop("had", None)
                     name = lambda t: t[len("auto: "):] if t.startswith("auto: ") else t
                     app.forget_kept(hashes, {pipeline_mod.release_key(name(app.jobs[i].title)) for i in gone})
                 else:

@@ -37,6 +37,9 @@ class FakeQb:
         self.started.append(h)
         self.state[h] = "stalledUP"
 
+    def piece_states(self, h):
+        return [2 if self.prog[h] >= 1 else 0]
+
 
 def _setup(tmp_path, theirs=GOOD):
     lib_file = tmp_path / "tv" / "ep.mkv"
@@ -212,3 +215,159 @@ def test_old_downloads_nothing_uses_are_removed(tmp_path, monkeypatch):
     assert not old.exists() and new.exists() and queued.exists() and seeded.exists() and building.exists()
     folder("Another.Dropped", 5)            # qBittorrent not answering: nothing is removed
     assert pipeline.remove_old_downloads(cfg, sab, None, 3, now=1_000_000) == (0, 0)
+
+
+def test_a_whole_file_sharing_a_missing_piece_gets_its_own_copy_too(tmp_path, monkeypatch):
+    """A piece is written whole: the .nfo sharing the missing piece with the video would be
+    written into as well - it gets bytes of its own; the .srt, in pieces already here, not."""
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    linked = {}
+    for name in ("ep.nfo", "ep.srt"):
+        lib = tmp_path / "tv" / name
+        lib.write_bytes(name.encode() * 10)
+        os.link(lib, tmp_path / "short" / "Rel" / name)
+        linked[name] = lib
+    qb.files = lambda h: [
+        {"name": "Rel/ep.mkv", "size": len(GOOD), "progress": qb.prog[h], "priority": 1, "piece_range": [0, 1]},
+        {"name": "Rel/ep.nfo", "size": 60, "progress": 1, "priority": 1, "piece_range": [1, 1]},
+        {"name": "Rel/ep.srt", "size": 60, "progress": 1, "priority": 1, "piece_range": [2, 2]}]
+    qb.piece_states = lambda h: [2, 0, 2]
+    m.round()
+    assert qb.started == ["short"]
+    here = tmp_path / "short" / "Rel"
+    assert os.stat(here / "ep.nfo").st_ino != os.stat(linked["ep.nfo"]).st_ino
+    assert os.stat(here / "ep.srt").st_ino == os.stat(linked["ep.srt"]).st_ino
+
+
+def _cross_eyed(m, monkeypatch, jobs=None, dry=False, down=False, verdict="not_shared", asked=None):
+    """A fake cross-eyed: its open jobs, and its download-check verdict for every torrent."""
+    from nzb2seed import library
+    from nzb2seed.clients import ApiError
+    asked = asked if asked is not None else []
+
+    class CE:
+        def __init__(self, *a):
+            pass
+
+        def open_jobs(self):
+            if down:
+                raise ApiError("cross-eyed cannot be reached")
+            return dict(jobs or {}), dry
+
+        def download_check(self, h):
+            if down:
+                raise ApiError("cross-eyed cannot be reached")
+            asked.append(("check", h))
+            return {"verdict": verdict, "summary": f"says {verdict}", "job_id": 12}
+
+        def repair(self, h):
+            asked.append(("repair", h))
+            return {"ok": True, "job_id": 31, "dry_run": dry}
+    monkeypatch.setattr(library, "CrossEyed", CE)
+    m.app.cfg.library_cross_eyed_url = "http://ce"
+    m.app.cfg.library_cross_eyed_prefix = "/host"
+
+
+def test_a_torrent_cross_eyed_has_a_job_on_is_left_alone_and_said_so_once(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, {"short": {"id": 7, "state": "failed", "job_type": "relocate"}})
+    m.round()
+    m.round()
+    assert qb.started == [] and os.stat(mine).st_ino == os.stat(lib_file).st_ino
+    said = [t for _, t in m.state.log if "cross-eyed job 7" in t]
+    assert len(said) == 1 and "failed" in said[0] and "safety copy" in said[0]
+
+
+def test_in_dry_run_mend_says_the_job_waits_for_you(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, {"short": {"id": 8, "state": "pending", "job_type": "move"}}, dry=True)
+    m.round()
+    assert qb.started == [] and "dry-run" in m.state.log[-1][1]
+
+
+def test_cross_eyed_not_answering_means_never_writing_into_a_shared_file(tmp_path, monkeypatch):
+    """No answer: no files are swapped in, and a download only goes into files of its own."""
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, down=True)
+    m.round()
+    assert any("did not answer" in t for _, t in m.state.log)
+    assert qb.started == ["short"] and os.stat(mine).st_ino != os.stat(lib_file).st_ino
+
+
+def test_repairable_is_repaired_by_cross_eyed_not_downloaded(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch, ticked=())      # no tracker needed for it
+    asked = []
+    _cross_eyed(m, monkeypatch, verdict="repairable", asked=asked, dry=True)
+    m.round()
+    m.round()
+    assert qb.started == [] and asked.count(("repair", "short")) == 1
+    said = [t for _, t in m.state.log if "repairing it" in t]
+    assert len(said) == 1 and "job 31" in said[0] and "dry-run" in said[0]
+
+
+def test_a_download_that_would_break_other_torrents_is_not_made(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, verdict="shared_breaks_others")
+    m.round()
+    m.round()
+    assert qb.started == [] and os.stat(mine).st_ino == os.stat(lib_file).st_ino
+    assert len([t for _, t in m.state.log if "says shared_breaks_others" in t]) == 1
+
+
+def test_shared_with_torrents_needing_the_same_bytes_is_downloaded_in_place(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, verdict="shared_same_version")
+    m.round()
+    assert qb.started == ["short"] and os.stat(mine).st_ino == os.stat(lib_file).st_ino   # fixes them all
+    assert "need the same bytes" in m.state.log[-1][1]
+
+
+def test_files_a_library_also_holds_get_a_copy_of_their_own_first(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, verdict="shared_other_names")
+    m.round()
+    assert qb.started == ["short"] and os.stat(mine).st_ino != os.stat(lib_file).st_ino
+
+
+def test_a_job_cross_eyed_reports_on_the_torrent_leaves_it_alone(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, verdict="in_job")
+    m.round()
+    assert qb.started == [] and "left alone - says in_job" in m.state.log[-1][1]
+
+
+def test_cross_eyeds_answer_is_kept_while_nothing_changes(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    asked = []
+    _cross_eyed(m, monkeypatch, verdict="shared_breaks_others", asked=asked)
+    m.round()
+    m.round()
+    assert asked.count(("check", "short")) == 1
+
+
+def test_a_copy_cross_eyed_is_moving_is_not_used_to_finish_another_and_mend_says_when_it_can(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _setup(tmp_path)
+    m.app.cfg.nearly_auto_trackers = []
+    jobs = {"whole": {"id": 9, "state": "repointed", "job_type": "move"}}
+    _cross_eyed(m, monkeypatch, jobs)
+    m.round()
+    assert qb.prog["short"] == 0.5 and qb.started == []
+    assert "complete copy is not used" in m.state.log[-1][1] and "job 9" in m.state.log[-1][1]
+    jobs.clear()                                                    # the job is over
+    m.round()
+    said = [t for _, t in m.state.log]
+    assert any("mend can use its files again" in t for t in said)
+    assert qb.prog["short"] == 1.0                                  # and it is used
+
+
+def test_mend_says_when_a_torrent_it_left_alone_is_picked_up_again_after_a_restart(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    jobs = {"short": {"id": 7, "state": "failed", "job_type": "relocate"}}
+    _cross_eyed(m, monkeypatch, jobs)
+    m.round()
+    m.state = mend.State(str(tmp_path / "mend.json"))               # a restart: read back from mend.json
+    jobs.clear()
+    m.round()
+    said = [t for _, t in m.state.log]
+    assert any("cross-eyed's job on it is over - mend looks at it again" in t for t in said)
+    assert qb.started == ["short"]

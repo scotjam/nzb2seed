@@ -984,6 +984,10 @@ class FileFetcher:
         self.whole = whole
         self.whole_dirs: dict[str, list[str]] = {}   # release -> whole posts downloaded for it
         self.whole_tried: set[str] = set()
+        self.infohash = ""                    # the torrent being built, when there is one
+        # files no post could supply, this run: (release, file) -> why. The same file is asked
+        # for again for each download folder - it is not looked for again
+        self.failed: dict[tuple[str, str], str] = {}
 
     def close(self):
         """Remove the whole posts downloaded to look inside - what was needed was moved out."""
@@ -1052,8 +1056,17 @@ class FileFetcher:
 
     def __call__(self, release: str, relpath: str, size: int, crc: str, dest: str) -> bool:
         from . import nzbinfo
+        from .pipeline import small_priority, verdicts_for
         self.last_why = None
         name = os.path.basename(relpath)
+        tried = (release, relpath.lower())
+        if tried in self.failed:
+            self.last_why = self.failed[tried]
+            return False
+        # what a post holds of a file never changes: kept across runs, so a restarted build does
+        # not ask the indexer again (a grab) nor download a copy already found wrong
+        verdicts = verdicts_for(self.cfg)
+        key, label = self.infohash or release, f"file: {name.lower()} {crc.upper()}"
         job = f"{release}.{os.path.splitext(name)[0]}"
         # an earlier helper download of this file may already be on disk
         old = self.leftovers(job)
@@ -1076,6 +1089,10 @@ class FileFetcher:
                                    if r.protocol == "usenet" and scene_name(r.title).lower() == release.lower()]
         for r in self.posts[release]:
             check_cancel()
+            known = verdicts.seen(key, label, r)
+            if known:
+                self.last_why = f"{r.title} ({r.indexer}): {known}"
+                continue
             try:
                 trimmed = nzbinfo.trim(self.pr.fetch(r), name)
             except Exception:
@@ -1083,10 +1100,11 @@ class FileFetcher:
             if hasattr(self.pr, "drop"):
                 self.pr.drop(r)              # only the trimmed NZB is downloaded
             if trimmed is None:
+                verdicts.mark(key, label, r, f"it lists no {name}")
                 continue
             info(f"{release}: {name} is in {r.title} ({r.indexer}) - downloading just that file")
             try:
-                nzo = self.sab.add_nzb(trimmed, job, self.cfg.sab_category, PP_REPAIR, self.cfg.sab_priority)
+                nzo = self.sab.add_nzb(trimmed, job, self.cfg.sab_category, PP_REPAIR, small_priority(self.cfg))
                 status, slot = sab_wait(self.sab, {nzo: name})[nzo]
                 if status not in SAB_DONE:
                     continue
@@ -1117,13 +1135,15 @@ class FileFetcher:
             self.last_why = (f"{r.title} ({r.indexer}) had " + ("; ".join(seen) or "nothing")
                              + f" - the original is {size} bytes, CRC {crc.upper()}")
             warn(self.last_why)
+            verdicts.mark(key, label, r, "its copy is not the original (" + ("; ".join(seen) or "nothing") + ")")
             if d:
                 shutil.rmtree(d, ignore_errors=True)
             else:
                 for g in files:
                     os.remove(g)                    # the stray file of our own one-file job
-        if self.whole:
-            return self._whole(release, name, size, crc, dest)
+        if self.whole and self._whole(release, name, size, crc, dest):
+            return True
+        self.failed[tried] = self.last_why or f"no post of {release} had {name}"
         return False
 
 

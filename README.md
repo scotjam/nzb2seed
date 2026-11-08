@@ -229,11 +229,33 @@ When nothing here is left to try, the rest can come from the torrent's own
 tracker - only a tracker ticked **always add** (Settings, "Builds that stop a
 few percent short"), and only while what is missing is within the limit you
 set for it, counting what earlier starts of the torrent downloaded, with 10%
-of the limit kept free. Before it starts, each short file gets a copy of its
-own (cross-seeded files are usually shared with other torrents, which would
-otherwise change too) and its present version is kept as an original. Each
-torrent is started this way once - one you stop again stays stopped - and
+of the limit kept free. Before it starts, every file the download could write
+into - each short file, and any whole file sharing a piece with one - gets a
+copy of its own (cross-seeded files are usually shared with other torrents,
+which would otherwise change too) and its present version is kept as an
+original. If a file would stay shared (no room for the copy), it is not
+started. The same applies when you add a build with *Add to torrent client*.
+Each torrent is started this way once - one you stop again stays stopped - and
 nothing starts while the free-space guard is holding downloads.
+
+With cross-eyed set up (Library tab), mend leaves alone any torrent cross-eyed
+has a job open on - anything not done or rolled back, a failed one included,
+since it can leave a safety copy linked to the files - and does not use such a
+torrent's files to finish another. Before downloading anything it asks
+cross-eyed, which works it out from piece hashes:
+
+* **repairable** - other copies on disk have the missing pieces right:
+  cross-eyed repairs it, nothing is downloaded (no ratio cost);
+* **shared, and the other torrents need those bytes as they are** - left alone;
+* **shared, and the other torrents need the same bytes** - downloaded into the
+  shared files, which fixes them all;
+* **its own files**, or **files a library or backup holds too** - downloaded
+  after each file gets a copy of its own.
+
+What mend did and why it left a torrent alone is listed under *Mend* in the
+Jobs tab; in cross-eyed's dry-run it says the job or repair only runs once you
+run it there or switch cross-eyed to live. If cross-eyed does not answer, mend
+swaps no files in and only downloads into files of their own.
 
 **Originals.** A build changes its own files in two cases: when pieces fail
 and another post's copy replaces a file (or patches a piece of it), and when
@@ -491,7 +513,13 @@ season at a time. A season a tracker has as the very release you have is
 linked into its torrent and rechecked - nothing is downloaded. Otherwise the
 tracker's single-season pack is built from Usenet within a daily budget, and
 once it seeds at 100.0% you decide whether it replaces your files. Only packs
-with every episode you have are used.
+with every episode you have are used. An episode no Usenet post has does not
+stop the build when BitTorrent can finish it by itself: the pack's tracker - or,
+with at least 90% here, another tracker with the same release (same files) - is
+ticked **always add**, has seeders, and all that is missing stays within its
+limit (10% of it kept free). The build then stops nearly complete and is handed
+on (to the other tracker's torrent, if it is that one). Otherwise the pack is
+passed over for the season's next usable pack, in the same run.
 
 **Where season packs come from** - under *Trackers and folders*:
 

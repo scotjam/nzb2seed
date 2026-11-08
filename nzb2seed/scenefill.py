@@ -22,14 +22,35 @@ from .report import end_progress, info, progress, warn
 SCENE_DIR = "nzb2seed-scene"
 _done: dict[tuple[str, str, str], bool] = {}  # (infohash, folder, release) -> filled anything
 _have: dict[str, set[str]] = {}             # infohash -> file names already supplied in this build
+_said: set[tuple] = set()                    # notes already shown in this build (each download
+                                             # folder is looked at for every release)
 
 
-def reset():
-    """Forget what earlier builds did (called at the start of each build)."""
-    _done.clear()
-    _have.clear()
-    _details.clear()
-    _listings.clear()
+def reset(infohash: str | None = None):
+    """Forget what an earlier build of this torrent did (called at the start of each build).
+    Builds run side by side: only this torrent's own record goes - wiping another build's
+    mid-way made it fetch again what it already had. srrDB answers and archive listings
+    are the same for every build and stay (a release srrDB did not know is asked again)."""
+    if infohash is None:
+        _done.clear()
+        _have.clear()
+        _said.clear()
+        _details.clear()
+        _listings.clear()
+        return
+    for k in [k for k in _done if k[0] == infohash]:
+        _done.pop(k, None)
+    _have.pop(infohash, None)
+    for k in [k for k in _said if k and k[0] == infohash]:
+        _said.discard(k)
+    for k in [k for k, v in _details.items() if not v]:
+        _details.pop(k, None)               # not on srrDB then: asked again, it may be now
+
+
+def _once(key: tuple, text: str):
+    if key not in _said:
+        _said.add(key)
+        info(text)
 
 
 def release_name(t) -> str:
@@ -252,14 +273,16 @@ def _fill_release(t, release: str, d: str, missing: list, fetch=None) -> bool:
     inner = [a for a in det.get("archived-files", []) if a.get("size")]
     if need_vols and inner:
         what = os.path.basename(inner[0]["name"]) if len(inner) == 1 else f"the {len(inner)} files they held"
-        info(f"{release}: the download does not hold the scene RAR volumes; srrDB can rebuild them "
-             f"from {what}")
+        _once((t.infohash, release, "rebuild"),
+              f"{release}: the download does not hold the scene RAR volumes; srrDB can rebuild them "
+              f"from {what}")
         found, bad = {}, None
         for a in inner:
             p = _find(d, a["size"], os.path.basename(a["name"]))
             if p is None:
-                info(f"{release}: no {a['size']}-byte {os.path.basename(a['name'])} in this download "
-                     "to rebuild them from")
+                _once((t.infohash, release, "no source"),
+                      f"{release}: no {a['size']}-byte {os.path.basename(a['name'])} in this download "
+                      "to rebuild them from")
                 break
             progress(f"CRC check of {os.path.basename(p)}")
             crc = metadata.crc32(p)

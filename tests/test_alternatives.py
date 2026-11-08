@@ -352,6 +352,66 @@ def test_a_post_short_only_of_a_small_file_is_not_followed_by_another_whole_post
     assert len(dirs) == 1 and len(nzos) == 1
 
 
+def test_an_episode_short_only_of_a_sample_small_beside_the_torrent_is_not_asked_about(tmp_path, monkeypatch):
+    """Every post of S03E02 lacks its sample - a sixth of the episode, a few percent of the
+    pack. Once every post is tried the build settles (the sample to come over BitTorrent)
+    instead of asking you to pick a post that cannot hold it."""
+    t0, files = pack_torrent()
+    files["Sample/show.2016.s03e02.720p.hdtv.x264-grpa-sample.mkv"] = rnd(8_000, 9)
+    t = parse(make_torrent(PACK, files))
+    asked = []
+    monkeypatch.setattr(pipeline, "report_ask", lambda p, c: asked.append(p))
+    size2 = sum(len(v) for k, v in files.items() if "s03e02" in k)
+    e2 = rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", size2 + 100, "e2")
+    sab = PackSAB(str(tmp_path), files, failing=())
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
+    dirs, _ = pipeline.usenet_multi(cfg, NZBsOK([e2]), sab, t, with_others(files, [e2]), 2)
+    assert asked == [] and sab.added.count(e2.title) == 1 and len(dirs) == 4
+
+
+def _no_e02(tmp_path, monkeypatch, percent, ticked=True, seeders=5):
+    """A pack whose S03E02 no post supplies, built unattended for a tracker with a limit."""
+    t, files = pack_torrent()
+    sab = PackSAB(str(tmp_path), files, failing=())
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]],
+                 nearly_limits=[{"tracker": "TrackerOne", "percent": percent, "mb": None}],
+                 nearly_auto_trackers=["TrackerOne"] if ticked else [])
+    monkeypatch.setattr(pipeline._this_build, "tracker", "TrackerOne", raising=False)
+    monkeypatch.setattr(pipeline._this_build, "seeders", seeders, raising=False)
+    sizes = {i: len(next(v for k, v in files.items() if f"s03e0{i}" in k)) for i in range(1, 5)}
+    picked = [[rel(f"Show.2016.S03E0{i}.720p.HDTV.x264-{'GRPB' if i == 4 else 'GRPA'}", sizes[i] + 100, f"ok{i}")]
+              for i in (1, 3, 4)]
+    e2 = rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", sizes[2] + 100, "e2")
+    sab.failing.add(e2.title)
+    return cfg, sab, t, picked + [[e2]]
+
+
+def test_unattended_a_missing_episode_within_the_trackers_limit_does_not_stop_the_build(tmp_path, monkeypatch):
+    """No post supplies one episode, but it is within what the tracker lets come over
+    BitTorrent: the rest is built, and the build stops short (the tracker's rules decide)."""
+    cfg, sab, t, picked = _no_e02(tmp_path, monkeypatch, percent=40)
+    dirs = pipeline.plan_and_fetch(cfg, pipeline.Options(unattended=True), NZBsOK(), sab, t, t.name,
+                                   [r for g in picked for r in g], 2)[0]
+    assert len(dirs) == 3                                     # E01, E03, E04 - E02 left out
+
+
+@pytest.mark.parametrize("why", [{"ticked": False}, {"seeders": 0}])
+def test_unattended_a_missing_episode_stops_the_build_unless_the_tracker_would_finish_it(tmp_path, monkeypatch, why):
+    """Not ticked always add, or no seeders: nothing would finish it - the build stops, so
+    another release can be tried."""
+    cfg, sab, t, picked = _no_e02(tmp_path, monkeypatch, percent=40, **why)
+    with pytest.raises(Abort, match="no Usenet post could supply S03E02"):
+        pipeline.plan_and_fetch(cfg, pipeline.Options(unattended=True), NZBsOK(), sab, t, t.name,
+                                [r for g in picked for r in g], 2)
+
+
+def test_unattended_a_missing_episode_beyond_the_limit_stops_the_build(tmp_path, monkeypatch):
+    cfg, sab, t, picked = _no_e02(tmp_path, monkeypatch, percent=10)       # E02 is a quarter
+    with pytest.raises(Abort, match="no Usenet post could supply S03E02"):
+        pipeline.plan_and_fetch(cfg, pipeline.Options(unattended=True), NZBsOK(), sab, t, t.name,
+                                [r for g in picked for r in g], 2)
+
+
 def test_a_post_short_of_real_content_still_moves_on(tmp_path):
     """Missing more than a small file (here: a second video) - the next post is tried."""
     film = "Film 2022 1080p BluRay REMUX-GRP"
@@ -620,3 +680,33 @@ def test_a_rard_release_takes_its_group_from_the_release_name():
     need = pipeline.build_units(t, t.name).need
     assert need.group == "iajypzv"
     assert pipeline._fits(need, rel(name + "-xpost", t.total_size + 1000, "p")) is None
+
+
+def _tor(title, size, indexer, seeders):
+    return Release(title, "torrent", indexer, 1, size, f"{indexer}:{title}", "", "", "", 0, seeders, None)
+
+
+@pytest.mark.parametrize("listed,ticked,expect", [
+    ([], ["TrackerOne"], "TrackerOne"),                                   # its own tracker would
+    ([_tor("Rel-GRP", 1000, "TrackerTwo", 4)], ["TrackerTwo"], "TrackerTwo"),   # another would
+    ([_tor("Rel-GRP", 1000, "TrackerTwo", 0)], ["TrackerTwo"], None),          # nobody seeds it
+    ([_tor("Rel-GRP", 1000, "TrackerTwo", 4)], [], None),                      # not ticked
+    ([_tor("Rel-GRP", 1000 + (2 << 20), "TrackerTwo", 4)], ["TrackerTwo"], None),    # other files
+    ([_tor("Other-GRP", 1000, "TrackerTwo", 4)], ["TrackerTwo"], None),        # another release
+])
+def test_what_would_finish_a_build_that_goes_on_without_a_part(tmp_path, monkeypatch, listed, ticked, expect):
+    from types import SimpleNamespace
+    cfg = Config(path=str(tmp_path / "c.toml"), nearly_auto_trackers=ticked,
+                 nearly_limits=[{"tracker": n, "percent": 10, "mb": None} for n in ("TrackerOne", "TrackerTwo")])
+    monkeypatch.setattr(pipeline, "search", lambda cfg_, q: (listed, []))
+    t = SimpleNamespace(name="Rel-GRP", total_size=1000)
+    assert pipeline.finisher(cfg, t, "TrackerOne", 3, 50, []) == expect
+
+
+def test_another_tracker_counts_only_once_enough_is_here_for_it_to_be_looked_at(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    cfg = Config(path=str(tmp_path / "c.toml"), nearly_auto_trackers=["TrackerTwo"],
+                 nearly_limits=[{"tracker": "TrackerTwo", "percent": 50, "mb": None}])
+    monkeypatch.setattr(pipeline, "search", lambda cfg_, q: ([_tor("Rel-GRP", 1000, "TrackerTwo", 4)], []))
+    t = SimpleNamespace(name="Rel-GRP", total_size=1000)
+    assert pipeline.finisher(cfg, t, "TrackerOne", 3, 200, []) is None        # 80% here: not looked at
