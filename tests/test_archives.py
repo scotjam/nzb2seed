@@ -136,3 +136,53 @@ def test_a_wrong_password_leaves_nothing_behind(tmp_path, monkeypatch):
     monkeypatch.setattr(archives.subprocess, "run", Encrypted(str(dest)))
     archives.extract(str(tmp_path / "x.part01.rar"), ["Movie.mkv"], str(dest))
     assert sorted(os.listdir(dest)) == ["mine.txt"]      # the "-" attempt's half-file is gone
+
+
+def test_another_episodes_rar_volume_of_the_same_size_is_not_unpacked(tmp_path, monkeypatch):
+    """Scene RAR volumes are all one size: an archive holding episode 1's .r00 does not
+    hold episode 2's, though the sizes are equal."""
+    vol = 2 << 20
+    t = parse(make_torrent("Show.S01.720p.HDTV.x264-GRP", {
+        "E01/show.s01e01.720p.hdtv.x264-grp.r00": rnd(vol, 1),
+        "E02/show.s01e02.720p.hdtv.x264-grp.r00": rnd(vol, 2)}))
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "Kx9q.7z.001").write_bytes(b"7z")
+    monkeypatch.setattr(archives, "list_contents", lambda first: [("show.s01e01.720p.hdtv.x264-grp.r00", vol)])
+    monkeypatch.setattr(archives, "extract", lambda *a: (_ for _ in ()).throw(AssertionError("unpacked")))
+    assert not pipeline.supplies(t, str(job), "show.s01e02.720p.hdtv.x264-grp.r00")
+
+
+def test_the_same_files_are_unpacked_from_an_archive_once(tmp_path, monkeypatch):
+    """Unpacked files that did not fit the first time will not the next: not unpacked again."""
+    t = parse(make_torrent("Show.S01.720p.HDTV.x264-GRP",
+                           {"show.s01e01.720p.hdtv.x264-grp.mkv": rnd(3 << 20, 7)}))
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "x.rar").write_bytes(b"rar")
+    monkeypatch.setattr(archives, "list_contents", lambda first: [("obf.mkv", 3 << 20)])
+    calls = []
+    monkeypatch.setattr(archives, "extract", lambda first, members, dest: calls.append(members))
+    for _ in range(3):
+        assert not pipeline.supplies(t, str(job), "show.s01e01.720p.hdtv.x264-grp.mkv")
+    assert calls == [["obf.mkv"]]
+
+
+def test_a_video_named_after_another_file_still_matches_by_size(tmp_path, monkeypatch):
+    """Only RAR volumes are held to their names: a video with the wrong name is still the
+    file its size says it is."""
+    big = rnd(3 << 20, 8)
+    t = parse(make_torrent("Show.S01.720p.HDTV.x264-GRP", {
+        "show.s01e01.720p.hdtv.x264-grp.mkv": rnd(4 << 20, 9),
+        "show.s01e02.720p.hdtv.x264-grp.mkv": big}))
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "x.rar").write_bytes(b"rar")
+    monkeypatch.setattr(archives, "list_contents", lambda first: [("show.s01e01.720p.hdtv.x264-grp.mkv", len(big))])
+
+    def fake_extract(first, members, dest):
+        os.makedirs(dest, exist_ok=True)
+        with open(os.path.join(dest, members[0]), "wb") as fh:
+            fh.write(big)
+    monkeypatch.setattr(archives, "extract", fake_extract)
+    assert pipeline.supplies(t, str(job), "show.s01e02.720p.hdtv.x264-grp.mkv")
