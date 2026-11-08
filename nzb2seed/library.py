@@ -91,6 +91,7 @@ MOVING, MOVED, ORIGINAL_DELETED = "moving", "moved", "original_deleted"   # hand
 CE_FAILED = {"failed", "rolled_back", "mirror_failed", "delete_interrupted"}
 CE_WAITING = {"awaiting_user", "awaiting_permission"}
 OPEN = {WAITING, BUDGET}            # still to be tried by the loop
+FINISHED = {SEEDING, SWAP, SWAPPED, KEPT, MOVING, MOVED, ORIGINAL_DELETED}   # its torrent is complete
 
 # ---------------------------------------------------------------- which trackers, in what order
 
@@ -761,7 +762,47 @@ class Library:
                       and it.get("status") in (WAITING, SEEDED, SEEDED_STOPPED, NO_PACK, BUDGET)]:
                 self.state.seasons.pop(k)          # the folder is gone
             self.state.scanned_at = time.time()
+            finished = {f"library: {it.get('show')} S{int(it['season']):02d}": it.get("status")
+                        for it in self.state.seasons.values()
+                        if it.get("status") in FINISHED and it.get("season") is not None}
         self.state.save()
+        self.close_cut_off_jobs(finished)
+
+    CUT_OFF = "finished after nzb2seed restarted"
+
+    def close_cut_off_jobs(self, finished: dict[str, str]):
+        """A season's jobs a restart cut off, once the season got there anyway (its torrent
+        settled when nzb2seed was back, or a later job built it): they are only copies of
+        one outcome. Any other job of the season stays and they go; with none, the newest
+        stays - marked done - and the rest go. ``finished``: {job title: the season's status}."""
+        jobs = getattr(self.app, "jobs", None)
+        if not jobs or not finished:
+            return
+        cut = lambda j: j.status == "interrupted" or (j.status == "done" and (j.result or "").startswith(self.CUT_OFF))
+        lock = getattr(self.app, "lock", None) or threading.Lock()
+        changed = False
+        with lock:
+            by_title: dict[str, list] = {}
+            for j in jobs.values():
+                if j.title in finished:
+                    by_title.setdefault(j.title, []).append(j)
+            for title_, js in by_title.items():
+                gone = [j for j in js if cut(j) and j.status in ("interrupted", "done")]
+                if not gone:
+                    continue
+                if len(gone) == len(js):              # nothing else records it: the newest stays
+                    keep = max(gone, key=lambda j: j.id)
+                    gone.remove(keep)
+                    if keep.status != "done":
+                        keep.status = "done"
+                        keep.result = (f"{self.CUT_OFF} - the Library tab has it as "
+                                       + finished[title_].replace("_", " "))
+                        changed = True
+                for j in gone:
+                    jobs.pop(j.id, None)
+                    changed = True
+        if changed and getattr(self.app, "store", None):
+            self.app.store.changed(urgent=True)
 
     def _own_build(self, s: Season, it: dict) -> bool | None:
         """A season whose own build is in qBittorrent already - a build a restart cut off
@@ -912,8 +953,7 @@ class Library:
         self.app.start_job(title, "library", fn)
 
     def run(self, cfg, key: str) -> dict:
-        from . import pipeline
-        from .pipeline import Abort, Incomplete, Options, execute_assemble
+        from .pipeline import Abort, Incomplete, Options
         s = self.seasons[key]
         st = self.state
         step(f"{s.show}, season {s.season}: {len(s.files)} episode(s), {s.size / 1024 ** 3:.1f} GB "
@@ -935,9 +975,56 @@ class Library:
             st.update(key, status=NO_PACK, why=o.get("why") or f"{trackers_text(cfg)} has no usable season pack of it")
             return {"result": "no usable season pack", "extra": {"nothing_built": True}}
         p, data, t, same = chosen
+        opts = Options(unattended=True, start=True, fetch_missing=True, output_dir=out_dir)
+        while True:
+            try:
+                out = self._make(cfg, key, opts, p, data, t, same, s, out_dir)
+            except Incomplete:
+                raise
+            except Abort as e:
+                nxt = None if same else self.next_pack(cfg, key, p, t, e)
+                if nxt is None:
+                    if not (unreachable(e) or still_checking(e)):
+                        st.update(key, status=FAILED, why=str(e))
+                    raise
+                p, data, t, same = nxt
+                continue
+            break
+        if out is None:
+            return {"result": "waiting for the daily download budget", "extra": {"nothing_built": True}}
+        root = torrent_mod_root(t, out_dir)
+        plan = swap_plan(t, root, s)
+        if plan and seeded_from(plan, self.in_client()):
+            st.update(key, status=SEEDING, root=root, why="seeding at 100.0% - the library's files stay as they are, "
+                      "as another torrent seeds from them")
+        elif plan:
+            st.update(key, status=SWAP, root=root, why="seeding at 100.0% - swap the library's files for the torrent's?")
+        else:
+            st.update(key, status=SEEDING, root=root, why="seeding from the library's own files")
+        return out
+
+    def next_pack(self, cfg, key: str, p, t, e):
+        """A pack Usenet cannot supply, and that BitTorrent would not finish by itself (its
+        tracker not ticked always add, no seeders, or more missing than its limit - else the
+        build stops nearly complete instead) hands over to the season's next usable pack, if
+        a ticked tracker has one. That pack is not tried again on a later run either."""
+        from . import pipeline
+        if not str(e).startswith("no Usenet post could supply"):
+            return None
+        skip = set(self.state.seasons.get(key, {}).get("no_usenet") or []) | {t.infohash}
+        self.state.update(key, no_usenet=sorted(skip))
+        if not any(j.get("torrent") == t.infohash for j in pipeline.ledger_for(cfg).all()):
+            self.state.spend(-t.total_size)     # nothing was downloaded for it
+        warn(f"{p.release.title}: {e} - trying the season's next pack")
+        return self.look(cfg, key, skip)
+
+    def _make(self, cfg, key, opts, p, data, t, same, s, out_dir):
+        """Link or build one pack: what the builder returns, None while over the budget."""
+        from . import pipeline
+        from .pipeline import Abort, Incomplete, execute_assemble
+        st = self.state
         tmp = kept_torrent(cfg, t.infohash)
         st.update(key, torrent=p.release.title, infohash=t.infohash, tracker=p.release.indexer)
-        opts = Options(unattended=True, start=True, fetch_missing=True, output_dir=out_dir)
         try:
             if same:
                 step(f"Linking the library's files into {p.release.title}")
@@ -949,8 +1036,6 @@ class Library:
                 out = execute_assemble(cfg, opts, tmp, [s.dir])
             else:
                 out = self.build(cfg, opts, key, t, data, p)
-            if out is None:
-                return {"result": "waiting for the daily download budget", "extra": {"nothing_built": True}}
         except Cancelled:
             st.update(key, status=WAITING, why="cancelled")
             raise
@@ -973,24 +1058,16 @@ class Library:
                 st.update(key, status=WAITING, retry_at=time.time() + CHECKING_RETRY,
                           why="its torrent is being checked in qBittorrent - looked at again "
                               f"in {CHECKING_RETRY // 60} minutes")
-            else:
+            elif not isinstance(e, Abort):
                 st.update(key, status=FAILED, why=str(e))
-            raise
-        root = torrent_mod_root(t, out_dir)
-        plan = swap_plan(t, root, s)
-        if plan and seeded_from(plan, self.in_client()):
-            st.update(key, status=SEEDING, root=root, why="seeding at 100.0% - the library's files stay as they are, "
-                      "as another torrent seeds from them")
-        elif plan:
-            st.update(key, status=SWAP, root=root, why="seeding at 100.0% - swap the library's files for the torrent's?")
-        else:
-            st.update(key, status=SEEDING, root=root, why="seeding from the library's own files")
+            raise                               # an Abort: run() decides (the next pack, or failed)
         return out
 
-    def look(self, cfg, key: str):
+    def look(self, cfg, key: str, skip=frozenset()):
         """The season's one search of the ticked trackers (one Prowlarr search for all of
         them): the pack it would use - (pick, .torrent bytes, torrent, the library's very
-        files?) or None - kept, with its .torrent saved, as the season's "offer". The tab's
+        files?) or None - kept, with its .torrent saved, as the season's "offer". Packs in
+        ``skip`` (infohashes no Usenet post supplied) are passed over. The tab's
         order decides: "your files" takes the library's own release from any ticked tracker;
         a tracker takes its own best usable pack. The first of them with one wins."""
         s = self.seasons[key]
@@ -1021,6 +1098,9 @@ class Library:
                     t = torrent_mod.parse(data)
                 except (ApiError, OSError, ValueError, torrent_mod.TorrentError) as e:
                     warn(f"could not get {p.release.title} ({p.release.indexer}): {e}")
+                    return None
+                if t.infohash in skip:
+                    info(f"{p.release.title} ({p.release.indexer}): no Usenet post supplied it before - not used")
                     return None
                 lacking = covers(t, s)
                 if lacking:
@@ -1078,8 +1158,9 @@ class Library:
     def kept_pick(self, cfg, key: str):
         """The pack the season's earlier search chose, from its saved .torrent - None if
         there is none (for the order the tab has now)."""
-        o = self.state.seasons.get(key, {}).get("offer") or {}
-        if not offer_current(o, cfg) or not o.get("infohash"):
+        it = self.state.seasons.get(key, {})
+        o = it.get("offer") or {}
+        if not offer_current(o, cfg) or not o.get("infohash") or o["infohash"] in (it.get("no_usenet") or []):
             return None
         try:
             with open(kept_torrent(cfg, o["infohash"]), "rb") as fh:
@@ -1549,6 +1630,44 @@ class CrossEyed:
     def cancel(self, batch_id: str):
         """Drop the batch's jobs that have not started (and roll back any that have)."""
         self._req("POST", "/jobs/cancel-active", timeout=120, data={"batch_id": batch_id})
+
+    def open_jobs(self) -> tuple[dict[str, dict], bool]:
+        """({infohash: job} of its file jobs not finished with, is it in dry-run?). Every
+        state but done and rolled back counts: a failed job can leave a safety copy linked to
+        the torrent's files, a move still finishing, or a torrent stopped on purpose - and a
+        retry starts again from what it recorded of the torrent."""
+        d = self._req("GET", "/api/jobs", timeout=120).json()
+        out: dict[str, dict] = {}
+        for j in (d.get("file_jobs") or []) + (d.get("rolledback_jobs") or []):
+            h = (j.get("info_hash") or "").lower()
+            if h and j.get("job_type") != "search" and j.get("state") not in ("done", "rolled_back"):
+                out.setdefault(h, j)
+        return out, bool(d.get("dry_run"))
+
+    def download_check(self, infohash: str) -> dict:
+        """Is it safe to let this torrent download what it is missing? cross-eyed works it
+        out from piece hashes: {"verdict": complete | in_job | repairable |
+        shared_breaks_others | shared_other_names | shared_same_version | not_shared |
+        unknown, "summary": ..., ...}."""
+        return self._req("GET", f"/api/torrents/{infohash.lower()}/download-check", timeout=600).json()
+
+    def repair(self, infohash: str) -> dict:
+        """Queue a repair of its damaged pieces from other copies on disk - nothing is
+        downloaded. {"ok", "job_id", "dry_run", "notice"}; ApiError with cross-eyed's reason
+        when it will not (a job already in play, a torrent it does not know yet)."""
+        import requests
+        try:
+            r = self.s.post(f"{self.url}/api/torrents/{infohash.lower()}/repair", timeout=120,
+                            allow_redirects=False)
+        except requests.RequestException as e:
+            raise ApiError(f"cross-eyed cannot be reached: {e}") from None
+        try:
+            d = r.json()
+        except ValueError:
+            d = {}
+        if r.status_code >= 400:
+            raise ApiError(d.get("error") or f"cross-eyed answered {r.status_code}")
+        return d
 
     def dry_run(self) -> bool:
         """Is cross-eyed in dry-run mode (moves queued, run only by hand)?"""

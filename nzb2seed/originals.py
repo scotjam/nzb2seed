@@ -171,3 +171,53 @@ def _tidy(path: str):
         os.rmdir(d)
     except OSError:
         pass
+
+
+def written(qb, infohash: str, where) -> list[tuple[str, str]]:
+    """[(name, path here)] of the files qBittorrent may write into when the torrent is started:
+    the short ones, and a whole one sharing a piece with them (a piece is written whole)."""
+    states = qb.piece_states(infohash)
+    out = []
+    for f in qb.files(infohash):
+        if f.get("priority", 1) == 0:
+            continue
+        first, last = (f.get("piece_range") or [0, len(states) - 1])[:2]
+        if f.get("progress", 0) >= 1 and all(x == 2 for x in states[first:last + 1]):
+            continue
+        p = where(f["name"])
+        if p and os.path.isfile(p):
+            out.append((f["name"], p))
+    return out
+
+
+def ready_to_download(cfg, qb, infohash: str, where, why: str = "") -> tuple[list[str], str]:
+    """Make torrent ``infohash``'s files safe for qBittorrent to download into, before it is
+    started: every file a missing piece touches - a short file, and a whole one sharing a
+    piece with it (a piece is written whole, and before it is checked) - gets bytes of its
+    own, its present version kept first as an original where Settings keep them. A file
+    shared with the library or another torrent would otherwise change for them too.
+    ``where(name)``: the file's path here, or None. Returns (files whose original was kept,
+    why it must not start - "" when it is safe)."""
+    from .assemble import own_copy
+    paths = written(qb, infohash, where)
+    room: dict[str, int] = {}
+    for _, p in paths:
+        if os.stat(p).st_nlink > 1:
+            room[os.path.dirname(p)] = room.get(os.path.dirname(p), 0) + os.path.getsize(p)
+    for d, need in room.items():
+        if shutil.disk_usage(d).free < need * 1.05 + 1024 ** 3:
+            return [], ("no room to give the files it would download into a copy of their own - "
+                        "they are shared with other files, which a download would change too")
+    kept = []
+    for n, p in paths:
+        try:
+            if keep_before_writes(cfg, p, n, infohash, why):
+                kept.append(n)
+        except OSError:
+            pass
+        own_copy(p)                             # nothing to do once it has its own
+    still = [n for n, p in paths if os.stat(p).st_nlink > 1]
+    if still:
+        return kept, (f"{still[0]}" + (f" (and {len(still) - 1} more)" if len(still) > 1 else "")
+                      + " is still shared with other files, which a download would change too")
+    return kept, ""

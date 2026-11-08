@@ -188,6 +188,12 @@ def sab_preflight(sab: SABnzbd, pp: int):
 
 
 MAX_PEEK = 8        # NZBs looked inside per build (each is a "grab" on most indexers)
+
+
+def small_priority(cfg: Config) -> int:
+    """SABnzbd priority for a small download a build waits on - a look inside an archive, a
+    sample, an .nfo: High, so it is not stuck in the queue behind whole posts."""
+    return max(int(cfg.sab_priority or 0), 1)
 _RAR = re.compile(r"\.(rar|r\d{2,3}|\d{3})$", re.I)
 
 
@@ -617,7 +623,7 @@ def peek_archive(cfg: Config, pr, sab: SABnzbd, rel: Release, nzb: bytes, files:
     try:
         # no post-processing: a volume on its own can never pass a repair, and "failed"
         # was making the peek throw away a download it had in hand
-        nzo = sab.add_nzb(part, name, cfg.sab_category, PP_NONE, cfg.sab_priority)
+        nzo = sab.add_nzb(part, name, cfg.sab_category, PP_NONE, small_priority(cfg))
     except ApiError as e:
         warn(f"could not look inside {rel.title}: {e}")
         return None
@@ -825,7 +831,8 @@ def delete_downloads_of(cfg: Config, sab: SABnzbd, qb, hashes: set[str]) -> dict
     """Delete the Usenet downloads nzb2seed made for these torrents - part downloads still
     in SABnzbd's queue and finished ones - as long as nothing depends on them: never a
     folder a torrent in qBittorrent uses, one a running build has claimed, or one shared
-    with a download of anything else. {"deleted", "bytes", "kept": [why, ...]}.
+    with a download of anything else. {"deleted", "bytes", "kept": [why, ...], "had": the
+    torrents with downloads on record, "by": deletions per torrent}.
     Nothing is deleted when qBittorrent cannot be asked, since then nobody can tell."""
     if qb is None:
         raise Abort("qBittorrent is not set up, so it cannot be told which downloads a torrent uses - nothing deleted")
@@ -840,8 +847,14 @@ def delete_downloads_of(cfg: Config, sab: SABnzbd, qb, hashes: set[str]) -> dict
 
     ours = {e.get("nzo"): e for e in ledger_for(cfg).all()}
     mine = {z for z, e in ours.items() if e.get("torrent") in hashes}
+    had = sorted({ours[z].get("torrent") for z in mine})
+    by: dict[str, int] = {}
+
+    def count(nzos):
+        for t in {ours[z].get("torrent") for z in nzos if z in mine}:
+            by[t] = by.get(t, 0) + 1
     if not mine:
-        return {"deleted": 0, "bytes": 0, "kept": []}
+        return {"deleted": 0, "bytes": 0, "kept": [], "had": [], "by": {}}
     slots = sab._call("history", limit="1000000").get("history", {}).get("slots", [])   # 0 means 10
     folders: dict[str, list[str]] = {}
     for slot in slots:
@@ -873,6 +886,7 @@ def delete_downloads_of(cfg: Config, sab: SABnzbd, qb, hashes: set[str]) -> dict
             for z in nzos:
                 sab.delete_history(z, files=False)
             done_nzos.update(nzos)
+            count(nzos)
             deleted += 1
             freed += size
         except (ApiError, OSError) as err:
@@ -882,10 +896,11 @@ def delete_downloads_of(cfg: Config, sab: SABnzbd, qb, hashes: set[str]) -> dict
         try:
             if sab.queue_slot(z) is not None:
                 sab.queue_do("delete", z)
+                count([z])
                 deleted += 1
         except ApiError as err:
             kept.append(f"{ours[z].get('title') or z}: {err}")
-    return {"deleted": deleted, "bytes": freed, "kept": kept}
+    return {"deleted": deleted, "bytes": freed, "kept": kept, "had": had, "by": by}
 
 
 QUIET = 3600          # a download folder is left alone until nothing has touched it for this long
@@ -1607,8 +1622,9 @@ def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
                 "grabs": r.grabs, "publish_date": r.publish_date,
                 "note": " · ".join(x for x in ((_fits(need, r) or ""), size_verdict(need, r)[0]) if x)}
                for r in results]
+    what = f"all of {need.label}" if need.level in ("episode", "season") else need.target
     prompt = (f"No automatic replacement for {need.label}. Pick the {need.group.upper() + ' ' if need.group else ''}"
-              f"NZB to download instead - it has to hold {need.target} ({gb(need.min_size)}).")
+              f"NZB to download instead - it has to hold {what} ({gb(need.min_size)}).")
     if note:
         prompt += " " + note
     idx = report_ask(prompt, choices)
@@ -1811,6 +1827,39 @@ def _rank(pr: Prowlarr, t: Torrent, unit: Unit, rels: list[Release]) -> list[Rel
     return [r for _, _, r in scored] + rest
 
 
+AUTO_OTHERS_AT = 0.9     # stopped short with this much here, other trackers are looked at by themselves
+
+
+def finisher(cfg: Config, t: Torrent, tracker: str, seeders: int | None, short: int,
+             found: list) -> str | None:
+    """Which tracker would let the ``short`` bytes of ``t`` still missing come over
+    BitTorrent by itself: one ticked always add, with seeders (or none reported), and the
+    missing part within its limit (10% of it kept free). The build's own tracker first; then
+    the same release on another tracker - the same files (within 1 MB), as Prowlarr lists
+    it, searched once into ``found`` - when enough is here for that to be looked at by
+    itself. None: nothing would finish it."""
+    from .config import AUTO_HEADROOM, tracker_key, within_limit
+    total = t.total_size or 1
+    ticked = {tracker_key(x) for x in cfg.nearly_auto_trackers or []}
+    if tracker and tracker_key(tracker) in ticked and seeders != 0             and within_limit(cfg, tracker, short / total, short, AUTO_HEADROOM):
+        return tracker
+    if 1 - short / total < AUTO_OTHERS_AT or not (ticked - {tracker_key(tracker or "")}):
+        return None
+    if not found:
+        try:
+            found.append(search(cfg, t.name)[0])
+        except (ApiError, OSError, ValueError) as e:
+            warn(f"Prowlarr could not be searched for other trackers: {e}")
+            found.append([])
+    want = matching.norm(t.name)
+    for r in found[0]:
+        if matching.norm(r.title) != want or tracker_key(r.indexer) == tracker_key(tracker or "")                 or tracker_key(r.indexer) not in ticked or not (r.seeders or 0) > 0                 or abs((r.size or 0) - t.total_size) > 1 << 20:
+            continue
+        if within_limit(cfg, r.indexer, short / total, short, AUTO_HEADROOM):
+            return r.indexer
+    return None
+
+
 def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: Torrent, title: str,
                    picks: list[Release], pp: int, placed: set[str] = frozenset()):
     """Get every file of the torrent from Usenet, trying the closest kind of NZB first.
@@ -1826,8 +1875,9 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     _this_build.holed = set()                   # downloads with missing articles, this build
 
     from . import scenefill, season as season_mod   # season imports this module
-    scenefill.reset()
+    scenefill.reset(t.infohash)
     fetcher = season_mod.FileFetcher(cfg, pr, sab, set())
+    fetcher.infohash = t.infohash
     looked: list[str] = []                      # download folders checked for this build
     # parts settled for with small files still missing, rather than another whole post -
     # offered at the end as "try whole posts" (kept per build: builds run side by side)
@@ -1876,6 +1926,26 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     pending: dict[str, tuple[Unit, Release]] = {}
     attempted: set[str] = set()                 # posts tried at any level of this build
     verdicts = verdicts_for(cfg)                 # ...and posts earlier runs found no good
+
+    unsupplied: list = []                       # parts no post supplied, gone on without
+
+    others_found: list = []                     # the same release on other trackers (searched once)
+
+    def go_on_without(u: Unit) -> bool:
+        """Unattended, and no post supplies ``u``: the build goes on without it only when the
+        rest can come over BitTorrent by itself - see finisher(). It then stops short and is
+        handed on (to its own tracker, or rebuilt from the other one). Otherwise it stops
+        here, before downloading more of a torrent nothing would finish - so that another
+        release can be tried instead (the Library tab does)."""
+        short = sum(f.length for x in unsupplied + [u] for f in still_missing(x))
+        who = finisher(cfg, t, _tracker_now(), getattr(_this_build, "seeders", None), short, others_found)
+        if not who:
+            return False
+        warn(f"no Usenet post could supply {u.need.label} - going on without it: {exact_gb(short)} missing "
+             f"in all, within {who}'s limit, to come over BitTorrent")
+        unsupplied.append(u)
+        resolve(u, None, None)
+        return True
 
     def resolve(u: Unit, d: str | None, nzo: str | None):
         u.done = True
@@ -2042,12 +2112,13 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         have = set(asm.find_sources(t, dirs + looked + [d for d, _ in partials]))
         return [f for f in u.files if f.relpath not in have and f.relpath not in placed]
 
-    def only_small_missing(u: Unit, missing: list) -> bool:
+    def only_small_missing(u: Unit, missing: list, of_torrent: bool = False) -> bool:
         """Is what ``u`` still lacks too small to be worth another whole post? Then it comes
         from trimmed NZBs, or over BitTorrent when the build is handed on nearly complete -
-        never from another download of everything else again."""
+        never from another download of everything else again. ``of_torrent``: measured
+        against the whole torrent, as the nearly-complete limit is - once every post is tried."""
         short = sum(f.length for f in missing)
-        whole = sum(f.length for f in u.files) or 1
+        whole = (t.total_size if of_torrent else sum(f.length for f in u.files)) or 1
         # your nearly-complete limit decides (a sample video is often more than a few MB);
         # fetch_small only trims NZBs for what is small enough, the rest comes over BitTorrent
         return 0 < short and short / whole * 100 < float(cfg.nearly_complete_percent or 5) \
@@ -2070,11 +2141,18 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         if not exts:
             warn(f"{u.need.label}: {names} have no file type to look for - not fetched on their own")
             return
-        step(f"Fetching {names} ({u.need.label} itself, not any one episode)")
+        step(f"Fetching {names} for {u.need.label}")
+        # what a post lacks never changes: kept across runs, so a restarted build does not ask
+        # the indexers (a grab each) and download again what it already found wanting
+        label = "small: " + ", ".join(sorted(f.name.lower() for f in extras))
         cands = [r for r in sorted(usenet_results(cfg, pr, u.need, u.seeded), key=lambda r: -(r.grabs or 0))
                  if _fits(dataclasses.replace(u.need, min_size=0), r) is None][:MAX_PEEK]
         for rel in cands:
             check_cancel()
+            known = verdicts.seen(t.infohash, label, rel)
+            if known:
+                info(f"{rel.title} ({rel.indexer}): {known} - not tried again")
+                continue
             try:
                 data = pr.fetch(rel)
                 trimmed = None
@@ -2088,11 +2166,12 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 _drop(pr, rel)
             if trimmed is None:
                 info(f"{rel.title} ({rel.indexer}) lists no {'/'.join(exts)} file")
+                verdicts.mark(t.infohash, label, rel, f"it lists no {'/'.join(exts)} file")
                 continue
             name = f"{t.name}.extras"
             try:
-                nzo = sab.add_nzb(trimmed, name, cfg.sab_category, PP_REPAIR, cfg.sab_priority)
-                ledger_for(cfg).record(nzo, name, rel.guid, rel.indexer, None, _torrent_now())
+                nzo = sab.add_nzb(trimmed, name, cfg.sab_category, PP_REPAIR, small_priority(cfg))
+                ledger_for(cfg).record(nzo, name, rel.guid, rel.indexer, None, _torrent_now(), part=True)
                 info(f"{nzo}  {', '.join(exts)} from {rel.title} ({rel.indexer})")
                 status, slot = sab_wait(sab, {nzo: name})[nzo]
                 if status not in SAB_DONE:
@@ -2112,6 +2191,14 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 nzos.append(nzo)
                 return
             warn(f"{rel.title} had no {names} that fits the torrent")
+            verdicts.mark(t.infohash, label, rel, f"its {names} did not fit the torrent")
+            if not asm.find_sources(t, [d]):
+                # nothing in it is any use: our own download, removed rather than left behind
+                partials.remove((d, name))
+                if os.path.isdir(d) and os.path.basename(d).startswith(name):
+                    shutil.rmtree(d, ignore_errors=True)
+                elif os.path.isfile(d):
+                    os.remove(d)
         warn(f"{u.need.label}: no post of this group has {names}")
 
     def split(u: Unit):
@@ -2140,7 +2227,8 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             return
         advance(u)
 
-    def settle_small(u: Unit, d: str | None, nzo: str | None, last: bool = False) -> bool:
+    def settle_small(u: Unit, d: str | None, nzo: str | None, last: bool = False,
+                     of_torrent: bool = False) -> bool:
         """Is all ``u`` lacks now within the nearly-complete limit? Then no other whole post
         is downloaded for it: what is small is fetched from trimmed NZBs, and the build goes
         on with what is here - complete, or stopping nearly complete with the rest to come
@@ -2148,7 +2236,20 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         whole posts (``opts.whole_posts``), it settles only when there are none left
         (``last``)."""
         missing = still_missing(u)
-        if not only_small_missing(u, missing):
+        if not missing:
+            # every file is here, spread over several downloads (one folder's copy of a file
+            # may not be the torrent's, another's is): nothing to settle for - it is complete
+            info(f"{u.need.label}: complete across the downloads made for it")
+            for x in [d] + looked + [p for p, _ in partials]:
+                if x and x not in dirs and os.path.isdir(x) and set(asm.find_sources(t, [x])) &                         {f.relpath for f in u.files}:
+                    dirs.append(x)
+            resolve(u, None, nzo)
+            return True
+        if not only_small_missing(u, missing, of_torrent):
+            if of_torrent:
+                info(f"{u.need.label}: {exact_gb(sum(f.length for f in missing))} still missing "
+                     f"({', '.join(f.name for f in missing[:3])}{'...' if len(missing) > 3 else ''}) - "
+                     "more than your nearly-complete limit")
             return False
         if opts.whole_posts and not last:
             return False
@@ -2182,8 +2283,12 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     return
                 if opts.whole_posts and settle_small(u, None, None, last=True):
                     return                   # every whole post tried: what is left is small
+                if settle_small(u, None, None, last=True, of_torrent=True):
+                    return                   # small beside the torrent: not worth asking you
                 rel = None if opts.unattended else ask_for_post(cfg, pr, u.need, u.tried, u.seeded)
                 if rel is None:
+                    if opts.unattended and go_on_without(u):
+                        return
                     raise Abort(f"no Usenet post could supply {u.need.label}")
             u.tried.append(rel)
             attempted.add(rel.guid)

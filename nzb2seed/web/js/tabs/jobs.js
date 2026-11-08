@@ -43,6 +43,7 @@ export function JobsTab({ active }) {
           search=${(v) => { setWords(v); setPicked(new Map()); }} />
         <p class="status jobtip">Tip: a job's Usenet downloads are kept while it is on the list. Clear from list,
           delete files removes them; Clear from list, keep files leaves them in your Usenet downloads folder.</p>
+        <${MendLog} />
         <div class="joblist" id="joblist">
           ${shown.length ? shown.map(j => html`
             <${JobRow} key=${j.id} j=${j} all=${all} on=${picked.has(j.id)} via=${picked.get(j.id)} current=${j.id === current}
@@ -52,6 +53,25 @@ export function JobsTab({ active }) {
       </div>
       ${current != null && html`<${JobView} id=${current} />`}
     </div>`;
+}
+
+/* What mend did lately - torrents it finished or started, and the ones it left alone and
+   why (a cross-eyed job, no room for a copy of their own...) - newest first */
+function MendLog() {
+  const [log, setLog] = useState([]);
+  useEffect(() => {
+    const load = () => api("/api/mend").then(d => setLog(d.log || [])).catch(() => {});
+    load();
+    return onChange("mend", load);
+  }, []);
+  if (!log.length) return null;
+  const waiting = /left alone|not started|not used|did not answer/;
+  const when = (t) => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  return html`
+    <details class="log mendlog">
+      <summary>Mend: what it finished, started or left alone (${log.length} recent)</summary>
+      <pre>${log.map(([t, text]) => html`<div class=${waiting.test(text) ? "warn" : ""}>${when(t)}  ${text}</div>`)}</pre>
+    </details>`;
 }
 
 function JobBar({ all, shown, ticked, picked, kind, counts, choose, select, untick, words, search }) {
