@@ -15,10 +15,12 @@ from __future__ import annotations
 
 import errno
 import itertools
+import hashlib
 import json
 import os
 import shutil
 import stat
+import time
 from dataclasses import dataclass, field
 
 from .torrent import PieceVerifier, TFile, Torrent
@@ -59,6 +61,9 @@ class Result:
     @property
     def complete(self) -> bool:
         return not self.missing and not self.wrong_size and not self.conflicts
+
+
+SAVE_EVERY = 5.0      # seconds between saves of the placed-files record while laying out
 
 
 class Owned:
@@ -198,12 +203,40 @@ def describe_eol(data: bytes) -> str:
 
 # ---------------------------------------------------------------- matching
 
+def _same_bytes(paths: list[str]) -> bool:
+    """Do these files (all of one size) hold the same bytes? A file that cannot be read -
+    moved away meanwhile (another build laying out), say - makes it a no."""
+    first = None
+    for p in paths:
+        h = hashlib.sha1()
+        try:
+            with open(p, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+        except OSError:
+            return False
+        if first is None:
+            first = h.digest()
+        elif h.digest() != first:
+            return False
+    return True
+
+
 def _match(torrent: Torrent, sources: list[Source], output_dir: str, res: Result):
-    """Return {relpath: Source} for binary files and [(TFile, Source|None)] for text files."""
+    """Return {relpath: Source} for binary files and [(TFile, Source|None)] for text files.
+
+    Sources are indexed by size once: matching against hundreds of download folders
+    (a season gathered over many runs) went through every file of them for each of the
+    torrent's files."""
     used: set[str] = set()
     chosen: dict[str, Source] = {}
     files = [f for f in torrent.real_files if not is_text(f)]
     texts = [f for f in torrent.real_files if is_text(f)]
+    keys = [_key(x.path) for x in sources]
+    by_size: dict[int, list[int]] = {}
+    for i, x in enumerate(sources):
+        by_size.setdefault(x.size, []).append(i)
+    by_key = {k: i for i, k in enumerate(keys)}
 
     def take(f, s, how):
         chosen[f.relpath] = s
@@ -211,19 +244,22 @@ def _match(torrent: Torrent, sources: list[Source], output_dir: str, res: Result
         res.how[f.relpath] = how
 
     def free(pred):
-        return [s for s in sources if _key(s.path) not in used and pred(s)]
+        return [x for x, k in zip(sources, keys) if k not in used and pred(x)]
+
+    def sized(size, pred=lambda x: True):
+        return [sources[i] for i in by_size.get(size, ()) if keys[i] not in used and pred(sources[i])]
 
     # pass 0: already exactly where it belongs
     for f in files:
-        tp = target_path(output_dir, f)
-        for s in free(lambda s: _key(s.path) == _key(tp) and s.size == f.length):
-            take(f, s, "already in place")
+        i = by_key.get(_key(target_path(output_dir, f)))
+        if i is not None and sources[i].size == f.length and keys[i] not in used:
+            take(f, sources[i], "already in place")
 
     # pass 1: name + size
     for f in files:
         if f.relpath in chosen:
             continue
-        c = free(lambda s: s.size == f.length and s.name.casefold() == f.name.casefold())
+        c = sized(f.length, lambda x: x.name.casefold() == f.name.casefold())
         if len(c) == 1:
             take(f, c[0], "name+size")
 
@@ -232,7 +268,7 @@ def _match(torrent: Torrent, sources: list[Source], output_dir: str, res: Result
         for f in files:
             if f.relpath in chosen:
                 continue
-            c = free(lambda s: s.size == f.length)
+            c = sized(f.length)
             if len(c) == 1:
                 take(f, c[0], "size (unique)")
                 continue
@@ -240,29 +276,43 @@ def _match(torrent: Torrent, sources: list[Source], output_dir: str, res: Result
                 continue
             piece = torrent.contained_piece(f)
             if piece is None:
+                # too small to hash-verify on its own: copies that are all the same bytes
+                # (one file downloaded more than once) leave nothing to choose between
+                named = [x for x in c if x.name.casefold() == f.name.casefold()] or c
+                if _same_bytes([x.path for x in named]):
+                    take(f, named[0], f"size, {len(named)} identical copies")
+                    continue
                 res.notes.append(f"{f.relpath}: {len(c)} same-size candidates and the file is too "
                                  "small to hash-verify on its own; left unmatched")
                 continue
-            ok = [s for s in c if pv.check_bytes_at(s.path, f, piece)]
-            if len(ok) >= 1:
-                take(f, ok[0], f"size+piece hash (1 of {len(c)} candidates)")
+            # the same name first, and the first that verifies is it: a scene release's
+            # volumes are mostly one size, so a folder full of them is thousands of candidates
+            named = [x for x in c if x.name.casefold() == f.name.casefold()]
+            hit = next((x for x in named + [x for x in c if x not in named]
+                        if pv.check_bytes_at(x.path, f, piece)), None)
+            if hit is not None:
+                take(f, hit, f"size+piece hash (1 of {len(c)} candidates)")
             else:
                 res.notes.append(f"{f.relpath}: none of {len(c)} same-size candidates hash-verify")
 
     # text files: by name first, else a same-type file that can be made to fit
     text_pairs = []
+    fits: dict[str, set[int]] = {}             # a text file's path -> the lengths it can take
     for f in texts:
-        c = free(lambda s: s.name.casefold() == f.name.casefold())
+        c = free(lambda x: x.name.casefold() == f.name.casefold())
         if not c:
-            c = [s for s in free(lambda s: s.name.lower().endswith(f.ext) and s.size < TEXT_MAX)
-                 if any(len(v) == f.length for v in eol_variants(_read(s.path)))]
+            def can_fit(x):
+                if x.path not in fits:
+                    fits[x.path] = {len(v) for v in eol_variants(_read(x.path))}
+                return f.length in fits[x.path]
+            c = [x for x in free(lambda x: x.name.lower().endswith(f.ext) and x.size < TEXT_MAX) if can_fit(x)]
             if len(c) > 1:
                 res.notes.append(f"{f.relpath}: {len(c)} differently-named {f.ext} files could fit; "
                                  f"using {c[0].name}")
-        s = c[0] if c else None
-        if s:
-            used.add(_key(s.path))
-        text_pairs.append((f, s))
+        x = c[0] if c else None
+        if x:
+            used.add(_key(x.path))
+        text_pairs.append((f, x))
     return chosen, text_pairs
 
 
@@ -543,6 +593,15 @@ def assemble(torrent: Torrent, source_dirs: list[str], output_dir: str,
     chosen, text_pairs = _match(todo, sources, output_dir, res)
     by_rel = {f.relpath: f for f in torrent.real_files}
 
+    # the record of what is placed is written as it goes, not only at the end: a restart
+    # part-way (which runs no clean-up) would otherwise leave moved files nobody knows are ours
+    saved = [time.monotonic()]
+
+    def save_now():
+        if time.monotonic() - saved[0] >= SAVE_EVERY:
+            owned.save()
+            saved[0] = time.monotonic()
+
     for rel, s in chosen.items():
         dst = target_path(output_dir, by_rel[rel])
         theirs = _under(s.path, keep)
@@ -554,6 +613,7 @@ def assemble(torrent: Torrent, source_dirs: list[str], output_dir: str,
                 _place_copy(s.path, dst, owned, progress)
             else:
                 _move(s.path, dst, owned, progress)
+            save_now()
         res.placed[rel] = dst
 
     # where each binary file is *now* (a dry run has not moved anything)

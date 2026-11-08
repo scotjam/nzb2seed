@@ -205,6 +205,7 @@ export function SettingsTab({ active }) {
         <div class="actions"><button type="button" class="btn" onClick=${clearCache}>Clear metadata cache</button>
           <small class="status">${status.cache || "Forgets cached episode lists and show lookups, so the next grab asks TVmaze, TMDB, TheTVDB and IMDb again."}</small></div>
         ${C("behaviour.retry_bad_pieces", "If pieces fail, download other posts of the same release until every piece verifies (switches hashing on)")}
+        ${C("behaviour.prefer_tracker_small", "Prefer small downloads from permitted trackers over large Usenet downloads (off: a repair tries every Usenet post first; on: when what still fails is smaller than the post and a tracker ticked always add, with seeders, allows it, it comes over BitTorrent)")}
         ${C("behaviour.peek_archives", "Look inside a RAR post before downloading all of it (fetches its first volume only)")}
       </fieldset>
       <fieldset>
@@ -265,7 +266,8 @@ const FIELDS = [
   ["paths.output_dir"], ["paths.torrent_dir"], ["flaresolverr.url"], ["network.proxy"],
   ["gui.username"], ["gui.password"],
   ["behaviour.post_processing"], ["behaviour.cleanup", "bool"], ["behaviour.local_verify", "bool"], ["behaviour.season_packing"],
-  ["behaviour.episode_source"], ["behaviour.retry_bad_pieces", "bool"], ["behaviour.peek_archives", "bool"],
+  ["behaviour.episode_source"], ["behaviour.retry_bad_pieces", "bool"], ["behaviour.prefer_tracker_small", "bool"],
+  ["behaviour.peek_archives", "bool"],
   ["demand.min_sample", "int"], ["demand.age_days", "float"],
   ["behaviour.nearly_complete_percent", "float"], ["behaviour.nearly_complete_mb", "float"], ["behaviour.nearly_auto_trackers", "names"],
   ["behaviour.nearly_limits", "raw"],

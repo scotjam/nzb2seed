@@ -56,6 +56,9 @@ class Config:
     nearly_auto_trackers: list = field(default_factory=list)  # within their limit: handed
                                           # over without asking each time
     retry_bad_pieces: bool = True     # replace files that fail the piece check with other posts
+    # ...unless the post is bigger than what still fails and a tracker ticked always add,
+    # with seeders, would download that within its limit (off: Usenet is preferred)
+    prefer_tracker_small: bool = False
     demand_rules: list = field(default_factory=list)   # priority rules, best first
     demand_block: list = field(default_factory=list)   # anything matching is not built
     demand_only_rules: bool = False   # build only what a priority rule matches
@@ -149,6 +152,7 @@ LAYOUT = [
     ("behaviour", "nearly_auto_trackers", "nearly_auto_trackers"),
     ("behaviour", "nearly_limits", "nearly_limits"),
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
+    ("behaviour", "prefer_tracker_small", "prefer_tracker_small"),
     ("behaviour", "peek_archives", "peek_archives"),
     ("demand", "rules", "demand_rules"),
     ("demand", "block", "demand_block"),

@@ -59,6 +59,9 @@ season_packing = "scene"     # season grabs: "scene" = keep / rebuild (from srrD
                              # RARs of RAR'd releases; "unpack" = leave everything unpacked
 retry_bad_pieces = true      # if pieces fail, download other posts of the release until they verify
                              # (switches local hashing on; the build screen can turn it off per build)
+prefer_tracker_small = false # true: a repair does not download a post bigger than what still fails
+                             # when a tracker ticked always add, with seeders, would download that
+                             # within its limit - the build stops nearly complete instead
 keep_originals_days = 3      # before a repair or a BitTorrent download changes a built file, its
                              # original is kept (other trackers often have that version); 0 = never
 

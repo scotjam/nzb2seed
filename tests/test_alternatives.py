@@ -710,3 +710,48 @@ def test_another_tracker_counts_only_once_enough_is_here_for_it_to_be_looked_at(
     monkeypatch.setattr(pipeline, "search", lambda cfg_, q: ([_tor("Rel-GRP", 1000, "TrackerTwo", 4)], []))
     t = SimpleNamespace(name="Rel-GRP", total_size=1000)
     assert pipeline.finisher(cfg, t, "TrackerOne", 3, 200, []) is None        # 80% here: not looked at
+
+
+def test_an_episode_on_disk_but_for_a_small_file_is_not_gone_through_again(tmp_path):
+    """An earlier run left S03E02's video on disk; only its .nfo (that no post has) is
+    missing: its post is not downloaded again, and the .nfo is not searched for again on
+    the next run either."""
+    t0, files = pack_torrent()
+    files["show.2016.s03e02.720p.hdtv.x264-grpa.nfo"] = b"n" * 200
+    t = parse(make_torrent(PACK, files))
+    video = next(f.relpath for f in t.real_files if f.name == "show.2016.s03e02.720p.hdtv.x264-grpa.mkv")
+    size2 = sum(len(v) for k, v in files.items() if "s03e02" in k)
+    e2 = rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", size2 + 100, "e2")
+    searched = []
+
+    class Counting(NZBsOK):
+        def search(self, query, *a):
+            searched.append(query)
+            return super().search(query, *a)
+    sab = PackSAB(str(tmp_path), files, failing=())
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path)]])
+    for run in (1, 2):
+        pipeline.plan_and_fetch(cfg, pipeline.Options(unattended=True), Counting([e2]), sab, t, t.name,
+                                [r for g in with_others(files, [e2]) for r in g], 2, {video})
+        assert e2.title not in sab.added                        # its post is not downloaded again
+        if run == 1:
+            first = len(searched)
+    assert not any("s03e02" in q for q in searched[first:])    # the .nfo: not searched for again
+
+
+def test_a_repair_asks_only_when_nothing_would_finish_the_failing_pieces(tmp_path, monkeypatch):
+    """Bad pieces left after the recheck: the question for another post is decided once
+    nothing else is left - not asked when the tracker would download them by itself."""
+    from types import SimpleNamespace
+    t, files = pack_torrent()
+    need = need_for(t, "Show.2016.S03E02.720p.HDTV.x264-GRPA", False)
+    asked, decided = [], []
+    monkeypatch.setattr(pipeline, "report_ask", lambda prompt, choices: asked.append(prompt))
+    from test_usenet import FakeProwlarr
+    pr = FakeProwlarr({}, [rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", need.min_size + 5, "x")])
+    cfg = Config(path=str(tmp_path / "c.toml"))
+    slot = lambda: SimpleNamespace(queue=[], searched=True, tried=[], known=[], need=need)
+    assert pipeline.next_post(cfg, pr, slot(), lambda: decided.append(1) or False) is None
+    assert decided == [1] and asked == []
+    pipeline.next_post(cfg, pr, slot(), lambda: True)
+    assert len(asked) == 1

@@ -90,6 +90,20 @@ URL, user name and password in nzb2seed's **Settings -> qBittorrent**. See the
 [container's page](https://docs.linuxserver.io/images/docker-qbittorrent/)
 and the [qBittorrent wiki](https://github.com/qbittorrent/qBittorrent/wiki).
 
+**Forward qBittorrent's listening port.** Builds that stop a few percent short
+get the rest over BitTorrent, often from a torrent with only a few seeders - an
+older release, or a pack only one or two people still seed. Two peers that
+cannot accept incoming connections cannot reach each other at all, so if your
+qBittorrent is not connectable and the remaining seeders are not either, the
+download never starts and the torrent sits short of 100% for good. Forward the
+port qBittorrent listens on (*Tools -> Options -> Connection -> Port used for
+incoming connections*; 6881 in the example above) to the server on your router,
+TCP and UDP. Behind a VPN, use one that offers port forwarding and set
+qBittorrent's port to the one the VPN gives you. qBittorrent's status bar then
+shows its connection status as connected, not firewalled, and many trackers
+show you as connectable on your profile. Being connectable also gets you more
+of the upload when you seed.
+
 **Paths:** when SABnzbd or qBittorrent run in containers they see your disks
 under other names (`/downloads`, `/data`). Tell nzb2seed in **Settings**:
 *SABnzbd path -> path on this machine* and *Path on this machine ->
@@ -226,7 +240,9 @@ unfinished torrent's files are looked for in qBittorrent's download folder
 too.
 
 When nothing here is left to try, the rest can come from the torrent's own
-tracker - only a tracker ticked **always add** (Settings, "Builds that stop a
+tracker (with few seeders it only comes if qBittorrent is connectable - see
+*Forward qBittorrent's listening port* under qBittorrent above) - only a
+tracker ticked **always add** (Settings, "Builds that stop a
 few percent short"), and only while what is missing is within the limit you
 set for it, counting what earlier starts of the torrent downloaded, with 10%
 of the limit kept free. Before it starts, every file the download could write
@@ -381,7 +397,12 @@ instead of trying other posts when pieces fail), `--start` (start seeding at
    swapped in when it makes the failing pieces pass; on a piece spanning two
    files, both neighbours are tried. On by default; *Try other posts if pieces
    fail* on the build screen, `retry_bad_pieces` in the config or `--no-retry`
-   turn it off.
+   turn it off. Usenet is preferred: a repair downloads a whole other post even
+   to fix a few MB. With *Prefer small downloads from permitted trackers over
+   large Usenet downloads* ticked in Settings (`prefer_tracker_small`), a post
+   bigger than what still fails is not downloaded when a tracker ticked
+   **always add**, with seeders, would let that much come over BitTorrent
+   within its limit - the build stops nearly complete and is handed on instead.
 10. Anything missing or the wrong size **stops the build** before qBittorrent.
 11. **qBittorrent**: added stopped, stopped again if it came up running, save
     path set, force recheck. Below 100.0% it reports per file and stays stopped.

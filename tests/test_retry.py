@@ -342,3 +342,44 @@ def scenario(tmp_path, remuxed):
     slots = []
     dirs, _ = pipeline.usenet_multi(cfg, pr, sab, t, picks, 2, slots)
     return t, str(tfile), cfg, sab, pr, slots, dirs, files
+
+
+def _prefer(cfg, monkeypatch, percent):
+    cfg.prefer_tracker_small = True
+    cfg.nearly_auto_trackers = ["TrackerOne"]
+    cfg.nearly_limits = [{"tracker": "TrackerOne", "percent": percent}]
+    monkeypatch.setattr(pipeline._this_build, "tracker", "TrackerOne", raising=False)
+    monkeypatch.setattr(pipeline._this_build, "seeders", 5, raising=False)
+
+
+def test_with_the_box_ticked_what_still_fails_comes_from_the_tracker(tmp_path, monkeypatch):
+    """Prefer small downloads from trackers: the other posts are bigger than the failing
+    pieces, and the tracker allows them - none is downloaded, the build stops nearly complete."""
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(tmp_path, {"pick2", "pick4", "alt20"})
+    _prefer(cfg, monkeypatch, 90)
+    out = str(tmp_path / "complete")
+    qb = HashingQbit(t, out)
+    with pytest.raises(pipeline.Incomplete) as e:
+        pipeline.finish(cfg, Options(unattended=True), t, tfile, dirs, out, qb, None,
+                        retry=Retry(cfg, pr, sab, 2, slots, True))
+    assert e.value.in_client is True
+    assert sab.added[4:] == []               # no other post downloaded
+    assert qb.rechecks == 2                  # and qBittorrent checked what was there
+
+
+def test_what_the_torrent_downloaded_before_counts_against_the_limit(tmp_path, monkeypatch):
+    """Earlier BitTorrent downloads of the torrent plus what still fails go over the limit:
+    Usenet it is, as without the box."""
+    t, tfile, cfg, sab, pr, slots, dirs, files = scenario(tmp_path, {"pick2", "pick4", "alt20"})
+    _prefer(cfg, monkeypatch, 90)
+    out = str(tmp_path / "complete")
+
+    class Downloaded(HashingQbit):
+        def info(self, h):
+            got = super().info(h)
+            return got and {**got, "downloaded": t.total_size}
+    qb = Downloaded(t, out)
+    result = pipeline.finish(cfg, Options(unattended=True), t, tfile, dirs, out, qb, None,
+                             retry=Retry(cfg, pr, sab, 2, slots, True))
+    assert result["progress"] == 1.0
+    assert sab.added[4:] == ["alt20", "alt21", "alt40"]

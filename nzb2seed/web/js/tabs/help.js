@@ -93,7 +93,9 @@ const IDEAS = [
    "A build that is not 100% from Usenet stays stopped in qBittorrent. It downloads the rest only when you " +
    "choose to, or if, within nzb2seed's settings, its tracker is manually set to download nearly complete " +
    "builds for that tracker (Settings: builds that stop a few percent short) - and only after " +
-   "qBittorrent's own check agrees how much is missing."],
+   "qBittorrent's own check agrees how much is missing. With only a few seeders, that rest only comes if " +
+   "qBittorrent is connectable: forward its listening port (Tools, Options, Connection) on your router, or " +
+   "use a VPN with port forwarding - two peers that cannot take incoming connections never reach each other."],
   ["Closest match first",
    "nzb2seed looks for posts by the same release group, at the same resolution, at least as large as the " +
    "torrent's files: a whole pack first, then seasons, then episodes. Only sources with the same release " +

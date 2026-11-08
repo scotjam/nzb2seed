@@ -371,7 +371,7 @@ def supplies(t: Torrent, d: str, target: str | None, unpack: bool = True) -> boo
     ok = not res.missing if target is None else any(os.path.basename(rel) == target for rel in res.placed)
     if ok or not unpack:
         return ok
-    if unpack_from_archives(d, wanted):
+    if unpack_from_archives(d, wanted, names=torrent_names(t)):
         return supplies(t, d, target, unpack=False)
     return False
 
@@ -408,12 +408,40 @@ def _drop(pr, rel: Release):
         pr.drop(rel)
 
 
-def unpack_from_archives(d: str, wanted: list, dest: str | None = None) -> bool:
+def torrent_names(t: Torrent) -> frozenset[str]:
+    """The torrent's file names, casefolded - see _members()."""
+    return frozenset(f.name.casefold() for f in t.real_files)
+
+
+def _members(entries: list, wanted: list, names: frozenset[str] = frozenset()) -> dict:
+    """{archive entry: torrent file} for the files of ``wanted`` an archive holds. A file is
+    recognised by its exact size (and, for small files, its name too - posters often
+    obfuscate the names of big ones). A RAR volume named after another of the torrent's
+    files (``names``) is that file, whatever its size: scene RAR volumes are all one size,
+    and one episode's .r00 is not the next one's. Other files still match by size."""
+    members = {}
+    for f in wanted:
+        for path, size in entries:
+            base = os.path.basename(path.replace("\\", "/")).casefold()
+            same_name = base == f.name.casefold()
+            other_volume = base in names and bool(_RAR.search(base))
+            if (size == f.length and path not in members
+                    and (same_name or (f.length >= 1 << 20 and not other_volume))):
+                members[path] = f
+                break
+    return members
+
+
+_unpacked: set[tuple] = set()
+
+
+def unpack_from_archives(d: str, wanted: list, dest: str | None = None,
+                         names: frozenset[str] = frozenset()) -> bool:
     """Extract the torrent files in ``wanted`` from archive sets (RAR, 7z, zip, numbered) in
-    download folder ``d`` (into
-    ``d``'s unpack folder, or ``dest``).
-    A file is recognised by its exact size (and, for small files, its name too - posters
-    often obfuscate the names of big ones). Returns True when anything was unpacked."""
+    download folder ``d`` (into ``d``'s unpack folder, or ``dest``) - see _members() for how
+    they are recognised; ``names`` are the torrent's file names (torrent_names()).
+    The same files are unpacked from an archive once: if they did not do then, they will
+    not the next time either. Returns True when anything was unpacked."""
     sets = archives.archive_sets(d)
     if not sets or not wanted:
         return False
@@ -426,13 +454,12 @@ def unpack_from_archives(d: str, wanted: list, dest: str | None = None) -> bool:
             if not re.search(r"\.\d{3}$", name):      # numbered pieces may be a plain split file
                 warn(f"cannot look inside {name}: {e}")
             continue
-        members = []
-        for f in wanted:
-            for path, size in entries:
-                same_name = os.path.basename(path.replace("\\", "/")).casefold() == f.name.casefold()
-                if size == f.length and (same_name or f.length >= 1 << 20) and path not in members:
-                    members.append(path)
-                    break
+        members = list(_members(entries, wanted, names))
+        out = dest or os.path.join(d, archives.UNPACK_DIR)
+        st = os.stat(first)
+        key = (os.path.abspath(first), st.st_mtime, st.st_size, os.path.abspath(out), tuple(sorted(members)))
+        if members and key in _unpacked:
+            continue
         if not members:
             if fresh:
                 # say what was wanted and what is actually in there: a size that is close
@@ -447,14 +474,15 @@ def unpack_from_archives(d: str, wanted: list, dest: str | None = None) -> bool:
         info(f"{name} holds {len(members)} needed file(s): " + ", ".join(os.path.basename(m) for m in members[:3])
              + " - unpacking into the download folder")
         try:
-            archives.extract(first, members, dest or os.path.join(d, archives.UNPACK_DIR))
+            archives.extract(first, members, out)
             extracted = True
+            _unpacked.add(key)
         except (RuntimeError, OSError, subprocess.SubprocessError) as e:
             warn(f"unpacking {name} failed: {e}")
     return extracted
 
 
-def salvage_archives(d: str, wanted: list) -> bool:
+def salvage_archives(d: str, wanted: list, names: frozenset[str] = frozenset()) -> bool:
     """Unpack what a broken archive set in ``d`` still gives of the torrent files in
     ``wanted`` (into ``d``'s unpack folder). A file cut short is padded with zeros to its
     size: the zeros are read as a gap, the rest is checked piece by piece."""
@@ -465,13 +493,7 @@ def salvage_archives(d: str, wanted: list) -> bool:
             entries, _ = _contents(first)
         except (RuntimeError, OSError, subprocess.SubprocessError):
             continue
-        members = {}
-        for f in wanted:
-            for path, size in entries:
-                same_name = os.path.basename(path.replace("\\", "/")).casefold() == f.name.casefold()
-                if size == f.length and (same_name or f.length >= 1 << 20) and path not in members:
-                    members[path] = f
-                    break
+        members = _members(entries, wanted, names)
         if not members:
             continue
         info(f"{os.path.basename(first)}: unpacking {len(members)} file(s) from the damaged set, keeping "
@@ -1726,7 +1748,7 @@ class Unit:
         if found == want:
             return True
         missing = [f for f in self.files if f.relpath not in found]
-        if unpack_from_archives(d, missing):
+        if unpack_from_archives(d, missing, names=torrent_names(t)):
             found = set(asm.find_sources(t, [d])) & want
             if found == want:
                 return True
@@ -1890,7 +1912,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         holding = _this_build.abort_holds = set()
 
     def fill(d: str, missing: list) -> bool:
-        return packed_release(t) and scenefill.fill(t, d, missing, fetcher)
+        # a file an earlier run left on disk (``placed``) is not rebuilt or fetched again for
+        # this folder: a sample was being downloaded anew on every run
+        missing = [f for f in missing if f.relpath not in placed]
+        return bool(missing) and packed_release(t) and scenefill.fill(t, d, missing, fetcher)
 
     def packed_inner(u: "Unit") -> tuple[int, ...]:
         """For a RAR'd release: the sizes of what the scene RARs of ``u``'s files hold, from
@@ -1986,7 +2011,7 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         have = set(asm.find_sources(t, [d]))
         lacking = [f for f in want if f.relpath not in have]
         if lacking and archives.archive_sets(d):
-            salvage_archives(d, lacking)
+            salvage_archives(d, lacking, torrent_names(t))
             have = set(asm.find_sources(t, [d]))
         got = [f for f in want if f.relpath in have]
         if not got:
@@ -2141,10 +2166,14 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         if not exts:
             warn(f"{u.need.label}: {names} have no file type to look for - not fetched on their own")
             return
-        step(f"Fetching {names} for {u.need.label}")
         # what a post lacks never changes: kept across runs, so a restarted build does not ask
         # the indexers (a grab each) and download again what it already found wanting
         label = "small: " + ", ".join(sorted(f.name.lower() for f in extras))
+        nobody = Release(label, "usenet", "", 0, 0, "none:" + label, "", "", "", 0, None, None)
+        if verdicts.seen(t.infohash, label, nobody):
+            info(f"{u.need.label}: no post of this group had {names} on an earlier run - not looked for again")
+            return
+        step(f"Fetching {names} for {u.need.label}")
         cands = [r for r in sorted(usenet_results(cfg, pr, u.need, u.seeded), key=lambda r: -(r.grabs or 0))
                  if _fits(dataclasses.replace(u.need, min_size=0), r) is None][:MAX_PEEK]
         for rel in cands:
@@ -2200,13 +2229,15 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 elif os.path.isfile(d):
                     os.remove(d)
         warn(f"{u.need.label}: no post of this group has {names}")
+        verdicts.mark(t.infohash, label, nobody, "no post of this group has it")
 
     def split(u: Unit):
         kinds = {c.level for c in u.children}
         info(f"{u.need.label}: going to {'season' if 'season' in kinds else 'episode'} NZBs")
         fetch_extras(u)
         for c in u.children:
-            d = next((d for d, _ in partials if satisfied(c, d)), None)
+            in_place = {f.relpath for f in c.files} <= placed
+            d = None if in_place else next((d for d, _ in partials if satisfied(c, d)), None)
             if d:
                 info(f"{c.need.label}: already in an earlier download ({os.path.basename(d)})")
                 resolve(c, d, None)
@@ -2222,6 +2253,16 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             u.tried = used_before(cfg, u.need)
             resolve(u, None, None)
             return
+        rest = [f for f in u.files if f.relpath not in placed]
+        if mine & placed and not opts.whole_posts and only_small_missing(u, rest):
+            # an earlier run got all but something small (a proof picture): its posts are not
+            # gone through again - only that is looked for, and what Usenet lacks comes over
+            # BitTorrent
+            info(f"{u.need.label}: on disk from an earlier run but for "
+                 f"{', '.join(f.name for f in rest[:3])}{'...' if len(rest) > 3 else ''}")
+            u.tried = used_before(cfg, u.need)
+            if settle_small(u, None, None, last=True):
+                return
         if u.children and not u.seeded and (mine & placed or seeded_below(u) or u.mixed):
             split(u)
             return
@@ -2535,9 +2576,10 @@ def usenet_multi(cfg: Config, pr: Prowlarr, sab: SABnzbd, t: Torrent, groups: li
     return dirs, nzos
 
 
-def next_post(cfg: Config, pr: Prowlarr, slot, ask: bool = True, note: str = "") -> Release | None:
+def next_post(cfg: Config, pr: Prowlarr, slot, ask=True, note: str = "") -> Release | None:
     """The next post to try for a unit when repairing: queued ones, then other posts of the
-    same release group (searched once), then whatever the person picks."""
+    same release group (searched once), then whatever the person picks. ``ask``: a bool, or
+    a function deciding then - once nothing else is left - whether to ask."""
     while True:
         while slot.queue:
             r = slot.queue.pop(0)
@@ -2548,6 +2590,8 @@ def next_post(cfg: Config, pr: Prowlarr, slot, ask: bool = True, note: str = "")
             slot.queue = find_alternatives(cfg, pr, slot.need, slot.tried, slot.known)
             if slot.queue:
                 continue
+        if callable(ask):
+            ask = ask()
         return ask_for_post(cfg, pr, slot.need, slot.tried, slot.known, note) if ask else None
 
 
@@ -2653,6 +2697,12 @@ class Retry:
     pp: int
     slots: list
     unattended: bool = False
+    handed: str = ""                      # the tracker a repair left the rest to (prefer_tracker_small)
+    downloaded: int = 0                   # what qBittorrent already downloaded of the torrent over BitTorrent
+
+
+class _HandOn(Exception):
+    """A repair stops: the rest comes over BitTorrent instead (prefer_tracker_small)."""
 
 
 def inner_pieces(t: Torrent, f) -> range:
@@ -2678,6 +2728,16 @@ def copy_verifies(t: Torrent, f, path: str, placed: dict) -> bool:
 
 
 def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dirs: list[str]) -> bool:
+    """See _repair_bad_pieces. False also when the repair stopped to let the rest come over
+    BitTorrent (``rt.handed`` then names the tracker)."""
+    rt.handed = ""
+    try:
+        return _repair_bad_pieces(rt, t, res, bad, owned, job_dirs)
+    except _HandOn:
+        return False
+
+
+def _repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dirs: list[str]) -> bool:
     """Replace the files that failing pieces point to with copies from other posts of the
     same release until every piece verifies. Only files nzb2seed placed are replaced; a
     copy is only swapped in when it makes the failing piece(s) pass. True = all fixed."""
@@ -2830,6 +2890,7 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                 sl.tried.append(rel)
                 if failed_before(rt.cfg, rt.sab, rel):
                     continue
+                tracker_instead(rel)
                 step(f"{len(mine)} file(s) have failing pieces - trying another post of {sl.need.label}: "
                      f"{rel.title} ({rel.indexer})")
                 d = download(rel, lambda d: True)
@@ -2849,15 +2910,54 @@ def repair_bad_pieces(rt: Retry, t: Torrent, res, bad: list[int], owned, job_dir
                 return True
         return False
 
+    others_found: list = []                    # the release on other trackers (searched once)
+
+    def worth_asking() -> bool:
+        """Ask you for a post only when nothing would finish the failing pieces by itself: a
+        tracker ticked always add, with seeders, would download them within its limit (see
+        finisher) - the build then stops nearly complete and is handed on instead."""
+        if rt.unattended:
+            return False
+        short = len(pending) * t.piece_length
+        who = finisher(rt.cfg, t, getattr(_this_build, "tracker", ""), getattr(_this_build, "seeders", None),
+                       short, others_found)
+        if who:
+            info(f"about {exact_gb(short)} still fails - within {who}'s limit, so it comes over BitTorrent "
+                 "rather than asking you for another post")
+        return not who
+
+    def tracker_instead(rel: Release):
+        """With prefer_tracker_small: a post bigger than what still fails is not downloaded
+        when a tracker ticked always add, with seeders, would let that come over BitTorrent
+        within its limit (see finisher) - counting what the torrent already downloaded over
+        BitTorrent too. The repair stops there and the build is handed on. Off, Usenet is
+        preferred: the tracker only gets what no post supplies."""
+        if not rt.cfg.prefer_tracker_small:
+            return
+        short = len(pending) * t.piece_length
+        if not rel.size or rel.size <= short:
+            return
+        total = short + max(rt.downloaded, 0)
+        who = finisher(rt.cfg, t, getattr(_this_build, "tracker", ""), getattr(_this_build, "seeders", None),
+                       total, others_found)
+        if who:
+            before = f" (with the {exact_gb(rt.downloaded)} downloaded before)" if rt.downloaded else ""
+            info(f"not downloading {rel.title} ({gb(rel.size)}): about {exact_gb(short)} still fails, "
+                 f"{exact_gb(total)} in all{before}, within {who}'s limit - it comes over BitTorrent "
+                 "instead (prefer small downloads from trackers)")
+            rt.handed = who
+            raise _HandOn
+
     def fetch_copy(f) -> tuple[str, Release] | None:
         slot = file_slot[f.relpath]
         while True:
-            rel = next_post(rt.cfg, rt.pr, slot, not rt.unattended, stop_note())
+            rel = next_post(rt.cfg, rt.pr, slot, worth_asking, stop_note())
             if rel is None:
                 return None
             slot.tried.append(rel)
             if failed_before(rt.cfg, rt.sab, rel):
                 continue
+            tracker_instead(rel)
             step(f"Trying another copy of {f.name}: {rel.title} ({rel.indexer})")
             d = download(rel, lambda d: supplies(t, d, f.name))
             if d is None:
@@ -3224,10 +3324,16 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
                 raise Abort(f"{len(bad)} of {len(t.pieces)} pieces fail locally; not adding the torrent "
                             "(turn on 'try other posts' to replace the files automatically)")
             step(f"Replacing files behind {len(bad)} failing piece(s) with other posts")
-            if not repair_bad_pieces(retry, t, res, bad, owned, source_dirs):
+            retry.downloaded = int((existing or {}).get("downloaded") or 0)
+            if repair_bad_pieces(retry, t, res, bad, owned, source_dirs):
+                pieces("#" * len(t.pieces))
+                info("100% of pieces verified locally")
+            elif not retry.handed:
                 raise Abort(f"pieces still fail after trying the other posts; not adding the torrent")
-            pieces("#" * len(t.pieces))
-        info("100% of pieces verified locally")
+            # handed on: qBittorrent's recheck reports what is short, and the build stops
+            # nearly complete
+        else:
+            info("100% of pieces verified locally")
 
     if cfg.cleanup and not opts.no_cleanup:
         step("Removing files that are not part of the torrent")
@@ -3291,7 +3397,7 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     tinfo = qb.wait_idle(t.infohash, on_tick=tick, min_wait=5)
     end_progress()
     piece_map(final=True)
-    if tinfo.get("progress", 0) < 1 and retry_on:
+    if tinfo.get("progress", 0) < 1 and retry_on and not retry.handed:
         tinfo = _repair_after_recheck(qb, t, res, owned, retry, source_dirs, tick)
         piece_map(final=True)
     pct = tinfo.get("progress", 0) * 100
@@ -3333,11 +3439,16 @@ def _repair_after_recheck(qb, t: Torrent, res, owned, retry: "Retry", source_dir
     bad = [i for i, st in enumerate(states) if st != 2]
     for f in asm.files_for_pieces(t, bad):
         warn(f"bad pieces in {f.relpath}")
+    retry.downloaded = int((qb.info(t.infohash) or {}).get("downloaded") or 0)
     step(f"Replacing files behind {len(bad)} failing piece(s) with other posts")
     if not repair_bad_pieces(retry, t, res, bad, owned, source_dirs):
-        warn("pieces still fail after trying the other posts")
-        return qb.info(t.infohash) or {}
-    step("Checking again in qBittorrent")
+        if not retry.handed:
+            warn("pieces still fail after trying the other posts")
+            return qb.info(t.infohash) or {}
+        # files swapped in before stopping: qBittorrent counts them before the hand-on
+        step(f"Checking again in qBittorrent - the rest is left to {retry.handed}")
+    else:
+        step("Checking again in qBittorrent")
     qb.recheck(t.infohash)
     info_ = qb.wait_idle(t.infohash, on_tick=tick, min_wait=5)
     end_progress()
@@ -3535,7 +3646,7 @@ def execute_assemble(cfg: Config, opts: Options, torrent_file: str, sources: lis
             left = asm.assemble(t, dirs + [work], PROBE_DIR, dry_run=True, log=lambda *_: None).missing
             if not left:
                 break
-            unpack_from_archives(d, left, dest=work)
+            unpack_from_archives(d, left, dest=work, names=torrent_names(t))
     avail = dirs + ([work] if work else [])
     # what the folders do not have at all: from Usenet, like a build - only those files
     fetched, retry, pr = [], None, None
