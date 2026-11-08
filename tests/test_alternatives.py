@@ -755,3 +755,46 @@ def test_a_repair_asks_only_when_nothing_would_finish_the_failing_pieces(tmp_pat
     assert decided == [1] and asked == []
     pipeline.next_post(cfg, pr, slot(), lambda: True)
     assert len(asked) == 1
+
+
+def test_by_hand_a_missing_episode_the_tracker_would_finish_goes_on_when_no_post_is_left(tmp_path, monkeypatch):
+    """Started by hand, nothing left to pick for S03E02, and the tracker would finish it:
+    the build goes on without it, as an unattended one does - no empty question."""
+    cfg, sab, t, picked = _no_e02(tmp_path, monkeypatch, percent=40)
+    asked = []
+    monkeypatch.setattr(pipeline, "report_ask", lambda p, c: asked.append(p))
+    dirs = pipeline.plan_and_fetch(cfg, pipeline.Options(), NZBsOK(), sab, t, t.name,
+                                   [r for g in picked for r in g], 2)[0]
+    assert asked == [] and len(dirs) == 3
+
+
+def test_going_on_without_it_is_offered_beside_the_posts(tmp_path, monkeypatch):
+    t, files = pack_torrent()
+    need = need_for(t, "Show.2016.S03E02.720p.HDTV.x264-GRPA", False)
+    seen = []
+
+    def pick_go_on(prompt, choices):
+        seen.append((prompt, choices))
+        return next(i for i, c in enumerate(choices) if c.get("go_on"))
+    monkeypatch.setattr(pipeline, "report_ask", pick_go_on)
+    from test_usenet import FakeProwlarr
+    got = pipeline.ask_for_post(Config(path=str(tmp_path / "c.toml")),
+                                FakeProwlarr({}, [rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", need.min_size + 5, "x")]),
+                                need, [], go_on="about 1 MB missing in all, within TrackerOne's limit")
+    assert got is pipeline.GO_ON
+    prompt, choices = seen[0]
+    assert "Or go on without it: about 1 MB" in prompt
+    assert [c.get("go_on", False) for c in choices] == [False, True]
+
+
+def test_a_post_clearly_smaller_than_what_it_must_hold_is_not_offered(tmp_path, monkeypatch):
+    """6% smaller is not an indexer rounding its size: it cannot hold all of the episode."""
+    t, files = pack_torrent()
+    need = need_for(t, "Show.2016.S03E02.720p.HDTV.x264-GRPA", False)
+    asked = []
+    monkeypatch.setattr(pipeline, "report_ask", lambda p, c: asked.append(c))
+    from test_usenet import FakeProwlarr
+    got = pipeline.ask_for_post(Config(path=str(tmp_path / "c.toml")),
+                                FakeProwlarr({}, [rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", int(need.min_size * 0.94), "x")]),
+                                need, [])
+    assert got is None and asked == []

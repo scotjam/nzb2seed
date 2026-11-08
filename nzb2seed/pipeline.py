@@ -1593,6 +1593,9 @@ def find_alternatives(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release
 FAR_LARGER = 2.5
 
 
+ROUNDED = 0.98      # an indexer's size this much of what a post must hold may just be rounded down
+
+
 def size_verdict(need: Need, r: Release) -> tuple[str, bool]:
     """How a post's size compares with what it has to hold: (what to say, can it hold it).
     Smaller cannot hold it; far larger is a different encode - unless the post is a bigger
@@ -1601,7 +1604,7 @@ def size_verdict(need: Need, r: Release) -> tuple[str, bool]:
         return "", True
     ratio = r.size / need.min_size
     what = f"the {gb(need.min_size)} " + ("file" if need.level == "episode" or need.ep else "torrent")
-    if r.size < need.min_size * 0.9:
+    if r.size < need.min_size * ROUNDED:
         return f"smaller than {what} - cannot hold it", False
     if r.size < need.min_size:          # an indexer's size can be rounded down a little
         return f"slightly smaller than {what} - only if the indexer rounded its size", True
@@ -1613,13 +1616,18 @@ def size_verdict(need: Need, r: Release) -> tuple[str, bool]:
     return f"{ratio:.2f}× {what}", True
 
 
+GO_ON = Release("go on without it", "usenet", "", 0, 0, "go-on:", "", "", "", 0, None, None)
+
+
 def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
-                 known: list[Release] = (), note: str = "") -> Release | None:
+                 known: list[Release] = (), note: str = "", go_on: str = "") -> Release | None:
     """Nothing fits automatically: show the search results and let the person pick - but
     not one whose name shows another release group or another resolution than the
     torrent's file: those can never match it byte for byte. A name that shows no group or
     no resolution (an obfuscated post) is offered, since it may be the one. Nothing left:
-    stop."""
+    stop. ``go_on``: going on without it is possible (the rest comes over BitTorrent) -
+    offered as a choice too, and taken by itself when there is no post to offer; GO_ON
+    is returned then."""
     tried_guids = {r.guid for r in tried}
 
     def could_be(r: Release) -> bool:
@@ -1636,7 +1644,7 @@ def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
         else:
             warn(f"no other {need.group.upper() + ' ' if need.group else ''}{need.res + ' ' if need.res else ''}"
                  f"posts of {need.label} to choose from")
-        return None
+        return GO_ON if go_on else None
     if len(possible) > len(results):
         info(f"left out {len(possible) - len(results)} post(s) of {need.label} that cannot hold it by size")
     results.sort(key=lambda r: (abs(r.size / (need.min_size or 1) - 1.1), -(r.grabs or 0)))
@@ -1649,9 +1657,16 @@ def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
               f"NZB to download instead - it has to hold {what} ({gb(need.min_size)}).")
     if note:
         prompt += " " + note
+    if go_on:
+        prompt += f" Or go on without it: {go_on}."
+        choices.append({"title": f"Go on without {need.label}", "indexer": "", "size": 0, "size_text": "",
+                        "grabs": None, "publish_date": None, "note": go_on, "go_on": True})
     idx = report_ask(prompt, choices)
     if idx is None:
         return None
+    if idx >= len(results):
+        info(f"you chose to go on without {need.label}")
+        return GO_ON
     info(f"you picked: {results[idx].title} ({results[idx].indexer})")
     return results[idx]
 
@@ -1956,14 +1971,27 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
 
     others_found: list = []                     # the same release on other trackers (searched once)
 
+    def finishes(u: Unit) -> tuple[str | None, int]:
+        """(the tracker that would download what ``u`` and the parts gone on without lack,
+        that many bytes) - see finisher(); None: nothing would."""
+        short = sum(f.length for x in unsupplied + [u] for f in still_missing(x))
+        return finisher(cfg, t, _tracker_now(), getattr(_this_build, "seeders", None), short, others_found), short
+
+    def go_on_text(u: Unit) -> str:
+        """Going on without ``u``, as offered to you - empty when nothing would finish it."""
+        who, short = finishes(u)
+        if not who:
+            return ""
+        return (f"about {exact_gb(short)} ({short / (t.total_size or 1) * 100:.1f}%) missing in all, within "
+                f"{who}'s limit - the build stops nearly complete and that comes over BitTorrent")
+
     def go_on_without(u: Unit) -> bool:
         """Unattended, and no post supplies ``u``: the build goes on without it only when the
         rest can come over BitTorrent by itself - see finisher(). It then stops short and is
         handed on (to its own tracker, or rebuilt from the other one). Otherwise it stops
         here, before downloading more of a torrent nothing would finish - so that another
         release can be tried instead (the Library tab does)."""
-        short = sum(f.length for x in unsupplied + [u] for f in still_missing(x))
-        who = finisher(cfg, t, _tracker_now(), getattr(_this_build, "seeders", None), short, others_found)
+        who, short = finishes(u)
         if not who:
             return False
         warn(f"no Usenet post could supply {u.need.label} - going on without it: {exact_gb(short)} missing "
@@ -2326,9 +2354,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     return                   # every whole post tried: what is left is small
                 if settle_small(u, None, None, last=True, of_torrent=True):
                     return                   # small beside the torrent: not worth asking you
-                rel = None if opts.unattended else ask_for_post(cfg, pr, u.need, u.tried, u.seeded)
-                if rel is None:
-                    if opts.unattended and go_on_without(u):
+                go = "" if opts.unattended else go_on_text(u)
+                rel = None if opts.unattended else ask_for_post(cfg, pr, u.need, u.tried, u.seeded, go_on=go)
+                if rel is None or rel is GO_ON:
+                    if (opts.unattended or rel is GO_ON) and go_on_without(u):
                         return
                     raise Abort(f"no Usenet post could supply {u.need.label}")
             u.tried.append(rel)
