@@ -4,6 +4,7 @@ import { html, useEffect, useState } from "../lib.js";
 import { api } from "../api.js";
 import { loadSettings, settings as store, toast, useStore } from "../store.js";
 import { gb } from "../util.js";
+import { LimitNote, LimitPick, limitWarning } from "../components/limitpick.js";
 
 const get = (obj, path) => path.split(".").reduce((o, k) => (o || {})[k], obj);
 function put(obj, path, v) { const ks = path.split("."); const last = ks.pop(); ks.reduce((o, k) => (o[k] ??= {}), obj)[last] = v; }
@@ -74,6 +75,8 @@ export function SettingsTab({ active }) {
     e.preventDefault();
     if (FIELDS.filter(([, t]) => t === "ints").some(([k]) => show(form[k]).split(/[,\s]+/).filter(Boolean).some(x => isNaN(Number(x)))))
       return toast("Indexer ids and categories are numbers, separated by commas.");
+    const odd = (form["behaviour.nearly_limits"] || []).find(r => limitWarning(r.percent, r.mb));
+    if (odd) return toast(`${odd.tracker}: ${limitWarning(odd.percent, odd.mb)}`);
     try { await api("/api/settings", { settings: readSettings() }); say("save", "Saved."); fill(await loadSettings()); }
     catch (err) { say("save", "Not saved: " + err.message); }
   }
@@ -306,14 +309,14 @@ function cleanName(v) {
 
 export function limitsToCsv(limits) {
   const names = [];
-  for (const n of limits.filter(r => r.percent || r.mb).map(r => r.tracker)) {
+  for (const n of limits.filter(r => (r.percent != null && r.percent !== "") || (r.mb != null && r.mb !== "")).map(r => r.tracker)) {
     if (n && !names.some(m => trackerKey(m) === trackerKey(n))) names.push(n);
   }
   names.sort((a, b) => a.localeCompare(b));
   const lines = [CSV_HEAD.join(",")];
   for (const n of names) {
     const r = limits.find(x => trackerKey(x.tracker) === trackerKey(n)) || {};
-    lines.push([n, r.percent || "", r.mb || ""].map(csvCell).join(","));
+    lines.push([n, r.percent ?? "", r.mb ?? ""].map(csvCell).join(","));
   }
   return lines.join("\r\n") + "\r\n";
 }
@@ -352,6 +355,8 @@ export function limitsFromCsv(text, limits, localNames = []) {
   if (col("tracker") < 0) throw new Error('no "tracker" column - expected: ' + CSV_HEAD.join(","));
   const num = (v, top) => {
     const t = String(v ?? "").trim().replace(/%$/, "");
+    if (t === "") return null;                  // blank: not specified (0: none allowed)
+    if (t.toLowerCase() === "full") return "full";
     if (t.length > 20) return -1;
     const n = Number(t);
     return !Number.isFinite(n) || n < 0 || n > top ? -1 : n;
@@ -362,14 +367,14 @@ export function limitsFromCsv(text, limits, localNames = []) {
     if (!raw) { skipped++; continue; }
     const name = localNames.find(n => trackerKey(n) === trackerKey(raw))
       || limits.find(x => trackerKey(x.tracker) === trackerKey(raw))?.tracker || raw;
-    const pct = col("percent") >= 0 ? num(r[col("percent")], 100) : 0;
-    const mb = col("mb") >= 0 ? num(r[col("mb")], MB_MAX) : 0;
-    if (pct < 0 || mb < 0) { skipped++; continue; }
+    const pct = col("percent") >= 0 ? num(r[col("percent")], 100) : null;
+    const mb = col("mb") >= 0 ? num(r[col("mb")], MB_MAX) : null;
+    if ((pct != null && pct !== "full" && pct < 0) || (mb != null && mb !== "full" && mb < 0)) { skipped++; continue; }
     if (!nextLimits.some(x => trackerKey(x.tracker) === trackerKey(name)) && nextLimits.length >= CSV_MAX_ROWS) {
       skipped++; continue;
     }
     nextLimits = nextLimits.filter(x => trackerKey(x.tracker) !== trackerKey(name));
-    if (pct || mb) nextLimits.push({ tracker: name, ...(pct ? { percent: pct } : {}), ...(mb ? { mb } : {}) });
+    if (pct != null || mb != null) nextLimits.push({ tracker: name, ...(pct != null ? { percent: pct } : {}), ...(mb != null ? { mb } : {}) });
     count++;
   }
   return { limits: nextLimits, count, skipped };
@@ -390,15 +395,15 @@ function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
   const extra = [...limits.map(r => r.tracker), ...chosen].filter(n => n && !listed.has(trackerKey(n)));
   const names = [...(known || []), ...extra.filter((n, i) => extra.findIndex(m => trackerKey(m) === trackerKey(n)) === i)];
   const row = (n) => limits.find(r => trackerKey(r.tracker) === trackerKey(n)) || {};
+  const has = (n) => limits.some(r => trackerKey(r.tracker) === trackerKey(n));
   const setRow = (n, k, v) => {
     const rest = limits.filter(r => trackerKey(r.tracker) !== trackerKey(n));
-    const next = { ...row(n), tracker: row(n).tracker || n, [k]: v === "" ? 0 : Number(v) };
-    setLimits(next.percent || next.mb ? [...rest, next] : rest);
+    const next = { ...row(n), tracker: row(n).tracker || n, [k]: v };
+    setLimits([...rest, next]);          // a row with neither specified is dropped when saved
   };
   const flip = (name, yes) => setChosen(yes ? [...chosen, name] : chosen.filter(n => trackerKey(n) !== trackerKey(name)));
-  const show = (v) => (v ? String(v) : "");
   const exportCsv = () => {
-    if (!limits.some(r => r.percent || r.mb)) { toast("Nothing to export yet - no tracker has a limit set"); return; }
+    if (!limits.some(r => (r.percent != null && r.percent !== "") || (r.mb != null && r.mb !== ""))) { toast("Nothing to export yet - no tracker has a limit set"); return; }
     downloadText("nzb2seed-tracker-limits.csv", limitsToCsv(limits));
   };
   const importCsv = async (e) => {
@@ -420,14 +425,15 @@ function Trackers({ prowlarr, limits, setLimits, chosen, setChosen }) {
       <table class="limits"><thead><tr><th>tracker</th><th>%</th><th>MB</th><th title="Builds from it within its limit go to qBittorrent without asking - and stopped torrents from it that nothing on disk can finish download the rest, within its limit">always add</th></tr></thead>
         <tbody>${names.map(n => html`<tr>
           <td>${n}</td>
-          <td><input type="number" min="0" max="100" step="0.1" placeholder="-" aria-label=${`Percent ${n} allows`}
-            value=${show(row(n).percent)} onInput=${(e) => setRow(n, "percent", e.target.value)} /></td>
-          <td><input type="number" min="0" step="1" placeholder="-" aria-label=${`Megabytes ${n} allows`}
-            value=${show(row(n).mb)} onInput=${(e) => setRow(n, "mb", e.target.value)} /></td>
+          <td><${LimitPick} value=${row(n).percent} isPct=${true} where=${n}
+            onChange=${(v) => setRow(n, "percent", v)} /></td>
+          <td><${LimitPick} value=${row(n).mb} isPct=${false} where=${n}
+            onChange=${(v) => setRow(n, "mb", v)} /></td>
           <td><input type="checkbox" aria-label=${`Always add for ${n}`} checked=${on.has(trackerKey(n))}
-            onChange=${(e) => flip(n, e.target.checked)} /></td></tr>`)}</tbody></table>`}
+            onChange=${(e) => flip(n, e.target.checked)} /></td></tr>
+          <tr class="limitnote"><td colspan="4"><${LimitNote} pct=${row(n).percent} mb=${row(n).mb} /></td></tr>`)}</tbody></table>`}
     <small class="status">${err ? `Prowlarr's trackers could not be listed (${err}) - only the ones with a limit are shown. `
-      : ""}Left blank, a tracker lets you download nothing: its builds that stop short go to the torrent client only by Override. With a % and/or MB set, a build missing less than that can be added - by itself, with always add ticked. Always add also lets a stopped torrent from that tracker download what it is missing, within the limit, when no copy on disk finishes it. A build that stops short on a tracker with nothing set asks you on the Jobs tab.</small>
+      : ""}With % and MB both Not specified, a tracker lets you download nothing: its builds that stop short go to the torrent client only by Override, and the Jobs tab asks you how much it allows. None allowed in either says it allows nothing, and it is not asked about. Not specified in one leaves it to the other; Full downloads allowed puts no limit on that one. With a % and/or MB set, a build missing less than that can be added - by itself, with always add ticked. Always add also lets a stopped torrent from that tracker download what it is missing, within the limit, when no copy on disk finishes it.</small>
     <div class="csvbar">
       <button type="button" class="btn" onClick=${exportCsv}
         title="Save these limits as a CSV file (tracker, percent, MB) to share with others - your always add ticks are not included">Export CSV</button>

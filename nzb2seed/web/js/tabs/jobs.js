@@ -2,9 +2,10 @@
 // its piece map, steps and log. Both follow the server live.
 import { html, useEffect, useLayoutEffect, useRef, useState } from "../lib.js";
 import { api, onChange } from "../api.js";
-import { backToJobs, jobs, jobScreen, nearlyLimitText, openJob, openJobId, setTrackerLimit, settings, shortEnough, toast, trackerLimit, useStore } from "../store.js";
+import { backToJobs, jobs, jobScreen, limitSet, nearlyLimitText, openJob, openJobId, setTrackerLimit, settings, shortEnough, toast, trackerLimit, useStore } from "../store.js";
 import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName } from "../util.js";
 import { SortSelect } from "../components/sort.js";
+import { LimitNote, LimitPick, limitWarning } from "../components/limitpick.js";
 import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, trackersOf, viaTracker } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
 import { addFromTrackers, addToClient, cancelMany, clearAndDelete, fullPosts, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
@@ -151,20 +152,29 @@ function Act({ label, title, onPress }) {
 
 /* a build that stopped short on a tracker with no limit set: say how much it allows, here */
 function LimitPrompt({ tracker, where }) {
-  const [pct, setPct] = useState(""), [mb, setMb] = useState(""), [busy, setBusy] = useState(false);
+  // both start on Not specified
+  const [pct, setPct] = useState(null), [mb, setMb] = useState(null), [busy, setBusy] = useState(false);
+  const warning = limitWarning(pct, mb);
+  const unset = (v) => v == null || v === "";
   const save = async (e) => {
     e.preventDefault(); e.stopPropagation();
-    if (!pct && !mb) return toast("Give a percentage, megabytes, or both.");
+    if (warning) return toast(warning);
+    if (unset(pct) && unset(mb))
+      return toast("Both are Not specified, which is how it is now: nothing is downloaded, and its jobs keep asking. Choose None allowed if it allows nothing.");
     setBusy(true);
-    try { const r = await setTrackerLimit(tracker, Number(pct) || 0, Number(mb) || 0); toast(`${where} lets you download ${r.limit}.`); }
+    try {
+      const r = await setTrackerLimit(tracker, unset(pct) ? null : pct, unset(mb) ? null : mb);
+      toast(`${where} lets you download ${r.limit}.`);
+    }
     catch (err) { toast("Could not save it: " + err.message); }
     finally { setBusy(false); }
   };
   return html`<form class="limitask" onSubmit=${save} onClick=${(e) => e.stopPropagation()}>
     <small class="status">How much does ${where} let you download without it counting against you? None is set, so nothing goes to the torrent client yet.</small>
-    <label>% <input type="number" min="0" max="100" step="0.1" value=${pct} aria-label=${`Percent ${where} allows`} onInput=${(e) => setPct(e.target.value)} /></label>
-    <label>MB <input type="number" min="0" step="1" value=${mb} aria-label=${`Megabytes ${where} allows`} onInput=${(e) => setMb(e.target.value)} /></label>
-    <button class="btn" disabled=${busy}>Save for ${where}</button></form>`;
+    <label>% <${LimitPick} value=${pct} isPct=${true} where=${where} onChange=${setPct} /></label>
+    <label>MB <${LimitPick} value=${mb} isPct=${false} where=${where} onChange=${setMb} /></label>
+    <button class="btn" disabled=${busy}>Save for ${where}</button>
+    <${LimitNote} pct=${pct} mb=${mb} /></form>`;
 }
 
 function JobActions({ j, all }) {
@@ -200,7 +210,7 @@ function JobActions({ j, all }) {
       ${nearly && x.seeders === 0 && html`<small class="status">Not offered for the torrent client: Prowlarr reported no seeders
         for it on ${trackerName(x.tracker || "its tracker")}, so the missing ${missText(x)} could never come over BitTorrent.</small>
         <${OtherTrackers} j=${j} Act=${Act} />`}
-      ${x.have != null && x.tracker && !trackerLimit(x.tracker) && html`<${LimitPrompt} tracker=${x.tracker} where=${where} />`}
+      ${x.have != null && x.tracker && !limitSet(x.tracker) && html`<${LimitPrompt} tracker=${x.tracker} where=${where} />`}
       ${x.have != null && !(nearly && x.seeders !== 0) && html`<${Act} label=${`Override: add to torrent client (${where})`}
         title=${`More than ${where} allows (${limit})${x.seeders === 0 ? ", and no seeders were reported" : ""}: add it anyway, knowing the missing ${missText(x)} would be downloaded over BitTorrent`}
         onPress=${() => overrideAdd(j, where)} />

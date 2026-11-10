@@ -28,7 +28,7 @@ from . import hopeless
 from . import originals
 from .clients import (PP_NONE, PP_REPAIR, PP_UNPACK, SAB_DONE, SAB_FAILED, ApiError,
                       Prowlarr, QBittorrent, Release, SABnzbd)
-from .config import Config
+from .config import Config, limit_set
 from .ledger import Ledger
 from .pathmap import map_path
 from .report import ask as report_ask
@@ -1233,6 +1233,19 @@ def group_of(name: str) -> str | None:
     return _JOINED.get(g, g) if g else g
 
 
+def of_group(name: str, group: str) -> bool:
+    """Is ``name`` a release of ``group``? Its group as group_of reads it, or - for a name
+    like "Show (2020) S01 (1080p AMZN WEB-DL x265 DDP 5.1 GRP)" or "Show.2020.S01...DDP.5.1.GRP",
+    where no dash marks the group - ``group`` as the name's last word (in its closing
+    bracket, if it has one; a poster's "-xpost" after it). That word is only taken to
+    confirm a group already known (from the torrent's files), never read as one: alone it
+    could as well be "10bit" or "English"."""
+    if group_of(name) == group:
+        return True
+    return bool(re.search(rf"[\s._]{re.escape(group)}[)\]]?\s*(?:\.[a-z0-9]{{2,4}})?(?:-x?(?:post|repo))?\s*$",
+                          name.strip(), re.I))
+
+
 def _group_of(name: str) -> str | None:
     """Release group: the first real dash-token after the episode/resolution part, where a
     scene dash has no spaces around it and tech tags like WEB-DL are skipped.
@@ -1516,7 +1529,7 @@ def _fits(need: Need, r: Release) -> str | None:
             return "single season"
     if need.res and need.res not in _RES.findall(n):
         return "other resolution" if _RES.findall(n) else "no resolution in its name"
-    if need.group and group_of(r.title) != need.group:
+    if need.group and not of_group(r.title, need.group):
         return "other release group" if group_of(r.title) else "no release group in its name"
     if other_codec(need.target, r.title):
         return "other codec"
@@ -1632,7 +1645,7 @@ def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
 
     def could_be(r: Release) -> bool:
         group, res = group_of(r.title), _RES.findall(matching.norm(r.title))
-        return (not need.group or not group or group == need.group) and             (not need.res or not res or need.res in res) and not other_codec(need.target, r.title)
+        return (not need.group or not group or of_group(r.title, need.group)) and             (not need.res or not res or need.res in res) and not other_codec(need.target, r.title)
     possible = [r for r in usenet_results(cfg, pr, need, known) if r.guid not in tried_guids and could_be(r)]
     # a post whose size rules it out is not offered: it cannot hold the file
     results = [r for r in possible if size_verdict(need, r)[1]]
@@ -1680,7 +1693,7 @@ def used_before(cfg: Config, need: "Need") -> list[Release]:
         n = matching.norm(title)
         if need.ep and not re.search(rf"(?<![a-z0-9]){need.ep}(?![0-9])", n):
             continue
-        if need.group and group_of(title) != need.group:
+        if need.group and not of_group(title, need.group):
             continue
         out.append(Release(title, "usenet", j.get("indexer", ""), 0, j.get("size") or 0,
                            j.get("guid") or j.get("nzo", ""), "", "", "", 0, None, None))
@@ -1807,6 +1820,10 @@ def show_prefix(title: str) -> str:
     """'Show.2016.S03E02.720p...' -> 'show.2016.'; for a movie, up to the resolution."""
     n = matching.norm(title)
     m = _EP.search(n) or re.search(r"(?<![a-z0-9])s\d{1,4}(?![0-9])", n) or _RES.search(n)
+    # "Show (2020) Season 1 S01 (...)": the show ends before the word Season
+    w = re.search(r"(?<![a-z0-9])season\.?\d{1,4}(?![0-9])", n)
+    if w and (m is None or w.start() < m.start()):
+        m = w
     return n[:m.start()] if m else n.split("-")[0]
 
 
@@ -3185,6 +3202,9 @@ def explain_missing(cfg: Config, t: Torrent, missing: list, wrong_size: list, sh
     elif within:
         nxt = (f"Add to torrent client downloads just the missing {exact_gb(short)} over BitTorrent from "
                f"{tracker}" + ("" if tried_all else " - or Try whole posts first, to look inside other posts"))
+    elif tracker_limit(cfg, tracker) is None and limit_set(cfg, tracker):
+        nxt = (f"{tracker} lets you download nothing, so it does not go to the torrent client - "
+               + ("Try whole posts, " if not tried_all else "") + "Look on other trackers, or use Override")
     elif tracker_limit(cfg, tracker) is None:
         nxt = (f"you have not set how much {tracker} lets you download, so it does not go to the torrent "
                "client - set it on the job (a % and MB), or " + ("Try whole posts, " if not tried_all else "")

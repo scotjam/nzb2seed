@@ -305,13 +305,46 @@ def test_repairable_is_repaired_by_cross_eyed_not_downloaded(tmp_path, monkeypat
     assert len(said) == 1 and "job 31" in said[0] and "dry-run" in said[0]
 
 
-def test_a_download_that_would_break_other_torrents_is_not_made(tmp_path, monkeypatch):
+def test_a_download_that_would_break_other_torrents_goes_into_a_copy_of_its_own(tmp_path, monkeypatch):
     m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    _cross_eyed(m, monkeypatch, verdict="shared_breaks_others")
+    m.round()
+    assert qb.started == ["short"] and os.stat(mine).st_ino != os.stat(lib_file).st_ino
+    with open(mine, "r+b") as fh:                               # what qBittorrent's download does
+        fh.write(GOOD)
+    assert lib_file.read_bytes() == BAD                         # the others' bytes are untouched
+
+
+def test_breaking_others_without_a_ticked_tracker_is_left_alone_and_said_once(tmp_path, monkeypatch):
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch, ticked=())
     _cross_eyed(m, monkeypatch, verdict="shared_breaks_others")
     m.round()
     m.round()
     assert qb.started == [] and os.stat(mine).st_ino == os.stat(lib_file).st_ino
-    assert len([t for _, t in m.state.log if "says shared_breaks_others" in t]) == 1
+    said = [t for _, t in m.state.log if "says shared_breaks_others" in t]
+    assert len(said) == 1 and "always add" in said[0]
+
+
+def test_same_named_torrents_breaking_others_download_once_and_share_it(tmp_path, monkeypatch):
+    """Two copies of a release short of the same bytes: one downloads into a copy of its own,
+    the other waits for it, then is finished from its file - one copy, one download."""
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    two = tmp_path / "short2" / "Rel"
+    two.mkdir(parents=True)
+    os.link(lib_file, two / "ep.mkv")
+    qb.dirs["short2"], qb.prog["short2"], qb.state["short2"] = str(tmp_path / "short2"), 0.99, "stoppedDL"
+    _cross_eyed(m, monkeypatch, verdict="shared_breaks_others")
+    m.round()
+    assert qb.started == ["short"]
+    assert os.stat(two / "ep.mkv").st_ino == os.stat(lib_file).st_ino      # no copy of its own yet
+    assert any("waiting for the copy on TrackerX" in t for _, t in m.state.log)
+    with open(mine, "r+b") as fh:                               # the lead finishes downloading
+        fh.write(GOOD)
+    qb.prog["short"] = 1.0
+    m.round()
+    assert qb.started == ["short", "short2"] and qb.prog["short2"] == 1.0
+    assert os.stat(two / "ep.mkv").st_ino == os.stat(mine).st_ino          # the lead's file, linked
+    assert lib_file.read_bytes() == BAD
 
 
 def test_shared_with_torrents_needing_the_same_bytes_is_downloaded_in_place(tmp_path, monkeypatch):

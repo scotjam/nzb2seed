@@ -50,7 +50,7 @@ nav a { padding: 6px 12px; border-radius: 6px; color: var(--ink-2); text-decorat
 nav a[aria-current="page"] { color: var(--ink); background: var(--slate); font-weight: 700; }
 nav .count { display: inline-block; min-width: 1.4em; margin-left: 6px; padding: 0 5px; border-radius: 9px; background: var(--torrent); color: var(--sheet); font-size: .78rem; text-align: center; }
 
-main { max-width: 1320px; margin: 0 auto; padding: 24px 24px 120px; }
+main { max-width: 1600px; margin: 0 auto; padding: 24px 24px 120px; }
 h1 { font-size: 1.6rem; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.015em; }
 h2 { font-size: 1.1rem; margin: 0; }
 p.lede { color: var(--ink-2); margin: 0 0 20px; max-width: 70ch; }
@@ -73,7 +73,7 @@ label.check input { margin-top: 5px; accent-color: var(--torrent); }
 .ticks { display: flex; flex-wrap: wrap; gap: 2px 20px; margin: 4px 0; }
 table.limits { border-collapse: collapse; width: 100%; max-width: 560px; font-size: .9rem; }
 table.limits th, table.limits td { text-align: left; padding: 3px 8px 3px 0; }
-table.limits input[type=number] { width: 5.5em; }
+table.limits input[type=number] { width: 5em; }
 .field { display: grid; gap: 4px; }
 .field > span { font-weight: 700; font-size: .92rem; }
 .field small { color: var(--ink-2); }
@@ -137,7 +137,7 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 
 /* ---------- build bar */
 .buildbar { position: fixed; left: 0; right: 0; bottom: 0; background: var(--sheet); border-top: 1px solid var(--rule); padding: 12px 24px; z-index: 4; }
-.buildbar .inner { max-width: 1320px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; }
+.buildbar .inner { max-width: 1600px; margin: 0 auto; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 22px; }
 .buildbar .what { flex: 1 1 320px; min-width: 0; }
 .buildbar .what b { word-break: break-all; }
 .buildbar .what small { display: block; color: var(--ink-2); }
@@ -145,7 +145,7 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .buildbar select { width: auto; padding: 5px 8px; }
 
 /* ---------- jobs */
-.jobs { display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }
+.jobs { display: grid; grid-template-columns: minmax(380px, 2fr) minmax(0, 3fr); gap: 20px; align-items: start; }
 .joblist { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
 /* a row is a tick box, the job itself (which opens it) and its actions - three separate
    controls, since a button cannot hold other buttons */
@@ -172,6 +172,11 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .joblist .jretry { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .limitask { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; flex-basis: 100%; }
 .limitask input { width: 5.5em; }
+.limitpick { display: inline-flex; gap: 4px; align-items: center; }
+.limitpick select { max-width: 12em; }
+.limitwarn { color: var(--warn); font-size: .82rem; flex-basis: 100%; }
+.limitinfo { color: var(--ink-2); font-size: .82rem; flex-basis: 100%; }
+table.limits tr.limitnote td { padding-top: 0; padding-bottom: 8px; border-bottom: 1px solid var(--rule); }
 .joblist .jretry .btn { display: inline-block; padding: 3px 10px; font-size: .84rem; }
 .joblist .jretry .info { display: inline-grid; place-items: center; width: 20px; height: 20px;
   border-radius: 50%; border: 1px solid var(--ink-2); color: var(--ink-2); font-size: .75rem;

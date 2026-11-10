@@ -26,7 +26,7 @@ def test_the_limit_is_checked_against_the_total(tmp_path):
     # 4% short now, 3% taken before: 7% against a 7.2% limit (8% less 10% headroom)
     share, size = App.counting_earlier(0.96, 40 * MB, 1000 * MB, 30 * MB)
     assert round(share, 4) == 0.07 and size == 70 * MB
-    cfg = SimpleNamespace(nearly_limits=[{"tracker": "TrackerA", "percent": 8, "mb": 0}])
+    cfg = SimpleNamespace(nearly_limits=[{"tracker": "TrackerA", "percent": 8, "mb": None}])
     from nzb2seed.config import within_limit
     assert within_limit(cfg, "TrackerA", share, size)
     share, size = App.counting_earlier(0.95, 50 * MB, 1000 * MB, 30 * MB)   # 8% in total: over

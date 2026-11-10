@@ -798,3 +798,40 @@ def test_a_post_clearly_smaller_than_what_it_must_hold_is_not_offered(tmp_path, 
                                 FakeProwlarr({}, [rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", int(need.min_size * 0.94), "x")]),
                                 need, [])
     assert got is None and asked == []
+
+
+@pytest.mark.parametrize("post, ok", [
+    ("Show.(2020).Season.1.S01.(1080p.AMZN.WEB-DL.x265.HEVC.10bit.DDP.5.1.Grpv)", True),
+    ("Show.(2020).Season.1.S01.(1080p.AMZN.WEB-DL.x265.HEVC.10bit.DDP.5.1.Grpv)-xpost", True),
+    ("Show (2020) Season 1 S01 (1080p AMZN WEB-DL x265 DDP 5.1 Grpv)", True),
+    ("Show [2020] Season 3 S03 [1080p AMZN WEB-DL x265 HEVC 10bit DDP 5.1 Grpv]-xpost", True),
+    ("Show.2020.Season.1.S01.1080p.AMZN.WEB-DL.x265.HEVC.10bit.DDP.5.1.Grpv", True),
+    ("Show.(2020).Season.1.S01.(1080p.AMZN.WEB-DL.x265.HEVC.10bit.DDP.5.1.Other)", False),
+    ("Show.2020.S01.1080p.AMZN.WEB-DL.DDP5.1.HEVC-Other", False),
+])
+def test_a_group_named_last_in_the_closing_bracket_is_its_group(post, ok):
+    """No dash marks the group in such a name: the torrent's files name it ('-Grpv.mkv'),
+    and the post's closing bracket ending with that word is enough."""
+    assert pipeline.of_group(post, "grpv") is ok
+    assert group_of(post) in (None, "xpost", "other")       # never read as a group on its own
+
+
+def test_a_season_post_named_with_brackets_fits_the_season():
+    t = parse(make_torrent("Show (2020) Season 1 S01 (1080p AMZN WEB-DL x265 HEVC 10bit DDP 5.1 Grpv)",
+                           {f"Show.S01E0{i}.Title.1080p.10bit.AMZN.WEB-DL.DDP5.1.HEVC-Grpv.mkv": b"x" * (1000 + i)
+                            for i in (1, 2)}))
+    root = pipeline.build_units(t, t.name)
+    post = Release("Show.(2020).Season.1.S01.(1080p.AMZN.WEB-DL.x265.HEVC.10bit.DDP.5.1.Grpv)", "usenet",
+                   "ix", 0, t.total_size + 500, "g1", "", "", "", 0, None, None)
+    assert root.need.group == "grpv"
+    assert pipeline._fits(root.need, post) is None
+
+
+def test_a_show_named_with_season_n_ends_before_it():
+    """'Show (2020) Season 1 S01': posts named 'Show.2020.S01' or 'Show.2020.Season.1.S01' are
+    the same show."""
+    show = pipeline.show_prefix("Show (2020) Season 1 S01 (1080p AMZN WEB-DL x265 DDP 5.1 Grpv)")
+    assert show == "show.(2020)."
+    for post in ("show.2020.season.1.s01.1080p", "show.[2020].season.1.s01.[1080p", "show.2020.s01.1080p"):
+        assert pipeline.same_show(post, show)
+    assert pipeline.show_prefix("Show.S02E03.1080p-GRP") == "show."

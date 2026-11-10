@@ -64,18 +64,29 @@ export async function loadSettings() {
   return s;
 }
 /* how much each tracker lets you download - as the server keeps it (config.tracker_limit):
-   [percent, mb] (0 = that one does not limit), or null when none is set: nothing allowed */
+   each of percent and mb is a number above 0, 0 (none allowed), "full" or left out (not
+   specified). [percent, mb] (0 = that one does not limit), or null: nothing allowed -
+   either none allowed, or neither specified */
 const trackerKey = (n) => { const k = (n || "").trim().toLowerCase(); return k.endsWith("(api)") ? k.slice(0, -5).trim() : k; };
 export function trackerLimit(tracker) {
   const want = trackerKey(tracker);
   const row = (settings.get()?.settings?.behaviour?.nearly_limits || []).find(r => want && trackerKey(r.tracker) === want);
-  const pct = Number(row?.percent) || 0, mb = Number(row?.mb) || 0;
-  return pct > 0 || mb > 0 ? [pct, mb] : null;
+  const unset = (v) => v == null || v === "", full = (v) => String(v).toLowerCase() === "full";
+  const vals = [row?.percent, row?.mb];
+  if (vals.every(unset) || vals.some(v => !unset(v) && !full(v) && !(Number(v) > 0))) return null;
+  return vals.map(v => (unset(v) || full(v) ? 0 : Number(v)));
+}
+/* set at all (config.limit_set) - even to none allowed; neither specified, a job asks */
+export function limitSet(tracker) {
+  const want = trackerKey(tracker);
+  const row = (settings.get()?.settings?.behaviour?.nearly_limits || []).find(r => want && trackerKey(r.tracker) === want);
+  return !!row && ((row.percent != null && row.percent !== "") || (row.mb != null && row.mb !== ""));
 }
 export function nearlyLimitText(tracker) {
   const lim = trackerLimit(tracker);
-  if (!lim) return "nothing (no limit set for this tracker)";
+  if (!lim) return limitSet(tracker) ? "nothing" : "nothing (no limit set for this tracker)";
   const [pct, mb] = lim;
+  if (!pct && !mb) return "everything (full downloads allowed)";
   return [pct && `${pct}%`, mb && `${mb} MB`].filter(Boolean).join(" or ") + (pct && mb ? " - whichever is less" : "")
     + `, keeping ${HEADROOM * 100}% of it free`;
 }
@@ -88,7 +99,8 @@ export function shortEnough(x) {
   const [pct, mb] = lim.map(v => v * (1 - HEADROOM));
   return (!pct || (1 - x.have) * 100 < pct) && (!mb || x.short == null || x.short < mb * 1024 ** 2);
 }
-/* set (or, both blank, clear) how much a tracker lets you download */
+/* set how much a tracker lets you download: each a number above 0, 0 (none allowed),
+   "full", or null (not specified) - both null forgets the tracker */
 export async function setTrackerLimit(tracker, percent, mb) {
   const r = await api("/api/trackers/limit", { tracker, percent, mb });
   settings.set(r.settings);

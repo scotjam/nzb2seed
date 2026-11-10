@@ -113,7 +113,11 @@ export const SCENARIOS = {
     const row = () => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Film.2021.1080p.BluRay-GRPN"));
     const buttons = () => [...row().querySelectorAll("span.btn")].map(b => b.textContent);
     const out = { asks: !!row().querySelector(".limitask"), before: buttons() };
-    const pct = row().querySelector('input[aria-label="Percent TrackerNine allows"]');
+    out.modes = [...row().querySelectorAll(".limitask select")].map(s => s.value);   // both Not specified
+    const sel = row().querySelector('select[aria-label="% TrackerNine allows"]');
+    sel.value = "custom"; sel.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+    await act.settle();
+    const pct = row().querySelector('input[aria-label="Custom % TrackerNine allows"]');
     pct.value = "1"; pct.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true }));
     await act.settle();
     const n = calls.length;
@@ -122,6 +126,42 @@ export const SCENARIOS = {
     out.sent = calls.slice(n).filter(c => c.path === "/api/trackers/limit").map(c => c.body);
     out.after = buttons();
     out.asksAfter = !!row().querySelector(".limitask");
+    return out;
+  },
+
+  /* a % with None allowed in MB would be ignored: it says so, and nothing is saved */
+  async limitWarn({ act, doc, calls, server }) {
+    server.jobs.unshift({ id: 93, title: "Film.2022.1080p.BluRay-GRPW", kind: "build", status: "failed",
+      result: "short", started: 1_700_000_000, ended: 1_700_000_100, progress: "", question: null, can_retry: true,
+      extra: { have: 0.99999, infohash: "w".repeat(40), tracker: "TrackerTen", short: 900, seeders: 4 } });
+    await act.go("jobs");
+    await act.settle();
+    const row = () => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes("Film.2022.1080p.BluRay-GRPW"));
+    const ev = (el, type) => el.dispatchEvent(new doc.defaultView.Event(type, { bubbles: true }));
+    const first = row().querySelector(".limitwarn")?.textContent || "";       // both Not specified: fine
+    const psel = row().querySelector('select[aria-label="% TrackerTen allows"]');
+    psel.value = "custom"; ev(psel, "change");
+    await act.settle();
+    const blank = row().querySelector(".limitwarn")?.textContent || "";       // Custom, no number yet
+    let n0 = calls.length;
+    row().querySelector(".limitask button").click();
+    await act.settle();
+    const sentBlank = calls.slice(n0).filter(c => c.path === "/api/trackers/limit").length;
+    const pct = row().querySelector('input[aria-label="Custom % TrackerTen allows"]');
+    pct.value = "5"; ev(pct, "input");
+    await act.settle();
+    const mb = row().querySelector('select[aria-label="MB TrackerTen allows"]');
+    mb.value = "none"; ev(mb, "change");
+    await act.settle();
+    const out = { first, blank, sentBlank, warning: row().querySelector(".limitwarn")?.textContent || "" };
+    const n = calls.length;
+    row().querySelector(".limitask button").click();
+    await act.settle();
+    out.sent = calls.slice(n).filter(c => c.path === "/api/trackers/limit").length;
+    const p2 = row().querySelector('input[aria-label="Custom % TrackerTen allows"]');
+    p2.value = "100"; ev(p2, "input");
+    await act.settle();
+    out.hundred = row().querySelector(".limitwarn")?.textContent || "";
     return out;
   },
 
@@ -313,29 +353,47 @@ export const SCENARIOS = {
   },
 
   /* the new page only: the always-added trackers are ticked in Prowlarr's list */
+  /* a tracker never set is Not specified in both - fine; Custom with no number is not saved */
+  async trackersBlank({ act, doc, calls }) {
+    await act.go("settings");
+    const untouched = [...doc.querySelectorAll("table.limits .limitwarn")].length;
+    const info = doc.querySelector("table.limits .limitinfo")?.textContent || "";
+    const s = doc.querySelector('select[aria-label="% TrackerFour allows"]');
+    s.value = "custom"; s.dispatchEvent(new doc.defaultView.Event("change", { bubbles: true }));
+    await act.settle();
+    const warn = [...doc.querySelectorAll("table.limits .limitwarn")].map(w => w.textContent);
+    const n = calls.length;
+    await act.click("Save settings", "button");
+    return { untouched, info, warn, sent: calls.slice(n).filter(c => c.path === "/api/settings").length };
+  },
+
   async trackers({ act, doc, calls }) {
     await act.go("settings");
-    const rows = () => [...doc.querySelectorAll("table.limits tbody tr")].map(tr => {
+    // each limit: its dropdown, or for Custom the number typed ("?" while there is none)
+    const pick = (td) => { const s = td.querySelector("select"); return s.value === "custom" ? (td.querySelector("input")?.value || "?") : s.value; };
+    const rows = () => [...doc.querySelectorAll("table.limits tbody tr")].filter(tr => tr.children.length === 4).map(tr => {
       const [name, pct, mb, always] = tr.children;
-      return `${name.textContent.trim()} ${pct.querySelector("input").value || "-"}% ${mb.querySelector("input").value || "-"}MB ${always.querySelector("input").checked ? "[x]" : "[ ]"}`;
+      return `${name.textContent.trim()} ${pick(pct)}% ${pick(mb)}MB ${always.querySelector("input").checked ? "[x]" : "[ ]"}`;
     });
     const listed = rows();
+    const ev = (el, type) => el.dispatchEvent(new doc.defaultView.Event(type, { bubbles: true }));
     const field = (label) => doc.querySelector(`input[aria-label="${label}"]`);
+    const choose = async (label, v) => { const s = doc.querySelector(`select[aria-label="${label}"]`); s.value = v; ev(s, "change"); await act.settle(); };
     field("Always add for TrackerFour").click(); await act.settle();
     field("Always add for TrackerThree (API)").click(); await act.settle();
-    const pct = field("Percent TrackerFour allows");
-    pct.value = "2"; pct.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); await act.settle();
-    const one = field("Percent TrackerOne allows");
-    one.value = ""; one.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); await act.settle();
-    const onemb = field("Megabytes TrackerOne allows");
-    onemb.value = ""; onemb.dispatchEvent(new doc.defaultView.Event("input", { bubbles: true })); await act.settle();
+    await choose("% TrackerFour allows", "custom");
+    const pct = field("Custom % TrackerFour allows");
+    pct.value = "2"; ev(pct, "input"); await act.settle();
+    await choose("% TrackerOne allows", "unset");
+    await choose("MB TrackerOne allows", "unset");
     const after = rows();
     const n = calls.length;
     await act.click("Save settings", "button");
     const sent = calls.slice(n).filter(c => c.path === "/api/settings");
     const b = sent[0]?.body.settings.behaviour || {};
     return { listed, after, saved: b.nearly_auto_trackers,
-             limits: (b.nearly_limits || []).map(r => `${r.tracker} ${r.percent || 0}% ${r.mb || 0}MB`).sort() };
+             limits: (b.nearly_limits || []).filter(r => r.percent != null || r.mb != null)
+               .map(r => `${r.tracker} ${r.percent ?? "-"}% ${r.mb ?? "-"}MB`).sort() };
   },
 
   /* the new page only: a number the browser thinks is "off step" never blocks saving */

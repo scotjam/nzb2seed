@@ -243,23 +243,34 @@ def clean_tracker_name(name) -> str:
     return _CONTROL.sub("", name).strip()[:MAX_TRACKER_NAME].strip()
 
 
-def _limit_number(v, top: float) -> float | int:
-    """A percent or MB as stored: a finite number from 0 to ``top`` (anything else is 0,
-    which means "no limit set")."""
-    if isinstance(v, bool):
+FULL = "full"
+
+
+def _limit_number(v, top: float) -> float | int | str | None:
+    """A percent or MB as stored - each is one of: a number above 0 below ``top`` (custom),
+    0 (none allowed), "full" (full downloads allowed: ``top`` or more of a percentage), or
+    None (not specified: blank, or not a number)."""
+    if isinstance(v, str) and v.strip().lower() == FULL:
+        return FULL
+    if isinstance(v, str) and v.strip().lower() == "none":
         return 0
+    if isinstance(v, bool) or v is None or (isinstance(v, str) and not v.strip()):
+        return None
     try:
         f = float(v)
     except (TypeError, ValueError):
-        return 0
-    if not math.isfinite(f) or f <= 0:
-        return 0
+        return None
+    if not math.isfinite(f) or f < 0:
+        return None
+    if top == 100 and f >= 100:
+        return FULL                     # all of the torrent: full downloads allowed
     f = min(f, top)
     return int(f) if f == int(f) else round(f, 4)
 
 
 def clean_limits(rows) -> list:
     """What each tracker lets you download, as stored: rows of {tracker, percent, mb} only -
+    each a number above 0, 0 (none allowed) or "full"; one not specified is left out -
     whatever else a row holds is dropped, numbers are checked, one row per tracker, and no
     more than MAX_TRACKERS rows. Applied to everything saved, from the form or an import."""
     out, seen = [], set()
@@ -271,13 +282,13 @@ def clean_limits(rows) -> list:
         if not key or key in seen:
             continue
         pct, mb = _limit_number(row.get("percent"), 100), _limit_number(row.get("mb"), MAX_LIMIT_MB)
-        if not (pct or mb):
+        if pct is None and mb is None:
             continue
         seen.add(key)
         clean = {"tracker": name}
-        if pct:
+        if pct is not None:
             clean["percent"] = pct
-        if mb:
+        if mb is not None:
             clean["mb"] = mb
         out.append(clean)
         if len(out) >= MAX_TRACKERS:
@@ -403,15 +414,31 @@ def tracker_key(name: str) -> str:
     return n[:-5].strip() if n.endswith("(api)") else n
 
 
-def tracker_limit(cfg: "Config", tracker: str) -> tuple[float, float] | None:
-    """(percent, MB) the tracker lets you download - 0 for either means that one does not
-    limit. None: no limit set for it, so nothing may be downloaded from it."""
+def _limit_row(cfg: "Config", tracker: str) -> dict | None:
     want = tracker_key(tracker)
-    for row in cfg.nearly_limits or []:
-        if want and tracker_key(row.get("tracker", "")) == want:
-            pct, mb = float(row.get("percent") or 0), float(row.get("mb") or 0)
-            return (pct, mb) if pct > 0 or mb > 0 else None
-    return None
+    return next((r for r in cfg.nearly_limits or []
+                 if want and tracker_key(r.get("tracker", "")) == want), None)
+
+
+def limit_set(cfg: "Config", tracker: str) -> bool:
+    """Has how much this tracker lets you download been set at all? With both not
+    specified, a build that stops short on it asks; set (even to none allowed), it does not."""
+    r = _limit_row(cfg, tracker)
+    return bool(r) and (r.get("percent") is not None or r.get("mb") is not None)
+
+
+def tracker_limit(cfg: "Config", tracker: str) -> tuple[float, float] | None:
+    """(percent, MB) the tracker lets you download - 0 in the tuple means that one does not
+    limit (full downloads allowed, or not specified). None: nothing may be downloaded from
+    it - either is none allowed (0), or neither is specified."""
+    row = _limit_row(cfg, tracker)
+    if not row:
+        return None
+    vals = [_limit_number(row.get("percent"), 100), _limit_number(row.get("mb"), MAX_LIMIT_MB)]
+    if all(v is None for v in vals) or any(v == 0 for v in vals):
+        return None
+    pct, mb = (float(v) if v not in (None, FULL) else 0.0 for v in vals)
+    return pct, mb
 
 
 # Every add to the torrent client keeps this far under a tracker's limit (only Override
@@ -438,7 +465,9 @@ def within_limit(cfg: "Config", tracker: str, fraction_missing: float, bytes_mis
 def limit_text(cfg: "Config", tracker: str) -> str:
     lim = tracker_limit(cfg, tracker)
     if lim is None:
-        return "nothing (no limit set for this tracker)"
+        return "nothing" if limit_set(cfg, tracker) else "nothing (no limit set for this tracker)"
     pct, mb = lim
+    if not pct and not mb:
+        return "everything (full downloads allowed)"
     return " or ".join(x for x in (pct and f"{pct:g}%", mb and f"{mb:g} MB") if x) + \
         (" - whichever is less" if pct and mb else "") + f", keeping {HEADROOM:.0%} of it free"
