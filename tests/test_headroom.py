@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 from nzb2seed import config
 
-CFG = SimpleNamespace(nearly_limits=[{"tracker": "TrackerB", "percent": 10, "mb": 0},
+CFG = SimpleNamespace(nearly_limits=[{"tracker": "TrackerB", "percent": 10, "mb": None},
                                      {"tracker": "TrackerD", "percent": 5, "mb": 1000}])
 H = config.AUTO_HEADROOM
 

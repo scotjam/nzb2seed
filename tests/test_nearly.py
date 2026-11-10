@@ -436,11 +436,16 @@ def test_a_tracker_with_no_limit_set_allows_nothing(server, monkeypatch):  # noq
     job = failed_part_way(app, have=0.99999, tracker="Strict Tracker (API)")
     assert call(url + "/api/jobs/add_to_client", *AUTH, body={"id": job.id})[0] == 400
     assert call(url + "/api/jobs/add_to_client", *AUTH, body={"id": job.id, "always": True})[0] == 400
-    status, r = call(url + "/api/trackers/limit", *AUTH, body={"tracker": "Strict Tracker (API)", "percent": 1, "mb": 0})
+    status, r = call(url + "/api/trackers/limit", *AUTH, body={"tracker": "Strict Tracker (API)", "percent": 1, "mb": ""})
     assert status == 200 and r["limit"] == "1%, keeping 10% of it free"
     assert app.nearly_enough(tiny)                                 # now it may
     call(url + "/api/trackers/limit", *AUTH, body={"tracker": "strict tracker", "percent": "", "mb": ""})
     assert not app.nearly_enough(tiny)                             # blank again: nothing
+    from nzb2seed import config as config_mod
+    assert not config_mod.limit_set(app.cfg, "Strict Tracker")     # ...and asked about again
+    status, r = call(url + "/api/trackers/limit", *AUTH, body={"tracker": "Strict Tracker", "percent": 0, "mb": ""})
+    assert status == 200 and r["limit"] == "nothing"               # 0: it allows nothing, not asked
+    assert config_mod.limit_set(app.cfg, "Strict Tracker") and not app.nearly_enough(tiny)
 
 
 def test_a_tracker_set_to_always_add_is_not_sent_a_build_over_the_megabytes(server, monkeypatch):  # noqa: F811
@@ -652,7 +657,7 @@ def test_a_job_ticked_via_another_tracker_goes_to_qbittorrent_as_that_torrent(se
     assert call(url + "/api/jobs/add_via", *AUTH, body={"id": job.id, "guid": "nope"})[0] == 400
 
 
-LIMITS = [{"tracker": "trackerc", "percent": 10, "mb": 0}]     # 3% short is within it, with room
+LIMITS = [{"tracker": "trackerc", "percent": 10, "mb": None}]     # 3% short is within it, with room
 
 
 def remove(url, job, delete=True):

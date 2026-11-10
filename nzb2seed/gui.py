@@ -1695,22 +1695,30 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 return self.add_to_client(body)
             if path == "/api/trackers/limit":
                 # how much one tracker lets you download - set from a job that stopped short
-                # on it, or from Settings. Both blank: nothing (the tracker is forgotten)
+                # on it, or from Settings. Each: a number above 0, 0 (none allowed), "full", or
+                # blank (not specified); both not specified: the tracker is forgotten, and asked
+                # about again
                 name = (body.get("tracker") or "").strip()
                 if not name:
                     return self._err("no tracker given")
+                def value(v):
+                    if v is None or (isinstance(v, str) and not v.strip()):
+                        return None
+                    if isinstance(v, str) and v.strip().lower() == config_mod.FULL:
+                        return config_mod.FULL
+                    return float(v)
                 try:
-                    pct = float(body.get("percent") or 0)
-                    mb = float(body.get("mb") or 0)
+                    pct, mb = value(body.get("percent")), value(body.get("mb"))
                 except (TypeError, ValueError):
-                    return self._err("the limit is a number")
-                if pct < 0 or pct > 100 or mb < 0:
+                    return self._err("the limit is a number, or full")
+                if (pct not in (None, config_mod.FULL) and not 0 <= pct <= 100) or \
+                        (mb not in (None, config_mod.FULL) and mb < 0):
                     return self._err("a percentage from 0 to 100, and megabytes from 0")
                 key = config_mod.tracker_key(name)
                 rows = [r for r in (app.cfg.nearly_limits or []) if config_mod.tracker_key(r.get("tracker", "")) != key]
-                if pct or mb:
+                if pct is not None or mb is not None:
                     rows.append({"tracker": name, "percent": pct, "mb": mb})
-                app.cfg = dataclasses.replace(app.cfg, nearly_limits=rows)
+                app.cfg = dataclasses.replace(app.cfg, nearly_limits=config_mod.clean_limits(rows))
                 config_mod.save(app.cfg)
                 return self._json({"tracker": name, "limit": config_mod.limit_text(app.cfg, name),
                                    "settings": self.settings_payload()})

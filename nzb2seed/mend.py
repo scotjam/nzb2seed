@@ -29,8 +29,11 @@ and when cross-eyed is in dry-run, that the job only runs once you run it there.
 
 Before downloading the rest, mend asks cross-eyed (its download-check, worked out from
 piece hashes): "repairable" - cross-eyed repairs it from other copies on disk, nothing is
-downloaded; "in_job" or "shared_breaks_others" (its files are shared with torrents that
-verify those bytes as they are) - left alone; "shared_same_version" - downloaded into the
+downloaded; "in_job" - left alone; "shared_breaks_others" (its files are shared with
+torrents that verify those bytes as they are) - it gets a copy of its own of each file it
+writes into and downloads the rest, one torrent of a name at a time: the others of that name
+wait (up to LEAD_WAIT) for it to be whole, then its files are swapped into them as above;
+"shared_same_version" - downloaded into the
 shared files, which fixes them all; "not_shared", "shared_other_names" (a library or
 backup holds the files too) or no answer - each file it writes into gets bytes of its own
 first. cross-eyed not answering: no files are swapped in that round either.
@@ -55,6 +58,7 @@ from .clients import CHECKING, ApiError
 INTERVAL = 30 * 60
 CHECK_AGAIN = 6 * 3600       # cross-eyed's download-check (and a repair asked for) kept this long
 FIRST_ROUND = 3 * 60
+LEAD_WAIT = 24 * 3600        # a same-named torrent downloading the rest is waited for this long
 STOPPED = {"stoppedDL", "pausedDL"}
 ORIG = ".nzb2seed-orig"
 VIDEO = (".mkv", ".mp4", ".m4v", ".avi", ".ts", ".m2ts")
@@ -278,6 +282,7 @@ class Mender:
         except OSError as e:
             print(f"mend: could not let go of old originals: {e}", flush=True)
         kept = originals.kept_roots(cfg)
+        self.rows = rows                            # finish_rest looks for a same-named lead
         for r in rows:
             if not (r.get("state") in STOPPED and 0 < r.get("progress", 0) < 1 and r["hash"] not in busy):
                 continue
@@ -316,12 +321,36 @@ class Mender:
             self.ask_repair(cfg, r, summary)
             return
         if verdict == "shared_breaks_others":
-            self.say("dl:" + h, f"{r['name']}: not downloaded - {summary}")
+            # its version of a shared file differs from the one the others verify: it gets a
+            # copy of its own and downloads the rest. One torrent of a name at a time - the
+            # others of that name are usually short of the same bytes, and once the lead is
+            # whole its files are swapped into them (mend), instead of a copy each.
+            lead = self.lead(r)
+            if lead:
+                self.say("dl:" + h, f"{r['name']}: waiting for the copy on {lead} to finish "
+                                    "downloading the rest - its files are then tried here first")
+                return
+            if not self.download_rest(qb, r, back, map_path):
+                self.say("dl:" + h, f"{r['name']}: not downloaded - {summary}; giving it a copy of "
+                                    "its own and downloading the rest needs its tracker ticked "
+                                    "\"always add\", within its limit, and room on the drive")
             return
         # shared with torrents needing the same bytes: written where they are, fixing them
         # all. Anything else - its own files, files a library or backup holds too, or no
         # answer - gets bytes of its own first: never written into a file with other names
         self.download_rest(qb, r, back, map_path, in_place=verdict == "shared_same_version")
+
+    def lead(self, r: dict) -> str:
+        """Another torrent of the same name that mend started downloading the rest, not yet
+        whole and started under LEAD_WAIT ago: its tracker ("" - none to wait for)."""
+        name = title(r.get("name") or "")
+        for o in getattr(self, "rows", None) or []:
+            h = o["hash"]
+            if h == r["hash"] or h not in self.state.started or o.get("progress", 0) >= 1:
+                continue
+            if title(o.get("name") or "") == name and time.time() - self.state.started[h] < LEAD_WAIT:
+                return self.tracker(o) or o.get("tracker") or h
+        return ""
 
     def ask_cross_eyed(self, cfg, r: dict) -> dict | None:
         """cross-eyed's download-check, kept a while (the same progress, under CHECK_AGAIN):

@@ -295,13 +295,14 @@ def test_the_always_added_trackers_are_ticked_in_prowlarrs_list(settings_file):
     seen = run("new", "trackers", settings_file)["seen"]
     # each of Prowlarr's trackers with its own limit; the saved "TrackerThree" is Prowlarr's
     # "TrackerThree (API)" (ticked, not listed twice); TrackerTwo is not in Prowlarr's list
-    assert seen["listed"] == ["TrackerFour -% -MB [ ]", "TrackerOne 5% 200MB [ ]",
+    # a tracker never set: Not specified in both
+    assert seen["listed"] == ["TrackerFour unset% unsetMB [ ]", "TrackerOne 5% 200MB [ ]",
                               "TrackerThree (API) 5% 200MB [x]", "TrackerTwo 5% 200MB [ ]"]
-    assert seen["after"] == ["TrackerFour 2% -MB [x]", "TrackerOne -% -MB [ ]",
+    assert seen["after"] == ["TrackerFour 2% unsetMB [x]", "TrackerOne unset% unsetMB [ ]",
                              "TrackerThree (API) 5% 200MB [ ]", "TrackerTwo 5% 200MB [ ]"]
     assert seen["saved"] == ["TrackerFour"]
-    # TrackerOne cleared: blank, so it lets you download nothing (and is no longer listed)
-    assert seen["limits"] == ["TrackerFour 2% 0MB", "TrackerThree 5% 200MB", "TrackerTwo 5% 200MB"]
+    # TrackerOne: neither specified, so it lets you download nothing (and is no longer listed)
+    assert seen["limits"] == ["TrackerFour 2% -MB", "TrackerThree 5% 200MB", "TrackerTwo 5% 200MB"]
 
 
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
@@ -372,10 +373,29 @@ def test_back_from_a_job_goes_to_the_jobs_list(settings_file):
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
 def test_a_tracker_without_a_limit_is_asked_about_on_the_job(settings_file):
     seen = run("new", "limitAsk", settings_file)["seen"]
+    assert seen["modes"] == ["unset", "unset"]
     assert seen["asks"] and not any(b.startswith("Add to torrent client") for b in seen["before"])
     assert any(b.startswith("Override") for b in seen["before"])           # still possible, knowingly
-    assert seen["sent"] == [{"tracker": "TrackerNine", "percent": 1, "mb": 0}]
+    assert seen["sent"] == [{"tracker": "TrackerNine", "percent": 1, "mb": None}]   # blank MB: not set
     assert any(b.startswith("Add to torrent client (TrackerNine)") for b in seen["after"]) and not seen["asksAfter"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_limit_that_would_not_behave_as_it_reads_is_warned_about_and_not_saved(settings_file):
+    seen = run("new", "limitWarn", settings_file)["seen"]
+    assert seen["first"] == "" and "cannot be blank" in seen["blank"] and seen["sentBlank"] == 0
+    assert "percentage would be ignored" in seen["warning"] and "Not specified for MB" in seen["warning"]
+    assert seen["sent"] == 0
+    assert "below 100" in seen["hundred"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_settings_are_not_saved_while_a_trackers_custom_limit_is_blank(settings_file):
+    seen = run("new", "trackersBlank", settings_file)["seen"]
+    assert seen["untouched"] == 0                                    # never set: Not specified in both
+    assert seen["info"]                                              # ...and each row says what it does
+    assert len(seen["warn"]) == 1 and "cannot be blank" in seen["warn"][0]     # TrackerFour on Custom
+    assert seen["sent"] == 0
 
 
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
