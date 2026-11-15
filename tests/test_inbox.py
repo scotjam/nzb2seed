@@ -498,8 +498,47 @@ def test_an_old_release_missing_from_usenet_is_tried_once(tmp_path, monkeypatch)
         wait(lambda: app.inbox.items()[0]["status"] == "failed")
         time.sleep(0.3)
         assert len(calls) == 1                                  # one search, no retries
+        why = app.inbox.items()[0]["why"]
+        assert why.startswith(f"no Usenet post could supply X as of {inbox._when(time.time())[:6]}")
+        assert "35 days ago" in why and "no more retries" in why and "gave up" not in why
     finally:
         clients.SEARCH_GATE = None
+
+
+def test_not_on_usenet_says_as_of_when_and_that_the_retries_are_used_up(tmp_path, monkeypatch):
+    """Not on Usenet is only true at the time it was looked for: the message says when,
+    and that this was the last automatic try."""
+    import dataclasses
+    from types import SimpleNamespace
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box), auto_retry_at=[0])
+    monkeypatch.setattr(inbox, "execute_run",
+                        lambda *a, **k: (_ for _ in ()).throw(Abort("no Usenet post could supply X")))
+    monkeypatch.setattr(inbox.lookup_mod, "find", lambda *a, **k: SimpleNamespace(
+        published=time.time() - 60, seeders=11, leechers=0, grabs=5, age_min=1))
+    monkeypatch.setattr(inbox, "POLL_SECONDS", 3600)
+    app.start_inbox()
+    try:
+        t = box / "Film.2026.1080p.WEB-GRP.torrent"
+        t.write_bytes(make_torrent("Film.2026.1080p.WEB-GRP", {"a.mkv": b"x" * 40000}))
+        old = time.time() - 60
+        os.utime(t, (old, old))
+        app.inbox.poll()
+        wait(lambda: app.inbox.items()[0]["status"] == "failed")
+        why = app.inbox.items()[0]["why"]
+        assert why.startswith("no Usenet post could supply X as of ")
+        assert why.endswith("; last automatic retry - now timed out") and "gave up" not in why
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_the_time_reads_as_the_jobs_list_shows_it():
+    t = time.mktime((2026, 11, 3, 2, 49, 0, 0, 0, -1))
+    assert inbox._when(t) == "3 Nov, 02:49"
 
 
 def test_a_stopped_automatic_torrents_downloads_are_kept_only_while_its_job_is_listed(tmp_path, monkeypatch):
@@ -598,6 +637,23 @@ def test_an_automatic_build_skips_what_the_tracker_posted_long_ago(tmp_path, mon
         job = next(j for j in app.jobs.values() if j.kind == "auto")
         wait(lambda: job.status == "done")
         assert job.result.startswith("skipped - ")              # a grey dot on the Jobs tab
+    finally:
+        clients.SEARCH_GATE = None
+
+
+def test_a_skipped_automatic_build_can_be_tried_again_once_the_rules_change(tmp_path, monkeypatch):
+    import dataclasses
+    block = [{"enabled": True, "name": "no films", "types": ["movie"]}]
+    app, searched, built = _aged_inbox(tmp_path, monkeypatch, time.time() - 3600, demand_block=block)
+    try:
+        wait(lambda: app.inbox.items()[0]["status"] == "skipped")
+        job = next(j for j in app.jobs.values() if j.kind == "auto")
+        wait(lambda: job.status == "done")
+        assert app.summary(job)["can_retry"]                    # Retry is offered on the Jobs tab
+        app.cfg = dataclasses.replace(app.cfg, demand_block=[])  # the rule that skipped it is gone
+        h = app.inbox.retryable_job(job.id)
+        app.inbox.retry(h)                                     # its .torrent comes back from .done
+        wait(lambda: built)
     finally:
         clients.SEARCH_GATE = None
 

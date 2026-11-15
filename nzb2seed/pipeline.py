@@ -33,7 +33,7 @@ from .ledger import Ledger
 from .pathmap import map_path
 from .report import ask as report_ask
 from .report import torrent as report_torrent
-from .report import check_cancel, end_progress, info, line, pieces, progress, step, warn
+from .report import check_cancel, end_progress, info, line, meter, pieces, progress, step, warn
 from .torrent import PieceVerifier, Torrent, parse
 
 STOPPED = {"pausedUP", "pausedDL", "stoppedUP", "stoppedDL", "error", "missingFiles"}
@@ -117,10 +117,17 @@ def search(cfg: Config, query: str, trackers: list[str] | None = None,
     """(torrents, NZBs) for the Build tab. ``trackers``: only these torrent indexers are
     searched (by name); ``torrents=False``: no tracker is searched at all - NZBs only."""
     pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
+    # a torrent's file name ("Film.2022.2160p...-Grp.mkv") is a fine search for the torrent,
+    # but no post on Usenet is named with the extension: Usenet is asked without it
+    bare = _FILE_EXT.sub("", query.strip())
     if torrents and not trackers:
         results = pr.search(query, cfg.indexer_ids, cfg.categories)
-        return ([r for r in results if r.protocol == "torrent"],
-                [r for r in results if r.protocol == "usenet"])
+        nzbs = [r for r in results if r.protocol == "usenet"]
+        if bare != query.strip():
+            seen = {r.guid for r in nzbs}
+            nzbs += [r for r in pr.search(bare, usenet_indexers(cfg, pr), cfg.categories)
+                     if r.protocol == "usenet" and r.guid not in seen]
+        return [r for r in results if r.protocol == "torrent"], nzbs
     found: list[Release] = []
     if torrents:
         by_name = {n.strip().lower(): i for i, n in pr.indexers() if n}
@@ -129,8 +136,11 @@ def search(cfg: Config, query: str, trackers: list[str] | None = None,
             raise ValueError("none of the chosen trackers is an enabled torrent indexer in Prowlarr")
         found = [r for r in pr.search(query, ids, cfg.categories) if r.protocol == "torrent"]
     usenet = usenet_indexers(cfg, pr)
-    nzbs = [r for r in pr.search(query, usenet, cfg.categories) if r.protocol == "usenet"]
+    nzbs = [r for r in pr.search(bare, usenet, cfg.categories) if r.protocol == "usenet"]
     return found, nzbs
+
+
+_FILE_EXT = re.compile(r"\.(?:mkv|mp4|avi|m4v|ts|m2ts|wmv|iso|torrent|nzb)$", re.I)
 
 
 def pair(cfg: Config, pr: Prowlarr, torrent: Release, nzbs: list[Release]
@@ -1088,9 +1098,13 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
     out: dict[str, tuple[str, dict]] = {}
     no_path_since: dict[str, float] = {}
     said = ""                     # the disk-space reason this job has already been told
+    sizes: dict[str, float] = {}  # MB each download holds, once SABnzbd says
+    last = None                   # (time, MB downloaded) at the previous look, for the speed
+    speed = None
     while len(out) < len(nzos):
         check_cancel()
         parts = []
+        got = 0.0
         for nzo, title in nzos.items():
             if nzo in out:
                 continue
@@ -1108,8 +1122,22 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
                 (info if status in SAB_DONE else warn)(msg)
             elif status.startswith("Queued:"):
                 parts.append(f"{slot.get('percentage', '?')}% {slot.get('timeleft', '')}".strip())
+                try:
+                    sizes[nzo] = float(slot.get("mb") or 0)
+                    got += sizes[nzo] - float(slot.get("mbleft") or 0)
+                except (TypeError, ValueError):
+                    pass
             else:
                 parts.append(status)
+        got += sum(sizes.get(n, 0.0) for n in out)
+        total = sum(sizes.values())
+        if total:
+            now = time.monotonic()
+            if last and now > last[0] and got >= last[1]:
+                v = (got - last[1]) * 1024 * 1024 / (now - last[0])
+                speed = v if speed is None else 0.6 * speed + 0.4 * v       # smoothed
+            last = (now, got)
+            meter(100 * got / total, speed, "downloading")
         if parts:
             # a job that cannot move because the disk guard paused the queue looks like a
             # stalled download; say which it is, in the log as well as the progress line,
@@ -1557,6 +1585,24 @@ def other_codec(target: str, title: str) -> bool:
     return bool(a and b and a != b)
 
 
+_EMPTY_NZB = re.compile(r"empty nzb|errno|i/o error|no space|permission denied|read-only", re.I)
+
+
+def fetch_failure_text(label: str, failures: list[tuple[str, str]]) -> str:
+    """Why a build found posts on Usenet but has none of them: no NZB could be fetched.
+    When indexers that have nothing to do with each other all hand SABnzbd an "empty"
+    NZB, it is SABnzbd that cannot store them (its folder unwritable, its disk full or
+    failing) - not the indexers, and not Usenet."""
+    indexers = sorted({i for i, _ in failures})
+    why = re.sub(r"^SABnzbd could not get the NZB from [^:]+: ", "", failures[-1][1]).split(" - its page")[0]
+    text = (f"SABnzbd could not fetch the NZBs for {label}: {len(failures)} post"
+            f"{'s' if len(failures) != 1 else ''} of it on Usenet ({', '.join(indexers)}), none fetched - {why}")
+    if len({i for i, m in failures if _EMPTY_NZB.search(m)}) > 1:
+        text += (" - every indexer at once, so SABnzbd itself is the likely cause: check that its "
+                 "download folder is writable and its disk has room and is working")
+    return text
+
+
 def usenet_indexers(cfg: Config, pr) -> list[int]:
     """The indexers a search for posts goes to: the Usenet ones (of those chosen in the
     config, if any) - a torrent tracker is never searched for a Usenet post."""
@@ -1629,6 +1675,14 @@ def size_verdict(need: Need, r: Release) -> tuple[str, bool]:
     return f"{ratio:.2f}× {what}", True
 
 
+def could_be(need: Need, r: Release) -> bool:
+    """Could ``r`` be the post by its name: not another release group, resolution or codec
+    than the torrent's file (a name that shows none of these - obfuscated - may be it)."""
+    group, res = group_of(r.title), _RES.findall(matching.norm(r.title))
+    return (not need.group or not group or of_group(r.title, need.group)) and \
+        (not need.res or not res or need.res in res) and not other_codec(need.target, r.title)
+
+
 GO_ON = Release("go on without it", "usenet", "", 0, 0, "go-on:", "", "", "", 0, None, None)
 
 
@@ -1642,11 +1696,7 @@ def ask_for_post(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release],
     offered as a choice too, and taken by itself when there is no post to offer; GO_ON
     is returned then."""
     tried_guids = {r.guid for r in tried}
-
-    def could_be(r: Release) -> bool:
-        group, res = group_of(r.title), _RES.findall(matching.norm(r.title))
-        return (not need.group or not group or of_group(r.title, need.group)) and             (not need.res or not res or need.res in res) and not other_codec(need.target, r.title)
-    possible = [r for r in usenet_results(cfg, pr, need, known) if r.guid not in tried_guids and could_be(r)]
+    possible = [r for r in usenet_results(cfg, pr, need, known) if r.guid not in tried_guids and could_be(need, r)]
     # a post whose size rules it out is not offered: it cannot hold the file
     results = [r for r in possible if size_verdict(need, r)[1]]
     if not results:
@@ -1882,6 +1932,9 @@ def _rank(pr: Prowlarr, t: Torrent, unit: Unit, rels: list[Release]) -> list[Rel
 
 
 AUTO_OTHERS_AT = 0.9     # stopped short with this much here, other trackers are looked at by themselves
+# only incomplete posts left: a build stops before the torrent client only when even this
+# share of what they lack is past the tracker's limit (what is missing is an estimate)
+HOLES_MARGIN = 1.5
 
 
 def finisher(cfg: Config, t: Torrent, tracker: str, seeders: int | None, short: int,
@@ -1982,6 +2035,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     partials: list[tuple[str, str]] = []        # (folder, title) of downloads that fell short
     pending: dict[str, tuple[Unit, Release]] = {}
     attempted: set[str] = set()                 # posts tried at any level of this build
+    # per unit: why each of its posts' NZBs could not be fetched, and whether any was -
+    # posts that are on Usenet but never reached SABnzbd say nothing about Usenet
+    unfetched: dict[int, list[tuple[str, str]]] = {}
+    fetched: set[int] = set()
     verdicts = verdicts_for(cfg)                 # ...and posts earlier runs found no good
 
     unsupplied: list = []                       # parts no post supplied, gone on without
@@ -2111,10 +2168,50 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
         pending[new] = (u, rel)
         return True
 
+    def holes_rule_out(u: Unit) -> str:
+        """Only incomplete posts of ``u`` are left: is the torrent past what its tracker lets
+        come over BitTorrent even at best? The reason to stop, or "" to go on - as it does
+        while the gaps may be small enough, while posts are left that could fill them (of
+        ``u``, or of its seasons or episodes), or when the tracker's limit is not set (you
+        are asked then)."""
+        from .config import limit_text, tracker_key, within_limit
+        tracker = _tracker_now()
+        if u.children or not tracker or not limit_set(cfg, tracker):
+            return ""
+        tried = {r.guid for r in u.tried} | attempted
+        if any(r.guid not in tried and could_be(u.need, r) and size_verdict(u.need, r)[1]
+               for r in usenet_results(cfg, pr, u.need, u.seeded)):
+            return ""
+        size = sum(f.length for f in u.files if f.relpath not in placed) or 1
+        shorts = [h[2] for h in u.holed]
+        # the incomplete posts together, at best: their gaps do not overlap
+        best = max(0, sum(shorts) - (len(shorts) - 1) * size)
+        best += sum(f.length for x in unsupplied for f in still_missing(x))
+        total = t.total_size or 1
+        if not best:
+            return ""
+        # what nzb2seed reckons missing is an estimate: only clearly too much stops here
+        seen = best / HOLES_MARGIN
+        trackers = [tracker]
+        if 1 - best / total >= AUTO_OTHERS_AT:       # the same release on another tracker could finish it
+            trackers += [x for x in cfg.nearly_auto_trackers or [] if tracker_key(x) != tracker_key(tracker)]
+        if any(within_limit(cfg, x, seen / total, int(seen), 0) for x in trackers):
+            return ""
+        posts = len(u.tried)
+        return (f"every post of {u.need.label} on Usenet is incomplete ({posts} tried) - even at best about "
+                f"{exact_gb(best)} ({best / total * 100:.1f}%) of the torrent would still be missing, more "
+                f"than {tracker} lets you download ({limit_text(cfg, tracker)}); not added to the torrent "
+                "client")
+
     def use_holed(u: Unit):
         """No complete post: build from everything downloaded - each file from a complete
         download when one has it, then from the incomplete ones, closest first. The piece
-        check (and the gaps nzb2seed finds itself) decides what still comes over BitTorrent."""
+        check (and the gaps nzb2seed finds itself) decides what still comes over BitTorrent.
+        Unless what they lack already rules that out: then the build stops here (Abort),
+        before anything is laid out or added to the torrent client."""
+        why = holes_rule_out(u)
+        if why:
+            raise Abort(why)
         u.holed.sort(key=lambda h: h[2])
         d, nzo, short = u.holed[0]
         mine = {f.relpath for f in u.files}
@@ -2376,6 +2473,8 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 if rel is None or rel is GO_ON:
                     if (opts.unattended or rel is GO_ON) and go_on_without(u):
                         return
+                    if unfetched.get(id(u)) and id(u) not in fetched:
+                        raise Abort(fetch_failure_text(u.need.label, unfetched[id(u)]))
                     raise Abort(f"no Usenet post could supply {u.need.label}")
             u.tried.append(rel)
             attempted.add(rel.guid)
@@ -2431,7 +2530,9 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 data = pr.fetch(rel)
             except ApiError as e:
                 warn(f"{rel.indexer}: {e}")
+                unfetched.setdefault(id(u), []).append((rel.indexer, str(e)))
                 continue
+            fetched.add(id(u))
             prev = earlier_post(cfg, sab, rel, data)
             if prev:
                 state, pnzo, pd, why = prev
@@ -3430,6 +3531,7 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     info(f"save path: {save_path}")
 
     step("Force recheck")
+    before = (qb.info(t.infohash) or {}).get("progress")
     qb.recheck(t.infohash)
 
     def piece_map(final=False):
@@ -3442,8 +3544,9 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     def tick(ti):
         check_cancel()
         progress(f"{ti.get('state')}: {ti.get('progress', 0) * 100:.1f}%")
+        meter(ti.get("progress", 0) * 100, None, "rechecking")
         piece_map()
-    tinfo = qb.wait_idle(t.infohash, on_tick=tick, min_wait=5)
+    tinfo = wait_recheck(qb, t.infohash, on_tick=tick, before=before)
     end_progress()
     piece_map(final=True)
     if tinfo.get("progress", 0) < 1 and retry_on and not retry.handed:
@@ -3498,8 +3601,9 @@ def _repair_after_recheck(qb, t: Torrent, res, owned, retry: "Retry", source_dir
         step(f"Checking again in qBittorrent - the rest is left to {retry.handed}")
     else:
         step("Checking again in qBittorrent")
+    before = (qb.info(t.infohash) or {}).get("progress")
     qb.recheck(t.infohash)
-    info_ = qb.wait_idle(t.infohash, on_tick=tick, min_wait=5)
+    info_ = wait_recheck(qb, t.infohash, on_tick=tick, before=before)
     end_progress()
     return info_
 
@@ -3543,9 +3647,10 @@ def local_release(t: Torrent, path: str) -> Release:
 
 
 def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[Release]],
-                torrent_data: bytes | None = None) -> dict:
+                torrent_data: bytes | None = None, reused: str = "") -> dict:
     """Everything after the releases have been chosen. ``torrent_data``: a .torrent the
-    user supplied, used instead of downloading one."""
+    user supplied, used instead of downloading one - or, with ``reused`` (its path), the one
+    this build downloaded before a restart cut it off."""
     sab = SABnzbd(cfg.sab_url, cfg.sab_key)
     _this_build.aborted = []
     _this_build.abort_holds = set()
@@ -3557,7 +3662,7 @@ def execute_run(cfg: Config, opts: Options, tor_rel: Release, groups: list[list[
     _sweep_peeks(cfg, sab)              # a build starting: what a restart left behind
     metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)   # srrDB, for scene releases
     try:
-        return _execute_run(cfg, opts, pr, sab, qb, tor_rel, groups, torrent_data)
+        return _execute_run(cfg, opts, pr, sab, qb, tor_rel, groups, torrent_data, reused)
     finally:
         pr.close()                      # paused NZB-check jobs of posts not used
         _sweep_peeks(cfg, sab)          # a build ending: its torrent is complete, or given up on
@@ -3577,9 +3682,36 @@ def _sweep_peeks(cfg: Config, sab: SABnzbd):
         info(f"removed {jobs} finished peek job(s) and {gb(freed)} they left on disk")
 
 
+def wait_recheck(qb, infohash: str, on_tick=None, before: float | None = None,
+                 clock=time.monotonic, sleep=time.sleep) -> dict:
+    """Wait for the recheck just asked of qBittorrent to finish; its final info.
+
+    qBittorrent can take a while to start checking a big torrent on a busy machine - and
+    until it does, the torrent sits stopped at its old progress, which looks just like a
+    finished check (a 77 GB torrent read as "0% here"). So first wait for the check to be
+    seen - a checking state, or the progress moving - for up to 3 s per GB (3 minutes at
+    most; nothing for a small one), then for it to end."""
+    from .clients import CHECKING
+    t = qb.info(infohash) or {}
+    size = t.get("total_size") or t.get("size") or 0
+    grace = min(180.0, 3.0 * size / 1024 ** 3)
+    start, was = clock(), t.get("progress") if before is None else before
+    while clock() - start < grace:
+        if on_tick:
+            on_tick(t)
+        if t.get("state") in CHECKING or t.get("progress") != was:
+            break
+        sleep(1.5)
+        t = qb.info(infohash) or {}
+    return qb.wait_idle(infohash, min_wait=5, **({"on_tick": on_tick} if on_tick else {}))
+
+
 def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor_rel: Release,
-                 groups: list[list[Release]], torrent_data: bytes | None) -> dict:
-    if torrent_data is not None:
+                 groups: list[list[Release]], torrent_data: bytes | None, reused: str = "") -> dict:
+    if torrent_data is not None and reused:
+        step(f"Using the .torrent from {tor_rel.indexer} downloaded before the restart")
+        t, path = save_torrent(cfg, torrent_data)
+    elif torrent_data is not None:
         step(f"Using .torrent file {tor_rel.indexer}")
         t, path = save_torrent(cfg, torrent_data)
     else:

@@ -21,16 +21,17 @@ export function useOptions(assemble = false) {
   return [opts, setOpts];
 }
 
-export function Options({ value, onChange, assemble = false }) {
+/* matchTorrent: no post-processing choice - the build matches the torrent (the tracker list tab) */
+export function Options({ value, onChange, assemble = false, matchTorrent = false }) {
   const set = (k) => (e) => onChange({ ...value, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value });
   const check = (k, label, title) => html`
     <label class="check" title=${title}><input type="checkbox" checked=${!!value[k]} onChange=${set(k)} />${label}</label>`;
   return html`
-    <label>SABnzbd <select aria-label="SABnzbd post-processing" value=${value.pp} onChange=${set("pp")}>
+    ${!matchTorrent && html`<label>SABnzbd <select aria-label="SABnzbd post-processing" value=${value.pp} onChange=${set("pp")}>
       <option value="auto">Match the torrent</option>
       <option value="repair">+Repair</option>
       <option value="unpack">+Repair/Unpack</option>
-    </select></label>
+    </select></label>`}
     ${check("local_verify", "Hash pieces here first")}
     ${check("retry_bad", "Try other posts if pieces fail",
       "If pieces fail the check, download other posts of the same release until every piece verifies (needs hashing, which it switches on)")}

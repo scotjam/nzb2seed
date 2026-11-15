@@ -20,9 +20,9 @@ export const STEPS = [
   { tab: "jobs", title: "3. Jobs: watch it happen",
     text: "Every build is a job, with its steps, its log and a piece map. A build that ends a little " +
           "short stays stopped in qBittorrent, and the job says how short and what you can do." },
-  { tab: "seasons", title: "4. Seasons and Assemble: other ways in",
-    text: "Seasons grabs a season or a whole series from Usenet without a torrent. Assemble builds a " +
-          "torrent you already have from files you have already downloaded." },
+  { tab: "tracklist", title: "4. Torrent list 2 Seed: a whole list at once",
+    text: "Paste in a list of torrent names from your favourite tracker. Each is searched for on Usenet, " +
+          "and only the ones Usenet has are downloaded from the tracker and built." },
   { tab: "auto", title: "5. Automatic: hands-off builds",
     text: "Link autobrr, and the releases its filters catch are built from Usenet by themselves, " +
           "instead of being downloaded over BitTorrent. Not much of a library yet? This is a good way to " +
@@ -33,7 +33,10 @@ export const STEPS = [
           "the tracker has as the very same release are seeded straight away, the rest are built within a " +
           "daily budget - more seeding size, ratio and bonus points from shows you already own. Nothing in " +
           "your library is swapped or deleted without your approval." },
-  { tab: "demand", title: "7. Demand: what pays for its space",
+  { tab: "assemble", title: "7. Assemble: from your drive or Usenet",
+    text: "Have a .torrent and its files already? Assemble arranges them into a seed, downloading only " +
+          "what is missing. No torrent? Grab a season or a whole series from Usenet instead." },
+  { tab: "demand", title: "8. Demand: what pays for its space",
     text: "How much your seeding returns per GB stored, suggestions drawn from it, and rules that decide " +
           "what automatic builds do first - or never." },
   { tab: "help", title: "That's it",

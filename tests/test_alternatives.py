@@ -584,6 +584,33 @@ def test_with_no_other_post_the_incomplete_one_is_still_used(tmp_path):
     assert dirs == [os.path.join(str(tmp_path), f"{sab.added[0]}.1")]      # the piece check does the rest
 
 
+def holed_on(tmp_path, percent, holed=(1,), posts=1):
+    """The holed film on a tracker that lets ``percent`` of a torrent be downloaded; each
+    post comes down with the same 15% of it missing."""
+    film, video, t, cfg = holed_film(tmp_path)
+    cfg.nearly_limits = [{"tracker": "TrackerOne", "percent": percent}]
+    pipeline._this_build.tracker = "TrackerOne"
+    rels = [rel(film.replace(" ", ".") + ("" if i == 0 else f"-x{i}"), len(video) + 900 + i, f"holed{i}",
+                indexer="idx1") for i in range(posts)]
+    sab = HoledSAB(str(tmp_path), video, holed=set(holed))
+    return lambda: pipeline.usenet_single(cfg, pipeline.Options(unattended=True), NoOtherPosts(), sab, t, rels, 2)
+
+
+def test_an_incomplete_post_past_the_trackers_limit_never_reaches_the_torrent_client(tmp_path):
+    with pytest.raises(pipeline.Abort) as e:
+        holed_on(tmp_path, 2)()
+    assert "not added to the torrent client" in str(e.value) and "TrackerOne lets you download" in str(e.value)
+
+
+def test_an_incomplete_post_within_the_trackers_limit_goes_on(tmp_path):
+    assert holed_on(tmp_path, 30)()[0]
+
+
+def test_incomplete_posts_that_could_fill_each_others_gaps_go_on(tmp_path):
+    # 15% missing from each of two posts: together they might hold all of it
+    assert holed_on(tmp_path, 2, holed=(1, 2), posts=2)()[0]
+
+
 def test_a_download_its_repair_data_checked_is_not_scanned(tmp_path):
     assert pipeline.repaired({"stage_log": [{"name": "Repair", "actions": ["[x] Quick Check OK"]}]})
     assert not pipeline.repaired({"stage_log": [{"name": "Source", "actions": ["No par2 sets"]}]})
@@ -835,3 +862,35 @@ def test_a_show_named_with_season_n_ends_before_it():
     for post in ("show.2020.season.1.s01.1080p", "show.[2020].season.1.s01.[1080p", "show.2020.s01.1080p"):
         assert pipeline.same_show(post, show)
     assert pipeline.show_prefix("Show.S02E03.1080p-GRP") == "show."
+
+
+class NZBsUnfetched(NZBsOK):
+    """SABnzbd cannot store any NZB of S03E02 (its download disk gone read-only, say)."""
+
+    def fetch(self, r):
+        if "S03E02" in r.title:
+            from nzb2seed.clients import ApiError
+            raise ApiError(f"SABnzbd could not get the NZB from {r.indexer}: URL Fetching failed; "
+                           f"Empty NZB file {r.title}.nzb - its page: https://indexer.example/details/x")
+        return super().fetch(r)
+
+
+def test_posts_whose_nzbs_could_not_be_fetched_are_not_reported_as_missing_from_usenet(tmp_path, monkeypatch):
+    """The posts are on Usenet; SABnzbd could not get their NZBs - the build says that, not
+    that no post could supply the episode."""
+    cfg, sab, t, picked = _no_e02(tmp_path, monkeypatch, percent=10)
+    with pytest.raises(Abort) as e:
+        pipeline.plan_and_fetch(cfg, pipeline.Options(unattended=True), NZBsUnfetched(), sab, t, t.name,
+                                [r for g in picked for r in g], 2)
+    msg = str(e.value)
+    assert msg.startswith("SABnzbd could not fetch the NZBs for S03E02") and "no Usenet post" not in msg
+    assert "Empty NZB file" in msg and "its page" not in msg
+
+
+def test_empty_nzbs_from_several_indexers_point_at_sabnzbd():
+    fail = lambda i: (i, f"SABnzbd could not get the NZB from {i}: URL Fetching failed; Empty NZB file X.nzb")
+    one = pipeline.fetch_failure_text("X", [fail("IndexerA")])
+    assert "SABnzbd itself" not in one and "1 post of it on Usenet (IndexerA)" in one
+    many = pipeline.fetch_failure_text("X", [fail("IndexerA"), fail("IndexerB"),
+                                             ("IndexerC", "IndexerC refused the NZB - usually its limit")])
+    assert "SABnzbd itself is the likely cause" in many and "3 posts" in many

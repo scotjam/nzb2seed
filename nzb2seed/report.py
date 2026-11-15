@@ -105,6 +105,14 @@ def end_progress():
     sink().end_progress()
 
 
+def meter(pct: float | None, speed: float | None = None, what: str = ""):
+    """How far the stage under way is, 0-100 (None: no measure), and how fast it goes in
+    bytes a second - shown as a progress bar. Sinks that do not show one ignore it."""
+    fn = getattr(sink(), "meter", None)
+    if fn:
+        fn(pct, speed, what)
+
+
 def pieces(states: str):
     """Piece map: one char per piece - '.' unchecked, '#' verified, 'x' failed."""
     sink().pieces(states)

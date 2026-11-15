@@ -706,7 +706,8 @@ def test_hook_saves_holds_and_restores(tmp_path):
     hk.tick(busy=True)
     assert not out.exists()
     hk.tick(busy=False)
-    assert out.read_text().strip() == f"{h} Show S01" and hk.data["queue"] == []
+    # Windows' echo keeps the quotes; a Linux shell drops them
+    assert out.read_text().strip().strip('"') == f"{h} Show S01" and hk.data["queue"] == []
     assert hk.received("nope", busy=False) == "not an infohash"
     assert hk.restore() == "restored"
     assert q.prefs["autorun_program"] == original and q.prefs["autorun_enabled"] is True

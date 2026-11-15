@@ -37,13 +37,15 @@ from .clients import ApiError
 from .pipeline import Abort, Incomplete, Options, execute_run, local_release
 from .usenet_odds import odds_for
 from .report import Cancelled, check_cancel, info, step, warn
+from .report import sink as report_sink
+from .slots import FairSlots
 from .torrent import TorrentError, parse
 
 POLL_SECONDS = 20
 STALE_HOURS = 24    # a torrent not yet building by then is stopped (it can still be tried again)
 QUEUE, DONE, FAILED = ".queue", ".done", ".failed"
 # a build that ended like this may work later, once the post is on Usenet
-_NOT_YET = re.compile(r"no Usenet post could supply|nothing was downloaded|none found|"
+_NOT_YET = re.compile(r"no Usenet post could supply|could not fetch the NZBs|nothing was downloaded|none found|"
                       r"do not contain every file|no other .* posts? of", re.I)
 
 _auto = threading.local()                       # set in automatic jobs' threads
@@ -141,6 +143,12 @@ def _ago(seconds: float) -> str:
     return "moments"
 
 
+def _when(t: float) -> str:
+    """ "13 Nov, 02:49" - as the Jobs list shows when a job started."""
+    lt = time.localtime(t)
+    return f"{lt.tm_mday} {time.strftime('%b, %H:%M', lt)}"
+
+
 def next_try(cfg, first_seen: float, now: float) -> float | None:
     """When to look for the release's post again: the next of ``auto_retry_at`` (minutes
     after the torrent arrived) still to come - None once they are all past."""
@@ -181,7 +189,7 @@ class Inbox:
         self.state = State(state_path)
         self.budget = Budget(lambda: self.app.cfg.auto_searches_per_hour)
         clients.SEARCH_GATE = self.budget
-        self.slots = threading.Semaphore(1)
+        self.slots = FairSlots(1)
         self.slot_count = 1
         self.running: dict[str, int] = {}       # infohash -> job id
         self._said_full = False                 # so the disk warning is said once
@@ -207,7 +215,7 @@ class Inbox:
         folder = cfg.auto_folder
         os.makedirs(os.path.join(folder, QUEUE), exist_ok=True)
         if cfg.auto_parallel != self.slot_count:
-            self.slots = threading.Semaphore(max(1, int(cfg.auto_parallel)))
+            self.slots.resize(max(1, int(cfg.auto_parallel)))
             self.slot_count = cfg.auto_parallel
         for n in sorted(os.listdir(folder)):
             p = os.path.join(folder, n)
@@ -380,8 +388,15 @@ class Inbox:
                     raise Cancelled("stopped")
                 _sleep(wait)
             info("waiting for a free build slot" if self.slot_count > 1 else "waiting for the build slot")
-            while not self.slots.acquire(timeout=5):
-                check_cancel()
+            # in line newest torrent first: the tracker's posting time, or when it arrived here
+            posted = (rel.published if rel.published else None) or it.get("first_seen") or time.time()
+            place = self.slots.enter(getattr(report_sink(), "job", None), rank=-posted)
+            try:
+                while not self.slots.take(place, timeout=5):
+                    check_cancel()
+            except BaseException:
+                self.slots.leave(place)
+                raise
             attempts = it.get("attempts", 0) + 1
             if not self.state.move_on(h, status="building", attempts=attempts):
                 self.slots.release()        # stopped while it waited: never starts building
@@ -409,18 +424,24 @@ class Inbox:
                 # minutes either: the quick retries are for fresh ones on their way
                 age = time.time() - rel.published if rel.published else None
                 old = age is not None and age > max(3600, wait_seconds(cfg))
+                # not on Usenet is only true as of now: the post may still be coming
+                if _NOT_YET.search(why):
+                    why = f"{why} as of {_when(time.time())}"
                 if _NOT_YET.search(why) and old:
-                    warn(f"the tracker posted it {_ago(age)} ago - if it is not on Usenet by "
-                         "now, a few more minutes will not change that; not trying again")
+                    why += (f"; the tracker posted it {_ago(age)} ago - if it is not on Usenet "
+                            "by now, a few more minutes will not change that, so no more retries")
                 elif _NOT_YET.search(why) and nxt is not None:
-                    warn(f"not complete from Usenet yet ({why}) - trying again at "
-                         f"{time.strftime('%H:%M', time.localtime(nxt))}")
+                    warn(f"{why}; will retry at {time.strftime('%H:%M', time.localtime(nxt))}")
                     if not self.state.move_on(h, status="waiting", next_try=nxt, why=why):
                         raise Cancelled("stopped") from None
                     continue
+                elif _NOT_YET.search(why):
+                    why += "; last automatic retry - now timed out"
+                else:
+                    why = f"gave up: {why}"
                 self.state.update(h, status="failed", why=why)
                 self._move(it["file"], FAILED)
-                raise Abort(f"gave up: {why}") from None
+                raise Abort(why) from None
             finally:
                 self.slots.release()
             self.state.update(h, status="done", why=out.get("result", "done"))
@@ -470,9 +491,10 @@ class Inbox:
 
     def retryable_job(self, job_id: int) -> str | None:
         """The torrent an automatic job was building, if that job was its last and it ended
-        without a result - so Try again on the Jobs tab can do what it does here."""
+        without a result, or was skipped (a rule, the age limit - which may have changed since)
+        - so Try again on the Jobs tab can do what it does here."""
         for h, it in self.state.items.items():
-            if it.get("job") == job_id and it.get("status") == "failed" and h not in self.running:
+            if it.get("job") == job_id and it.get("status") in ("failed", "skipped") and h not in self.running:
                 return h
         return None
 
@@ -482,10 +504,11 @@ class Inbox:
         it = self.state.items.get(h)
         if not it or h in self.running:
             raise ValueError("nothing to retry")
-        failed = os.path.join(self.app.cfg.auto_folder, FAILED, os.path.basename(it["file"]))
-        if not os.path.exists(it["file"]) and os.path.exists(failed):
-            os.makedirs(os.path.dirname(it["file"]), exist_ok=True)
-            shutil.move(failed, it["file"])
+        for where in (FAILED, DONE):                  # failed, or skipped
+            moved = os.path.join(self.app.cfg.auto_folder, where, os.path.basename(it["file"]))
+            if not os.path.exists(it["file"]) and os.path.exists(moved):
+                os.makedirs(os.path.dirname(it["file"]), exist_ok=True)
+                shutil.move(moved, it["file"])
         old = self.app.jobs.get(it.get("job") or -1)
         self.state.update(h, status="queued", first_seen=time.time(), next_try=0, why="", stopped=False,
                           whole_posts=whole_posts, full_posts=full_posts)

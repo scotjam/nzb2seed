@@ -361,6 +361,7 @@ def _copy_across(src: str, dst: str, progress=None, remove_src: bool = True):
 
 # who the torrent client runs as (uid, gid), from config file_owner; None = unknown
 OWNER: tuple[int, int] | None = None
+POSIX = os.name != "nt"                  # file owners and group permissions: not on Windows
 
 
 def parse_owner(text: str) -> tuple[int, int] | None:
@@ -389,7 +390,7 @@ def shareable(path: str):
     qBittorrent. So it goes to the torrent client's user (file_owner) when that is set, and
     is always writable by its group. Never used on hard links to someone else's file -
     that would change their original too."""
-    if os.name == "nt":
+    if not POSIX:
         return
     try:
         st = os.lstat(path)

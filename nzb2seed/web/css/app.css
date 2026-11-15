@@ -156,6 +156,7 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .joblist .jrow.picked { background: var(--usenet-soft); }
 .joblist .jrow > input { margin-top: 3px; }
 .joblist .jmain { cursor: pointer; min-width: 0; }
+.joblist .jmain .w { color: var(--ink-2); font-size: .78rem; }
 .joblist .jmain:focus-visible { outline: 2px solid var(--usenet); outline-offset: 2px; }
 .joblist .jrow .jretry { grid-column: 2; }
 .jobside { min-width: 0; }
@@ -165,6 +166,9 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .jobbar .jbrow { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex-basis: 100%; }
 .jobbar .jbrow b { font-size: .86rem; min-width: 4.2em; }
 .jobbar .jsearch { flex: 1 1 12em; min-width: 0; max-width: 22em; }
+.jtrk { font-size: .78rem; font-weight: 600; padding: 1px 6px; border-radius: 8px; background: var(--torrent-soft);
+        color: var(--torrent); white-space: nowrap; word-break: normal; vertical-align: middle; }
+.job h2 .jtrk { font-size: .8rem; }
 .jrow .via { font-size: .78rem; font-weight: 600; padding: 1px 6px; border-radius: 8px; background: var(--usenet-soft); }
 .joblist .t { font-weight: 700; word-break: break-all; line-height: 1.3; }
 .joblist .s { font-size: .86rem; color: var(--ink-2); }
@@ -212,6 +216,7 @@ table.limits tr.limitnote td { padding-top: 0; padding-bottom: 8px; border-botto
 .job .top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
 .job h2 { word-break: break-all; font-size: 1.2rem; }
 .job .result { margin: 4px 0 0; color: var(--ink-2); }
+.job .when { margin: 2px 0 0; color: var(--ink-2); font-size: .82rem; }
 .job .result.done { color: var(--ok); font-weight: 700; }
 .job .result.failed { color: var(--bad); }
 
@@ -494,3 +499,51 @@ nav a.tour-here { outline: 2px solid var(--torrent); outline-offset: 2px; }
 .trackorder li .tick { width: 1em; }
 .trackorder li .btn { padding: 2px 8px; min-width: 2em; }
 .trackorder.rest { opacity: .8; border-top: 1px dashed var(--line, #8884); padding-top: 4px; }
+
+/* File list to seeds */
+.tlist { margin-top: 22px; display: grid; gap: 12px; }
+.tlist table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+.tlist th, .tlist td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+.tlist th { color: var(--ink-2); font-weight: 600; }
+.tlist .tname { word-break: break-all; font-family: var(--mono); font-size: .85rem; }
+.tlist .tname small { display: block; color: var(--ink-2); }
+.tlist tr.good td:last-child { color: var(--usenet); }
+.tlist tr.poor td:last-child { color: var(--ink-2); }
+.tpreview ul { list-style: none; margin: 6px 0 0; padding: 0; max-height: 320px; overflow-y: auto;
+               border: 1px solid var(--rule); border-radius: 8px; }
+.tpreview li { padding: 4px 10px; border-bottom: 1px solid var(--rule); font-family: var(--mono); font-size: .85rem; word-break: break-all; }
+.tpreview li:last-child { border-bottom: 0; }
+.tpreview p { margin: 0; }
+.tpreview .tpick { margin-top: 6px; }
+.tpreview .tpick .btn { padding: 4px 12px; font-size: .88rem; }
+.form .thelp { display: block; margin-top: -10px; max-width: 720px; line-height: 1.4; }
+.tqhead { margin: 26px 0 10px; }
+.tqueue { background: var(--sheet); border: 1px solid var(--rule); border-radius: 10px; padding: 12px 16px; margin-bottom: 12px; max-width: 880px; }
+.tqueue > summary { cursor: pointer; line-height: 1.5; }
+.tqueue > .actions { margin: 10px 0; }
+.trows { list-style: none; margin: 0; padding: 0; }
+.trows > li { display: grid; grid-template-columns: 22px 1fr; gap: 8px; padding: 8px 0; border-top: 1px solid var(--rule); }
+.trows > li > div:only-child { grid-column: 2; }
+.trows .tname { word-break: break-word; font-family: var(--mono); font-size: .85rem; }
+.trows .tname small { display: block; color: var(--ink-2); }
+.trows .tmeta { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: .88rem; color: var(--ink-2); margin-top: 2px; }
+.trows li.good .verdict { color: var(--usenet); }
+.tpreview .tadded { margin-left: 6px; padding: 0 6px; border-radius: 6px; background: var(--usenet-soft); color: var(--ink-2); font-family: inherit; }
+
+/* a checkbox that cannot be used yet (Torrent list 2 Seed: auto build with no tracker) */
+.check.disabled { opacity: .5; cursor: not-allowed; }
+
+/* Jobs: active, queued (in start order) and ended, with automatic builds marked in a column */
+.joblist .jrow { grid-template-columns: 22px 38px 1fr; }
+.joblist .jrow .jretry { grid-column: 3; }
+.joblist .jauto { font-size: .72rem; font-weight: 700; margin-top: 3px; color: var(--ink-2); }
+.joblist .jauto.on { color: var(--usenet); }
+.joblist .jsec { padding: 6px 12px; background: var(--slate); border-bottom: 1px solid var(--rule);
+  font-size: .82rem; position: sticky; top: 0; z-index: 1; }
+.joblist .jsec small { color: var(--ink-2); font-weight: 400; }
+
+/* Jobs: progress of the stage under way */
+.joblist .jmeter { display: flex; align-items: center; gap: 8px; margin: 3px 0 1px; }
+.joblist .jmeter .bar { flex: 1; max-width: 260px; height: 6px; border-radius: 3px; background: var(--idle); overflow: hidden; }
+.joblist .jmeter .bar i { display: block; height: 100%; background: var(--usenet); transition: width .6s; }
+.joblist .jmeter small { color: var(--ink-2); font-size: .76rem; white-space: nowrap; }

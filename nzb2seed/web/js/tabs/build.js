@@ -253,6 +253,8 @@ export function BuildTab({ active }) {
   };
 
   return html`
+    <h1>Build</h1>
+    <p class="lede">Find a torrent and matching nzbs so Usenet downloads can be used to build a torrent seed.</p>
     <form class="search" onSubmit=${search}>
       <input type="text" ref=${queryRef} placeholder="Release name, e.g. Show.S01.1080p.BluRay.x264-GRP" autocomplete="off" aria-label="Search Prowlarr" />
       <button class="btn primary" disabled=${s.searching}>${s.searching ? "Searching…" : "Search"}</button>

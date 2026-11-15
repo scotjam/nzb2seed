@@ -3,10 +3,10 @@
 import { html, useEffect, useLayoutEffect, useRef, useState } from "../lib.js";
 import { api, onChange } from "../api.js";
 import { backToJobs, jobs, jobScreen, limitSet, nearlyLimitText, openJob, openJobId, setTrackerLimit, settings, shortEnough, toast, trackerLimit, useStore } from "../store.js";
-import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName } from "../util.js";
+import { age, filterMatch, havePct, linked, missText, remember, keep, sortBy, trackerName, when } from "../util.js";
 import { SortSelect } from "../components/sort.js";
 import { LimitNote, LimitPick, limitWarning } from "../components/limitpick.js";
-import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, trackersOf, viaTracker } from "./jobs-rules.js";
+import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, skippedAuto, trackerLabel, trackersOf, viaTracker } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
 import { addFromTrackers, addToClient, cancelMany, clearAndDelete, fullPosts, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
@@ -46,15 +46,43 @@ export function JobsTab({ active }) {
           delete files removes them; Clear from list, keep files leaves them in your Usenet downloads folder.</p>
         <${MendLog} />
         <div class="joblist" id="joblist">
-          ${shown.length ? shown.map(j => html`
-            <${JobRow} key=${j.id} j=${j} all=${all} on=${picked.has(j.id)} via=${picked.get(j.id)} current=${j.id === current}
-              tick=${tick} />`)
+          ${shown.length ? SECTIONS.map(([key, label, note]) => {
+            const rows = sections(shown)[key];
+            return rows.length > 0 && html`
+              <div class="jsec"><b>${label} (${rows.length})</b>${note && html` <small>${note}</small>`}</div>
+              ${rows.map(j => html`<${JobRow} key=${j.id} j=${j} all=${all} on=${picked.has(j.id)} via=${picked.get(j.id)}
+                current=${j.id === current} tick=${tick} />`)}`;
+          })
           : html`<div class="empty">${all.length ? "No jobs match this filter." : "No builds yet. Start one from Build."}</div>`}
         </div>
       </div>
       ${current != null && html`<${JobView} id=${current} />`}
     </div>`;
 }
+
+/* The list in three parts: what is building now; what waits, in the order it will start
+   (builds you started go in the order added, automatic ones newest torrent first - each
+   line has its own slots); and what has ended. */
+const SECTIONS = [
+  ["active", "Active", ""],
+  ["queued", "Queued", "next to start at the top"],
+  ["ended", "Completed and failed", ""],
+];
+const stageOf = (j) => j.queue || j.next_try ? "queued" : isLive(j) ? "active" : "ended";
+function sections(list) {
+  const out = { active: [], queued: [], ended: [] };
+  for (const j of list) out[stageOf(j)].push(j);
+  // a place in a line first (the two lines start side by side: #1 of each, then #2...),
+  // then automatic builds waiting to look for their post again, soonest first
+  out.queued.sort((a, b) => (a.queue ? 0 : 1) - (b.queue ? 0 : 1) || (a.place || 0) - (b.place || 0)
+    || (a.queue === "build" ? 0 : 1) - (b.queue === "build" ? 0 : 1) || (a.next_try || 0) - (b.next_try || 0));
+  return out;
+}
+const ago = (t) => {
+  const s = Math.max(0, Date.now() / 1000 - t);
+  return s < 3600 ? `${Math.round(s / 60)} min ago` : s < 172800 ? `${Math.round(s / 3600)} hours ago` : `${Math.round(s / 86400)} days ago`;
+};
+const at = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 /* What mend did lately - torrents it finished or started, and the ones it left alone and
    why (a cross-eyed job, no room for a copy of their own...) - newest first */
@@ -67,7 +95,6 @@ function MendLog() {
   }, []);
   if (!log.length) return null;
   const waiting = /left alone|not started|not used|did not answer/;
-  const when = (t) => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   return html`
     <details class="log mendlog">
       <summary>Mend: what it finished, started or left alone (${log.length} recent)</summary>
@@ -128,18 +155,35 @@ function JobBar({ all, shown, ticked, picked, kind, counts, choose, select, unti
 
 function JobRow({ j, all, on, via, current, tick }) {
   const open = () => openJob(j.id);
-  const says = j.status === "waiting" ? "Waiting for you: pick an NZB"
+  const auto = j.kind === "auto";
+  const says = j.queue ? `#${j.place} in the ${j.queue === "auto" ? "automatic" : "build"} queue`
+      + (j.posted ? ` - torrent posted ${ago(j.posted)}` : "")
+    : j.next_try ? `waiting to look for its post again at ${at(j.next_try)}`
+    : j.status === "waiting" ? "Waiting for you: pick an NZB"
     : j.status === "running" ? (j.steps.at(-1) || "Starting") : (j.result || j.status);
   return html`
     <div class=${"jrow" + (on ? " picked" : "")} aria-current=${String(current)}>
       <input type="checkbox" checked=${on} aria-label=${"Tick " + j.title} onChange=${(e) => tick(j.id, e.target.checked)} />
+      <span class=${"jauto" + (auto ? " on" : "")} title=${auto ? "An automatic build, from autobrr" : "A build you started"}>${auto ? "Auto" : ""}</span>
       <div class="jmain" role="button" tabindex="0" onClick=${open}
         onKeyDown=${(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}>
-        <div class="t"><span class=${"dot " + dotOf(j)}></span>${j.title}${via && html` <span class="via">via ${trackerName(via.indexer)}</span>`}</div>
+        <div class="t"><span class=${"dot " + dotOf(j)}></span>${j.title.replace(/^auto:\s*/i, "")}${trackerLabel(j) && html` <span class="jtrk">${trackerLabel(j)}</span>`}${via && html` <span class="via">via ${trackerName(via.indexer)}</span>`}</div>
         <div class="s">${says}</div>
+        ${j.meter && !j.queue && html`<${Meter} m=${j.meter} />`}
+        ${j.started > 0 && html`<div class="w">started ${when(j.started)}</div>`}
       </div>
-      ${(BADLY_ENDED.includes(j.status) || j.extra?.settled?.length > 0) && html`<${JobActions} j=${j} all=${all} />`}
+      ${(BADLY_ENDED.includes(j.status) || skippedAuto(j) || j.extra?.settled?.length > 0) && html`<${JobActions} j=${j} all=${all} />`}
     </div>`;
+}
+
+/* how far the stage under way is - downloading from Usenet, or qBittorrent's recheck */
+const speedText = (b) => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB/s` : `${Math.round(b / 1024)} KB/s`;
+function Meter({ m }) {
+  return html`<div class="jmeter" title=${`${m.what} ${m.pct}%`}>
+    <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow=${m.pct}
+      aria-label=${m.what}><i style=${`width:${m.pct}%`}></i></div>
+    <small>${m.pct.toFixed(1)}% ${m.what}${m.speed ? ` · ${speedText(m.speed)}` : ""}</small>
+  </div>`;
 }
 
 /* a span with a button's role: a row's actions sit inside the row, and a button cannot
@@ -235,7 +279,7 @@ function JobActions({ j, all }) {
         title=${`Only small files were missing from ${wholePostsText(x).names}, so no other whole post was downloaded for them. Build it again trying whole posts - about ${wholePostsText(x).post} or more - to see if they hold the rest.`}
         onPress=${() => wholePosts(j)} />`}
       ${j.retried_as ? html`<small class="status">tried again as job ${j.retried_as}</small>`
-        : j.can_retry && BADLY_ENDED.includes(j.status) && (starting ? html`<small class="status">starting again...</small>`
+        : canRetry(j) && (starting ? html`<small class="status">starting again...</small>`
           // the button goes the moment it is pressed, so it cannot be pressed twice
           : html`<${Act} label="Retry" title="Run it again, exactly as it was started"
               onPress=${() => { setStarting(true); retryJob(j); }} />`)}
@@ -293,7 +337,8 @@ function JobView({ id }) {
     <div class="job" id="job">
       <div class="top">
         <div><button type="button" class="btn jback" onClick=${backToJobs}>← All jobs</button>
-          <h2>${job.title}</h2><p class=${"result " + job.status}>${result}</p></div>
+          <h2>${job.title}${trackerLabel(job) && html` <span class="jtrk">${trackerLabel(job)}</span>`}</h2><p class=${"result " + job.status}>${result}</p>
+          ${job.started > 0 && html`<p class="when">Started ${when(job.started)}</p>`}</div>
         ${isLive(job) && html`<button class="btn danger" onClick=${cancel}>Cancel build</button>`}
       </div>
       <${PieceMap} pieces=${job.pieces} />

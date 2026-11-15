@@ -9,6 +9,8 @@ export const age = (d) => {
   const days = Math.floor((Date.now() - t) / 864e5);
   return days < 1 ? "today" : days + " days old";
 };
+/* a time in seconds since 1970 as "10 Nov, 08:32" - "" for none */
+export const when = (t) => t ? new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
 /* a release name compared loosely: case, dots, spaces and underscores do not matter */
 export const norm = (s) => s.trim().toLowerCase().replace(/[\s._]+/g, ".").replace(/\.?-\.?/g, "-").replace(/^\.|\.$/g, "");
 export const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;

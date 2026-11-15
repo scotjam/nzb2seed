@@ -4,31 +4,32 @@ import { html } from "../lib.js";
 import { startTour } from "../components/tour.js";
 
 const TABS = [
-  { id: "build", name: "Build", does:
-      "Turns one torrent into files from Usenet. Search Prowlarr (or upload a .torrent), tick it, check the " +
-      "NZBs nzb2seed suggests on the right - or pick your own - and build.",
-    use: "A release you want to seed and that was also posted to Usenet. Several torrents can be ticked " +
-         "and built one after another." },
   { id: "jobs", name: "Jobs", does:
       "Every build, past and running: its steps, its log and a piece map showing which parts of the " +
       "torrent are there. Failed or short builds say why and offer what can be done next.",
     use: "Following a build, finding out why one stopped short, retrying, or handing a nearly complete " +
          "build to qBittorrent to download the rest." },
-  { id: "seasons", name: "Seasons", does:
-      "Grabs a season, or every season of a show, from Usenet without a torrent: you choose the release " +
-      "groups and resolutions in order, each episode is checked against an episode list, and a report " +
-      "is written next to the season.",
-    use: "Filling a show in your library from Usenet, skipping the episodes you already have." },
-  { id: "assemble", name: "Assemble", does:
-      "Builds a .torrent you already have from folders you already downloaded - and, if you allow it, " +
-      "fetches only what those folders lack from Usenet.",
-    use: "A release you grabbed from Usenet yourself and now want to seed from the same files." },
+  { id: "build", name: "Build", does:
+      "Finds a torrent and matching NZBs, so Usenet downloads can be used to build a torrent seed. Search " +
+      "Prowlarr (or upload a .torrent), tick it, check the NZBs nzb2seed suggests on the right - or pick your " +
+      "own - and build.",
+    use: "A release you want to seed and that was also posted to Usenet. Several torrents can be ticked " +
+         "and built one after another." },
+  { id: "tracklist", name: "Torrent list 2 Seed", does:
+      "Takes a list of torrent file names pasted from your favourite tracker, reads the names out of it and " +
+      "searches Usenet for each. Where Usenet has the same release, the torrent is downloaded from the " +
+      "tracker through Prowlarr and the files are arranged to match it - seeded without downloading the " +
+      "torrent's content. Lists queue up and are checked on the server, so the page can be closed.",
+    use: "Going through a tracker's recent, requests or top-seeded list for torrents you can seed from " +
+         "Usenet, without downloading any that Usenet cannot supply." },
   { id: "auto", name: "Automatic", does:
-      "Links autobrr: the releases its ticked filters catch are dropped into an inbox and built from " +
-      "Usenet by themselves, waiting for the post to appear if it is not there yet.",
+      "Connects to autobrr to download from Usenet as torrents are posted. autobrr drops torrents from the " +
+      "filters you pick into a folder; nzb2seed builds each one from Usenet by itself, waiting for the post " +
+      "if it is not there yet, and starts seeding those that check to 100%. One that gets close enough - " +
+      "within a limit you set in Settings for that tracker - may be completed by downloading the rest over " +
+      "BitTorrent.",
     use: "Building your tracker stats if you don't have much of a library yet: new releases are seeded " +
-         "from the moment they appear, when they are most in demand, without downloading them over " +
-         "BitTorrent - hands-off." },
+         "from the moment they appear, when they are most in demand - hands-off." },
   { id: "library", name: "Library", does:
       "Seeds your TV library from one tracker - or several, in an order you set - a season at a time. " +
       "A season a tracker has as the very " +
@@ -38,9 +39,19 @@ const TABS = [
     use: "A library from other sources - Usenet, Sonarr/Radarr, a tracker that has closed - put to work " +
          "boosting your torrent tracker stats (seeding size, ratio, bonus points, seeding time), without " +
          "downloading those shows again over BitTorrent." },
+  { id: "assemble", name: "Assemble", does:
+      "Arranges files into a torrent seed, from your hard drive or from Usenet. With a .torrent you already " +
+      "have, it uses the folders you point it at and downloads only what they lack from Usenet (or all of it, " +
+      "with no folders). With no torrent, it grabs a season or a whole series from Usenet: you choose the " +
+      "release groups and resolutions in order, each episode is checked against an episode list, and a " +
+      "report is written next to the season.",
+    use: "A release you grabbed from Usenet yourself and now want to seed from the same files; or filling " +
+         "a show in your library from Usenet, skipping the episodes you already have." },
   { id: "demand", name: "Demand", does:
-      "Shows what your seeding returns for each GB it takes, suggests what to build from that, and holds " +
-      "the rules that decide what automatic builds take first - or never.",
+      "Statistics measured from your torrents in qBittorrent. Upload per GB stored: 1.00 means a torrent has " +
+      "uploaded as much data as it takes up on your drive; only torrents older than the settling time you " +
+      "choose are counted. It also suggests what to build from that, and holds the rules that decide what " +
+      "automatic builds take first - or never.",
     use: "Deciding what is worth disk space, and steering automatic builds." },
   { id: "settings", name: "Settings", does:
       "Every setting as a form: connections to Prowlarr, SABnzbd and qBittorrent, folders and path " +
@@ -83,7 +94,7 @@ const IDEAS = [
    html`Not needed to build anything, but recommended:
    <a href="https://www.cross-seed.org" target="_blank" rel="noopener noreferrer">cross-seed</a> finds the same
    release on your other trackers and adds it to qBittorrent seeding from the files you already have (hard
-   links, nothing downloaded). Every torrent nzb2seed builds - from Build, Automatic or Library - then seeds on
+   links, nothing downloaded). Every torrent nzb2seed builds - from Build, Torrent list 2 Seed, Automatic or Library - then seeds on
    each tracker that has it, so one Usenet download grows your stats on all of them. Point qBittorrent's "Run
    external program on torrent finished" at cross-seed's webhook so each build is searched for as soon as it
    is complete. The README has a ready docker-compose file and the settings that matter; the
@@ -175,7 +186,7 @@ const IDEAS = [
    and nothing is moved (auto move waits too) until you switch it to live in its header. "Auto delete the existing library files" then removes your old
    season folder once the moved torrent seeds at 100.0% - it may cause data loss, so watch a few moves first.`],
   ["Only its own files",
-   "nzb2seed only removes what it created itself, keeps a record of it, and never deletes from your " +
+   "nzb2seed is designed to only remove what it created itself, keep a record of it, and never delete from your " +
    "library without asking. Removing nzb2seed? See the README's last section first."],
 ];
 

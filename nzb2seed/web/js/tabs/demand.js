@@ -89,8 +89,11 @@ export function DemandTab({ active }) {
 
   const card = (big, small, tone) => html`<div class=${"dmcard" + (tone ? " " + tone : "")}><div class="big">${big}</div><div class="small">${small}</div></div>`;
   return html`
+    <h1>Demand</h1>
+    <p class="lede">Statistics measured from your torrents in qBittorrent. Upload per GB stored: 1.00 means a torrent
+      has uploaded as much data as it takes up on your drive. Only torrents older than the settling time you choose
+      are included in the stats.</p>
     <div class="head"><h2>What your seeding returns</h2><small>${r ? `${r.torrents} torrents older than ${r.age_days} days` : ""}</small></div>
-    <p class="status">Measured from your own torrents in qBittorrent - nothing is sent anywhere. The number is <b>upload per GB stored</b>: 1.00 means a torrent has given back as much as it takes up. Only torrents older than the settling time count, because a new one has not had its chance yet.</p>
     ${r && html`
       <div class="dmcards">
         ${card(r.overall_ratio.toFixed(2) + "x", "uploaded per GB stored, overall", r.overall_ratio >= 1 ? "good" : r.overall_ratio < 0.5 ? "poor" : "")}

@@ -1,12 +1,33 @@
-// The Assemble tab: a .torrent you already have plus NZB downloads that already finished -
-// or none: with no folders, everything comes from Usenet.
+// The Assemble tab: files arranged into a seed, from your drive or found on Usenet. Two parts:
+// a .torrent you already have plus folders holding its files (with none, everything comes
+// from Usenet) - or, with no torrent at all, a season or a whole series grabbed from Usenet
+// (the Seasons part, #assemble/seasons; the old #seasons address leads there).
 import { html, useRef, useState } from "../lib.js";
 import { api } from "../api.js";
-import { openJob, toast } from "../store.js";
+import { assemblePart, go, openJob, toast, useStore } from "../store.js";
 import { fileB64 } from "../util.js";
 import { Options, useOptions } from "../components/options.js";
+import { SeasonsTab } from "./seasons.js";
 
-export function AssembleTab() {
+export function AssembleTab({ active }) {
+  const part = useStore(assemblePart);
+  const pick = (p) => { assemblePart.set(p); go(p === "seasons" ? "assemble/seasons" : "assemble"); };
+  return html`
+    <h1>Assemble</h1>
+    <p class="lede">Arrange files into a torrent seed - from files already on your hard drive, or found on Usenet.
+      Have a .torrent? Point it at the folders holding its files: they are arranged to match it, and whatever they
+      lack is downloaded from Usenet (with no folders, all of it is). No torrent? Grab a season, or a whole series,
+      from Usenet instead: one release group and resolution, every episode checked, with a report.</p>
+    <fieldset class="field radios"><legend>Start from</legend>
+      <label class="check"><input type="radio" name="asmpart" checked=${part === "torrent"} onChange=${() => pick("torrent")} />
+        <span>A .torrent and the files you have</span></label>
+      <label class="check"><input type="radio" name="asmpart" checked=${part === "seasons"} onChange=${() => pick("seasons")} />
+        <span>A season or whole series, found on Usenet</span></label>
+    </fieldset>
+    ${part === "seasons" ? html`<${SeasonsTab} active=${active} />` : html`<${FromTorrent} />`}`;
+}
+
+function FromTorrent() {
   const [opts, setOpts] = useOptions(true);
   const [path, setPath] = useState(""), [sources, setSources] = useState(""), [output, setOutput] = useState("");
   const fileRef = useRef(null);
@@ -20,8 +41,8 @@ export function AssembleTab() {
     catch (err) { toast(err.message); }
   }
   return html`
-    <h1>Assemble from files you already have</h1>
-    <p class="lede">For a .torrent you already have and NZB downloads that are already finished. Everything from arranging the files onward runs exactly as in a normal build. The folders are optional: with none, everything is downloaded from Usenet.</p>
+    <h2>Assemble from files you already have</h2>
+    <p class="status">For a .torrent you already have and NZB downloads that are already finished. Everything from arranging the files onward runs exactly as in a normal build. The folders are optional: with none, everything is downloaded from Usenet.</p>
     <form class="form" onSubmit=${submit}>
       <label class="field"><span>.torrent file</span>
         <input type="file" ref=${fileRef} accept=".torrent,application/x-bittorrent" />

@@ -27,13 +27,22 @@ export function useStore(store) {
 
 /* ---- the tab on screen: the page's address (#jobs, #settings, ...) - and an open job is
    #jobs/<id>, so the browser's (or Android's) Back goes from the job to the jobs list */
-export const TABS = ["build", "jobs", "seasons", "assemble", "auto", "library", "demand", "settings", "help"];
+export const TABS = ["jobs", "build", "tracklist", "auto", "library", "assemble", "demand", "settings", "help"];
 const hashParts = () => location.hash.slice(1).split("/");
+// Seasons is part of Assemble now: #seasons still works, as #assemble/seasons
+const MOVED = { seasons: "assemble" };
+const moved = () => { const to = MOVED[hashParts()[0]]; if (to) location.replace(`#${to}/${hashParts()[0]}`); return !!to; };
+moved();
 const tabOf = () => TABS.includes(hashParts()[0]) ? hashParts()[0] : "build";
+/* the part of Assemble on screen: "torrent" (a .torrent and your files) or "seasons" */
+const partOf = () => hashParts()[0] === "assemble" && hashParts()[1] === "seasons" ? "seasons" : null;
+export const assemblePart = createStore(partOf() || "torrent");
 const jobOf = () => hashParts()[0] === "jobs" && /^\d+$/.test(hashParts()[1] || "") ? Number(hashParts()[1]) : null;
 export const tab = createStore(tabOf());
 window.addEventListener("hashchange", () => {
+  if (moved()) return;                              // the address is rewritten, and comes back here
   tab.set(tabOf());
+  if (partOf()) assemblePart.set(partOf());
   if (tabOf() !== "jobs") return;
   const id = jobOf();
   if (id != null) { openJobId.set(id); jobScreen.set(true); } else jobScreen.set(false);

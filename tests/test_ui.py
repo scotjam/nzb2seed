@@ -30,6 +30,22 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # the differences made on purpose: the new page always names the tracker a nearly complete
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
+    # the Jobs list is in parts - building now, queued in the order they start, ended - and
+    # marks automatic builds in a column of their own (their names without "auto:")
+    (re.compile(r"(?:Active|Queued|Completed and failed) \(\d+\)(?: next to start at the top)? ?"), ""),
+    (re.compile(r"(\[[x ]\]) Auto (\S+)"), r"\1 auto: \2"),
+    # Build and Demand open with a heading and what the tab is for
+    (re.compile(r"^Build Find a torrent and matching nzbs so Usenet downloads can be used to build a torrent seed\. "), ""),
+    (re.compile(r"^Demand Statistics measured from your torrents in qBittorrent\..*? are included in the stats\. "), ""),
+    (re.compile(r"(What your seeding returns \d+ torrents older than \d+ days) "),
+     r"\1 Measured from your own torrents in qBittorrent - nothing is sent anywhere. The number is upload per GB "
+     "stored : 1.00 means a torrent has given back as much as it takes up. Only torrents older than the settling "
+     "time count, because a new one has not had its chance yet. "),
+    # Seasons is a part of Assemble: the tab's heading and the choice between the two parts
+    (re.compile(r"^Assemble Arrange files into a torrent seed.*? with a report\. Start from (?:\([x ]\) )?A \.torrent and the files "
+                r"you have (?:\([x ]\) )?A season or whole series, found on Usenet "), ""),
+    # a job says when it started - on its page, and under it in the list
+    (re.compile(r" ?\b[Ss]tarted (?:\d{1,2} [A-Z][a-z]{2}|[A-Z][a-z]{2} \d{1,2}),? \d{1,2}:\d{2}(?:\s?[AP]M)?"), ""),
     # the Automatic tab's tries: one list of minutes in place of a window and two gaps
     (re.compile(r"Look for the Usenet post at \(minutes after it arrived\) \[0, 2, 10, 20, 60\]"),
      "Keep trying for (hours) [0.23] First retry after (minutes) [2] …backing off to at most (minutes) [2]"),
@@ -52,14 +68,17 @@ INTENDED = [
      "Only do this if TrackerOne lets you download up to 5% without a hit-and-run."),
     # ...and Settings has a table of trackers, with the global numbers for when to stop
     # looking for more posts (the classic page's single limit and tick list read back as it)
+    # (each tracker's % and MB are drop-downs - Not specified, None allowed, Custom, Full - with
+    # a line under each saying what it allows)
     (re.compile(r"A build missing a little can be handed to qBittorrent.*?What each tracker lets you download tracker % MB "
-                r"always add (.*?) Left blank, a tracker lets you download nothing.*?asks you on the Jobs tab\. "
+                r"always add (.*?) With % and MB both Not specified, a tracker lets you download nothing.*?"
+                r"before relying on them\. "
                 r"Stop looking for more posts when less than \(%\) is missing \[(\d*)\] …and less than \(MB\) \[\d*\]"),
      lambda m: "A build missing less than this much can be handed to qBittorrent to download the rest - many trackers "
                "let you download a few percent without it counting towards a hit-and-run. For the trackers listed below "
                "it is done without asking; everywhere else you are asked each time. Offer it when less than (%) is "
                f"missing [{m.group(2)}] Always add, for these trackers ["
-               + ", ".join(re.findall(r"(\S+)(?: \(API\))? \[[\d.]*\] \[[\d.]*\] \[x\]", m.group(1))) + "]"),
+               + ", ".join(re.findall(r"(\S+)(?: \(API\))?(?: \[[^\]]*\]){2,4} \[x\]", m.group(1))) + "]"),
     # the Build tab opens on a summary by release group; the full list links back to it
     (re.compile(r" ?← Summary by release group"), ""),
     # a build outside the limit (or with no seeders) can be added anyway, by override
@@ -110,6 +129,22 @@ INTENDED = [
      r"\1 Try again Abandon"),
     (re.compile(r"(?<!\w)Retry Clear from list, keep files Clear from list, delete files"), "Try again"),
     (re.compile(r" ?Clear from list, keep files Clear from list, delete files"), ""),
+    # 10% of a tracker's limit is kept free: the sample's 190.8 MB short of a 200 MB limit is no
+    # longer nearly complete, so it has Override (above) in place of the note that it could
+    # not be offered for want of seeders - and Abandon is gone
+    (re.compile(r"(Film\.2017\.1080p\.BluRay-GRPF the NZB download\(s\) do not contain every file) Try again"),
+     r"\1 Not offered for the torrent client: Prowlarr reported no seeders for it on TrackerOne, so the missing "
+     r"2.0001% (190.8 MB) could never come over BitTorrent. Try again Abandon"),
+    # repairs can take what still fails from a permitted tracker, if that is smaller
+    (re.compile(r" \[[x ]\] Prefer small downloads from permitted trackers over large Usenet downloads \(off: .*?it comes over BitTorrent\)"), ""),
+    # the Build tab: which trackers to search, and a tracker filter on what was found
+    (re.compile(r" Trackers: (?:all|[^\[]*? chosen|\S+)(?= Upload \.torrent)"), ""),
+    (re.compile(r" Tracker \[All \(\d+\)\]"), ""),
+    # the Automatic tab's description: what autobrr connects, and when the rest comes over BitTorrent
+    (re.compile(r"Connect to Autobrr to automatically download from usenet as torrents are posted\. (autobrr drops torrents "
+                r"from the filters you pick into a folder; nzb2seed builds each one from Usenet by itself) and can start them "
+                r"seeding if they check to 100%\..*? then it may be completed through torrent downloading\."),
+     r"\1 - it waits for the post, never asks, never downloads over BitTorrent, and starts seeding only at a 100.0% recheck."),
 ]
 
 

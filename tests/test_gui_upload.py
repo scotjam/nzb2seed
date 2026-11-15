@@ -178,3 +178,18 @@ def test_a_build_over_90_percent_looks_on_the_other_trackers_by_itself(server, m
     assert first.result == f"replaced by job {new.id}: built from TrackerTwo"
     for j in app.jobs.values():
         j.cancel.set()
+
+
+def test_the_tracker_list_never_adds_a_torrent_already_on_the_jobs_list(server, monkeypatch):  # noqa: F811
+    """An automatic job of it - even one that failed - means the tracker list tab leaves it be."""
+    import dataclasses
+    app, url = server
+    monkeypatch.setattr(gui, "execute_run", lambda cfg, opts, t, g, torrent_data=None: {"result": "ok"})
+    monkeypatch.setattr(gui, "uploaded_data", lambda cfg, t: None)
+    auto = app.start_job("auto: Film.2020.1080p.WEB-DL-GRPA.mkv", "auto", lambda cfg: None)
+    t = dataclasses.asdict(Release("Film 2020 1080p WEB-DL-GRPA", "torrent", "TrackerOne", 1, 10, "g",
+                                   "http://prowlarr.local/1/download", "", "", 0, 3, None))
+    assert call(url + "/api/build", *AUTH, body={"torrent": t, "nzbs": [], "options": {}, "only_new": True})[0] == 409
+    assert app.listed("Film.2020.1080p.WEB-DL-GRPA") is auto
+    other = dict(t, title="Film.2021.1080p.WEB-DL-GRPA", guid="g2")
+    assert call(url + "/api/build", *AUTH, body={"torrent": other, "nzbs": [], "options": {}, "only_new": True})[0] == 200

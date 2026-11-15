@@ -56,3 +56,20 @@ def test_an_nzb_only_search_asks_no_tracker(pr):
 def test_trackers_prowlarr_does_not_have(pr):
     with pytest.raises(ValueError):
         pipeline.search(CFG, "q", trackers=["Gone Tracker"])
+
+
+def test_usenet_is_asked_without_a_file_names_extension(monkeypatch):
+    asked = []
+
+    class Pr(FakePr):
+        def search(self, q, ids, cats):
+            asked.append((q, list(ids or [])))
+            # nothing on Usenet is named with ".mkv"
+            return [] if q.endswith(".mkv") else [SimpleNamespace(title=q, protocol="usenet", indexer="y", guid=q)]
+    monkeypatch.setattr(pipeline, "Prowlarr", Pr)
+    name = "Some.Film.2022.2160p.WEB-DL.DDP5.1.H.265-Grp"
+    t, n = pipeline.search(CFG, name + ".mkv", torrents=False)
+    assert [r.title for r in n] == [name] and asked == [(name, [10, 11])]
+    asked.clear()
+    t, n = pipeline.search(CFG, name + ".mkv")                 # every indexer: the torrent by its file name too
+    assert [r.title for r in n] == [name] and asked == [(name + ".mkv", []), (name, [10, 11])]

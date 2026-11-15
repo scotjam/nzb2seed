@@ -1,0 +1,120 @@
+"""Build slots in a known order: builds started by hand in the order they came, automatic
+ones newest torrent first - and the Jobs tab shows that order."""
+import threading
+import time
+
+from nzb2seed.slots import FairSlots
+
+
+def _wait_in_line(slots, names, started, rank=lambda n: 0.0):
+    """Each name queues for a slot from its own thread, in this order; records the order
+    they get one in."""
+    threads = []
+    for n in names:
+        t = threading.Thread(target=lambda n=n: (slots.take(slots.enter(n, rank(n)), 10), started.append(n)))
+        t.start()
+        threads.append(t)
+        while n not in slots.waiting():
+            time.sleep(0.005)
+    return threads
+
+
+def test_slots_go_in_the_order_builds_came():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)                # one build running
+    started = []
+    threads = _wait_in_line(slots, ["a", "b", "c"], started)
+    assert slots.waiting() == ["a", "b", "c"]
+    for i in range(3):
+        slots.release()                                  # one build ends: the next starts
+        while len(started) < i + 1:
+            time.sleep(0.005)
+    for t in threads:
+        t.join(2)
+    assert started == ["a", "b", "c"]
+
+
+def test_a_ranked_line_starts_the_newest_torrent_first():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)
+    posted = {"old": 1_000, "new": 3_000, "middle": 2_000}
+    started = []
+    threads = _wait_in_line(slots, ["old", "new", "middle"], started, rank=lambda n: -posted[n])
+    assert slots.waiting() == ["new", "middle", "old"]
+    assert [round(-r) for r, _ in slots.line()] == [3000, 2000, 1000]
+    for i in range(3):
+        slots.release()                                  # one build ends: the next starts
+        while len(started) < i + 1:
+            time.sleep(0.005)
+    for t in threads:
+        t.join(2)
+    assert started == ["new", "middle", "old"]
+
+
+def test_a_free_slot_is_not_taken_past_a_build_already_waiting():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)
+    ticket = slots.enter("waiting")
+    slots.release()
+    assert not slots.acquire(blocking=False)            # it is the waiting build's
+    assert slots.take(ticket, 1)
+
+
+def test_a_cancelled_build_leaves_the_line():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)
+    a, b = slots.enter("a"), slots.enter("b")
+    slots.leave(a)
+    assert slots.waiting() == ["b"]
+    slots.release()
+    assert slots.take(b, 1)
+
+
+def test_more_slots_let_more_of_the_line_start():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)
+    a, b = slots.enter("a"), slots.enter("b")
+    slots.resize(3)
+    assert slots.take(a, 1) and slots.take(b, 1)
+
+
+def test_the_jobs_list_says_where_a_waiting_build_stands(tmp_path):
+    from nzb2seed import gui
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    app.build_slots = FairSlots(1)
+    assert app.build_slots.acquire(blocking=False)            # one build running
+    first, second, building = (gui.Job(i, f"Film.{i}", "build") for i in (1, 2, 3))
+    app.build_slots.enter(first)
+    app.build_slots.enter(second)
+    assert app.queue_place(first) == {"queue": "build", "place": 1}
+    assert app.queue_place(second) == {"queue": "build", "place": 2}
+    assert app.queue_place(building) == {}                   # not in line: building
+
+
+def test_a_download_shows_how_far_it_is_and_how_fast(monkeypatch):
+    from nzb2seed import pipeline, report
+    seen = []
+
+    class Sink(report.ConsoleSink):
+        def meter(self, pct, speed, what):
+            seen.append((pct, speed, what))
+    looks = iter([("Queued: Downloading", {"mb": "1000", "mbleft": "800"}),
+                  ("Queued: Downloading", {"mb": "1000", "mbleft": "300"}),
+                  ("Completed", {"storage": "/downloads/Rel"})])
+
+    class Sab:
+        def status(self, nzo):
+            return next(looks)
+    clock = iter([100.0, 110.0, 120.0, 130.0])
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: next(clock))
+    report.use(Sink())
+    try:
+        pipeline.sab_wait(Sab(), {"nzo1": "Rel"})
+    finally:
+        report.use(None)
+    assert seen[0] == (20.0, None, "downloading")
+    pct, speed, _ = seen[1]
+    assert pct == 70.0 and abs(speed - 50 * 1024 * 1024) < 1      # 500 MB in 10 s

@@ -1,4 +1,4 @@
-// The Seasons tab: find a show, pick a season (or all), pick the release groups and
+// The Seasons part of the Assemble tab: find a show, pick a season (or all), pick the release groups and
 // resolutions to take it from, in order, and grab. Grabbed seasons are listed with their
 // reports.
 import { html, useEffect, useReducer, useRef } from "../lib.js";
@@ -108,8 +108,8 @@ export function SeasonsTab({ active }) {
 
   const opts = s.options;
   return html`
-    <h1>Grab a season, or the whole series, from Usenet</h1>
-    <p class="lede">One release group, one resolution, every episode. nzb2seed tries a season NZB first, then the missing episodes on their own, checks every episode against TVmaze and - for scene releases - against srrDB's CRC of the original video, and puts MediaInfo, screenshots and links in a separate <code>-metadata</code> folder next to the season, without searching for or downloading any torrent files.</p>
+    <h2>Grab a season, or the whole series, from Usenet</h2>
+    <p class="status">One release group, one resolution, every episode. nzb2seed tries a season NZB first, then the missing episodes on their own, checks every episode against TVmaze and - for scene releases - against srrDB's CRC of the original video, and puts MediaInfo, screenshots and links in a separate <code>-metadata</code> folder next to the season, without searching for or downloading any torrent files.</p>
     <div class="sgrid">
       <div>
         <div class="panel">

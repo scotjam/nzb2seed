@@ -5,7 +5,7 @@ import { html, render, useEffect } from "./lib.js";
 import { TABS, autoOn, jobScreen, jobs, loadSettings, refreshAuto, refreshJobs, settings, tab, toastMsg, useStore } from "./store.js";
 import { BuildTab } from "./tabs/build.js";
 import { JobsTab } from "./tabs/jobs.js";
-import { SeasonsTab } from "./tabs/seasons.js";
+import { TracklistTab } from "./tabs/tracklist.js";
 import { AssembleTab } from "./tabs/assemble.js";
 import { AutoTab } from "./tabs/auto.js";
 import { LibraryTab } from "./tabs/library.js";
@@ -14,10 +14,10 @@ import { SettingsTab } from "./tabs/settings.js";
 import { HelpTab } from "./tabs/help.js";
 import { Tour, maybeStartTour, tourStep } from "./components/tour.js";
 
-const VIEWS = { build: BuildTab, jobs: JobsTab, seasons: SeasonsTab, assemble: AssembleTab,
-                auto: AutoTab, library: LibraryTab, demand: DemandTab, settings: SettingsTab, help: HelpTab };
-const NAMES = { build: "Build", jobs: "Jobs", seasons: "Seasons", assemble: "Assemble",
-                auto: "Automatic", library: "Library", demand: "Demand", settings: "Settings", help: "Help" };
+const VIEWS = { jobs: JobsTab, build: BuildTab, tracklist: TracklistTab, auto: AutoTab, library: LibraryTab,
+                assemble: AssembleTab, demand: DemandTab, settings: SettingsTab, help: HelpTab };
+const NAMES = { jobs: "Jobs", build: "Build", tracklist: "Torrent list 2 Seed", auto: "Automatic", library: "Library",
+                assemble: "Assemble", demand: "Demand", settings: "Settings", help: "Help" };
 
 function App() {
   const now = useStore(tab);

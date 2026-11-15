@@ -104,9 +104,11 @@ export function AutoTab({ active }) {
     <div class="autotop">
       <div>
         <h1 style="margin:0">Automatic builds</h1>
-        <p class="lede" style="margin:.3em 0 0">autobrr drops torrents from the filters you pick into a folder; nzb2seed builds each one from Usenet by itself - it waits for the post, never asks, never downloads over BitTorrent, and starts seeding only at a 100.0% recheck.</p>
-        <p class="lede" style="margin:.3em 0 0">A good way to build your tracker stats if you don't have much
-          of a library yet: new releases are seeded from the moment they appear, when they are most in demand.</p>
+        <p class="lede" style="margin:.3em 0 0">Connect to Autobrr to automatically download from usenet as torrents
+          are posted. autobrr drops torrents from the filters you pick into a folder; nzb2seed builds each one from
+          Usenet by itself and can start them seeding if they check to 100%. If it can't get to 100% but it gets to a
+          level that's close enough (if you have set such a level in Settings for that tracker), then it may be
+          completed through torrent downloading.</p>
       </div>
       <label class="switch"><input type="checkbox" role="switch" checked=${!!s.enabled} onChange=${toggle} /> <span>${s.enabled ? "On" : "Off"}</span></label>
     </div>

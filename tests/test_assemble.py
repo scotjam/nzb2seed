@@ -241,16 +241,30 @@ def test_nzb2seed_own_folders_are_still_moved(tmp_path):
     assert not any(p.suffix in (".rar", ".mkv") for p in job.rglob("*") if p.is_file())
 
 
-def test_placed_files_are_writable_by_the_folders_group(tmp_path):
+def _posix_files(monkeypatch, files: dict):
+    """On Windows: Linux's owners and permissions, simulated - each path's (uid, gid, mode),
+    changed by chown and chmod as Linux would."""
+    import types
+    monkeypatch.setattr(asm, "POSIX", True)
+    st = lambda p: types.SimpleNamespace(st_uid=files[str(p)][0], st_gid=files[str(p)][1], st_mode=files[str(p)][2])
+    monkeypatch.setattr(asm.os, "lstat", st)
+    monkeypatch.setattr(asm.os, "stat", st)
+    monkeypatch.setattr(asm.os, "chown", lambda p, u, g, **k: files.__setitem__(
+        str(p), (files[str(p)][0] if u == -1 else u, files[str(p)][1] if g == -1 else g, files[str(p)][2])), raising=False)
+    monkeypatch.setattr(asm.os, "chmod", lambda p, m, **k: files.__setitem__(str(p), files[str(p)][:2] + (m,)))
+
+
+def test_placed_files_are_writable_by_the_folders_group(tmp_path, monkeypatch):
     """qBittorrent runs as its own user: a read-only file nzb2seed placed could not be
     repaired when a piece fails, nor moved. It gets the folder's group, writable."""
-    import pytest
     import stat
-    if os.name == "nt":
-        pytest.skip("POSIX permissions")
     f = tmp_path / "e01.mkv"
     f.write_bytes(b"x")
-    os.chmod(f, 0o644)
+    if os.name == "nt":                     # simulated: root's file, in a folder of group 100
+        files = {str(f): (0, 0, stat.S_IFREG | 0o600), str(tmp_path): (0, 100, stat.S_IFDIR | 0o775)}
+        _posix_files(monkeypatch, files)
+    else:
+        os.chmod(f, 0o644)
     asm.shareable(str(f))
     mode = os.stat(f).st_mode
     assert mode & stat.S_IWGRP and mode & stat.S_IRGRP and mode & stat.S_IROTH
@@ -263,13 +277,13 @@ def test_sharing_a_file_never_fails_the_build(tmp_path):
 
 def test_files_go_to_the_torrent_clients_user(tmp_path, monkeypatch):
     """With file_owner set, what nzb2seed places belongs to the torrent client's user."""
-    import pytest
-    if os.name == "nt":
-        pytest.skip("POSIX ownership")
+    import stat
     chowned = []
-    monkeypatch.setattr(os, "chown", lambda p, u, g: chowned.append((u, g)))
-    monkeypatch.setattr(asm, "OWNER", (1000, 100))
     f = tmp_path / "e01.mkv"
+    if os.name == "nt":                     # simulated: root's file
+        _posix_files(monkeypatch, {str(f): (0, 0, stat.S_IFREG | 0o664), str(tmp_path): (0, 0, stat.S_IFDIR | 0o775)})
+    monkeypatch.setattr(asm.os, "chown", lambda p, u, g: chowned.append((u, g)), raising=False)
+    monkeypatch.setattr(asm, "OWNER", (1000, 100))
     f.write_bytes(b"x")
     asm.shareable(str(f))
     assert chowned == [(1000, 100)]

@@ -1,6 +1,13 @@
 // What can be done with a job, and what kind of job it is - pure functions of the job
 // list, shared by the list, the bar and the job's own buttons.
 import { shortEnough } from "../store.js";
+import { trackerName } from "../util.js";
+
+/* the tracker a job's torrent is from, shown after its title - unless the title names it already */
+export function trackerLabel(j) {
+  const t = trackerName(j.tracker);
+  return t && !(j.title || "").toLowerCase().includes(t.toLowerCase()) ? t : "";
+}
 
 export const BADLY_ENDED = ["failed", "cancelled", "interrupted"];
 export const isLive = (j) => j.status === "running" || j.status === "waiting";
@@ -25,7 +32,7 @@ export const JOB_KINDS = [
   ["retried", "Tried again", j => BADLY_ENDED.includes(j.status) && !!j.retried_as],
   ["nearly", "Nearly complete", j => BADLY_ENDED.includes(j.status) && (j.extra || {}).have != null && !(j.extra || {}).abandoned],
   ["nousenet", "No Usenet post", j => BADLY_ENDED.includes(j.status) && /no Usenet post could supply|: none found|no post of this group/i.test(j.result || "")],
-  ["refused", "NZB not handed over", j => BADLY_ENDED.includes(j.status) && /refused the NZB|did not get the NZB|could not get the NZB/i.test(j.result || "")],
+  ["refused", "NZB not handed over", j => BADLY_ENDED.includes(j.status) && /refused the NZB|did not get the NZB|could not get the NZB|could not fetch the NZBs/i.test(j.result || "")],
   ["stopped", "Stopped / cancelled", j => j.status === "cancelled"],
   ["interrupted", "Interrupted", j => j.status === "interrupted"],
   ["failed", "Failed, other", j => j.status === "failed"],
@@ -33,7 +40,9 @@ export const JOB_KINDS = [
 ];
 export function kindOf(j) { const k = JOB_KINDS.find(([, , fits]) => fits(j)); return k ? k[0] : "done"; }
 
-export const canRetry = (j) => BADLY_ENDED.includes(j.status) && j.can_retry;
+/* an automatic build that was skipped (a rule, the age limit) can be tried again too */
+export const skippedAuto = (j) => j.kind === "auto" && j.status === "done" && /^skipped\b/.test(j.result || "");
+export const canRetry = (j) => (BADLY_ENDED.includes(j.status) || skippedAuto(j)) && j.can_retry;
 
 /* automatic: started by the Automatic tab, or carrying one on from another tracker */
 export const isAuto = (j) => j.kind === "auto" || (j.title || "").startsWith("auto: ");

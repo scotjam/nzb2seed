@@ -295,9 +295,9 @@ export const SCENARIOS = {
     await act.go("jobs");
     await act.settle();
     const row = (t) => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes(t));
-    return { downloading: row("Show.S02.1080p").querySelector(".dot").className,
-             complete: row("Show.S03.1080p").querySelector(".dot").className,
-             says: row("Show.S03.1080p").querySelector(".jretry .status").textContent.trim() };
+    return { downloading: row("Show.S02.1080p.BluRay-GRPK").querySelector(".dot").className,
+             complete: row("Show.S03.1080p.BluRay-GRPK").querySelector(".dot").className,
+             says: row("Show.S03.1080p.BluRay-GRPK").querySelector(".jretry .status").textContent.trim() };
   },
 
   /* the new page only: a skipped automatic build gets a grey dot, a built one a green one */

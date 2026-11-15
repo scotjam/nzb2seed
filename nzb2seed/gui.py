@@ -45,12 +45,18 @@ from . import events as events_mod
 _held = threading.local()
 
 
-def take_slot(slots: threading.Semaphore, why: str = "Waiting for a build slot"):
-    """Queue for a build slot (a build waiting for one can still be cancelled)."""
+def take_slot(slots, why: str = "Waiting for a build slot"):
+    """Queue for a build slot, first come first served (a build waiting for one can still
+    be cancelled). The line remembers whose place each is, for the Jobs tab."""
     if not slots.acquire(blocking=False):
         report.step(why)
-        while not slots.acquire(timeout=5):
-            report.check_cancel()
+        place = slots.enter(getattr(report.sink(), "job", None))
+        try:
+            while not slots.take(place, timeout=5):
+                report.check_cancel()
+        except BaseException:
+            slots.leave(place)
+            raise
     _held.slots = slots
 
 
@@ -65,6 +71,8 @@ from . import matching
 from . import usenet_odds as odds_mod
 from . import pipeline as pipeline_mod
 from . import lookup as lookup_mod
+from . import tracklist as tracklist_mod
+from . import slots as slots_mod
 from .torrent import TorrentError, parse as parse_torrent
 from .pathmap import map_path
 from .pipeline import (Abort, Incomplete, Options, execute_assemble, execute_run, group_selection, pair,
@@ -77,6 +85,7 @@ MAX_LINES = 20000
 # ---------------------------------------------------------------- jobs
 
 RESUMING = "the GUI stopped while this build was running; resuming"
+_TRACKER_LINE = re.compile(r"^tracker: (.+?)(?: \(\d+ seeders? reported\))?$")
 INTERRUPTED = ("the GUI stopped while this build was running; build it again - files it "
                "already placed are reused and a stopped torrent stays stopped")
 
@@ -91,6 +100,7 @@ class Job:
         self.lines: list[dict] = []
         self.progress = ""
         self.pieces = ""
+        self.meter: dict | None = None       # {"pct", "speed", "what"} of the stage under way
         self.started = time.time()
         self.ended: float | None = None
         self.cancel = threading.Event()
@@ -102,6 +112,7 @@ class Job:
         self.extra: dict | None = None        # how far a failed build got (see pipeline.Incomplete)
         self.retried_as: int | None = None    # the job that tried this one again, if any
         self.cut_off = False                  # running when the last restart stopped it
+        self.tracker = ""                     # the tracker it is for, when not in its log or extra
         self._answer: int | None = None
         self._answered = threading.Event()
 
@@ -109,6 +120,8 @@ class Job:
     def emit(self, kind: str, text: str):
         with self.lock:
             self.progress = ""
+            if kind == "step":
+                self.meter = None                # a new stage: its own progress, when it has one
             if len(self.lines) < MAX_LINES:
                 self.lines.append({"k": kind, "t": text})
         self.on_change()
@@ -123,6 +136,13 @@ class Job:
 
     def pieces_fn(self, states: str):
         self.pieces = states
+        self.on_change()
+
+    def meter_fn(self, pct: float | None, speed: float | None, what: str):
+        """How far the current stage is (0-100) and, while downloading, how fast (bytes a
+        second) - for the Jobs tab's progress bar. A new step clears it."""
+        self.meter = None if pct is None else {"pct": round(max(0.0, min(100.0, pct)), 1),
+                                               "speed": round(speed) if speed else None, "what": what}
         self.on_change()
 
     def cancelled(self) -> bool:
@@ -162,15 +182,33 @@ class Job:
         return {"id": self.id, "title": self.title, "kind": self.kind, "status": self.status,
                 "result": self.result, "started": self.started, "ended": self.ended,
                 "progress": self.progress, "question": self.question,
+                "meter": self.meter if self.status == "running" else None,
                 "can_retry": bool(self.repeat) and not self.retried_as,
-                "retried_as": self.retried_as, "extra": self.extra,
+                "retried_as": self.retried_as, "extra": self.extra, "tracker": self.tracker_name(),
                 "steps": [x["t"] for x in self.lines if x["k"] == "step"]}
+
+    def tracker_name(self) -> str:
+        """The tracker this job's torrent is from, when there is one: set for it, as a
+        stopped build recorded it, as its build logged it ("tracker: X (5 seeders
+        reported)", near the start), or the tracker of the torrent picked on the Build tab."""
+        name = self.tracker or (self.extra or {}).get("tracker") or ""
+        if not name:
+            for line in self.lines[:80]:
+                m = _TRACKER_LINE.match(line.get("t") or "")
+                if m and m.group(1) != "unknown":
+                    name = m.group(1)
+                    break
+        if not name:
+            t = ((self.repeat or {}).get("body") or {}).get("torrent") or {}
+            if not str(t.get("guid") or "").startswith((UPLOAD_PREFIX, "file:")):
+                name = t.get("indexer") or ""
+        return name
 
     def to_dict(self) -> dict:
         with self.lock:
             return {**self.summary(), "lines": list(self.lines), "pieces": self.pieces,
                     "repeat": self.repeat, "extra": self.extra, "retried_as": self.retried_as,
-                    "infohash": self.infohash}
+                    "infohash": self.infohash, "own_tracker": self.tracker}
 
     @classmethod
     def from_dict(cls, d: dict, on_change) -> "Job":
@@ -183,6 +221,7 @@ class Job:
         job.extra = d.get("extra")
         job.retried_as = d.get("retried_as")
         job.infohash = d.get("infohash") or ""
+        job.tracker = d.get("own_tracker") or ""
         job.cut_off = job.status in ("running", "waiting")
         if job.cut_off:                              # its thread died with the previous GUI process
             job.status, job.result, job.progress = "interrupted", INTERRUPTED, ""
@@ -263,6 +302,9 @@ class _Sink:
     def pieces(self, states):
         self.job.pieces_fn(states)
 
+    def meter(self, pct, speed, what):
+        self.job.meter_fn(pct, speed, what)
+
     def ask(self, prompt, choices):
         return self.job.ask(prompt, choices)
 
@@ -306,20 +348,11 @@ class App:
     # Builds queue behind this. Ticking twenty seasons starts twenty builds otherwise, and
     # each one holds a finished download on the staging disk while it waits its turn to
     # place files - which fills that disk with work nothing can finish.
-    build_slots = threading.Semaphore(2)
-    build_slots_size = 2
+    build_slots = slots_mod.FairSlots(2)
 
     def build_slot(self):
         """Resize the queue if the setting changed, and hand out a slot."""
-        want = max(1, int(getattr(self.cfg, "build_parallel", 2) or 2))
-        with self.lock:
-            while self.build_slots_size < want:
-                self.build_slots.release()
-                self.build_slots_size += 1
-            while self.build_slots_size > want:
-                if not self.build_slots.acquire(blocking=False):
-                    break                      # all in use; it shrinks as they finish
-                self.build_slots_size -= 1
+        self.build_slots.resize(max(1, int(getattr(self.cfg, "build_parallel", 2) or 2)))
         return self.build_slots
 
     def nzb2seed_torrent_rows(self, rows: list[dict]) -> dict[str, dict]:
@@ -411,6 +444,38 @@ class App:
         with self.lock:
             return next((j for j in self.jobs.values() if j.kind == "build" and j.title == title
                          and j.status in ("running", "waiting")), None)
+
+    def listed(self, title: str) -> Job | None:
+        """A job of this torrent anywhere on the list - automatic or by hand, in any state."""
+        key = tracklist_mod.job_key(title)
+        with self.lock:
+            return next((j for j in sorted(self.jobs.values(), key=lambda j: -j.id)
+                         if tracklist_mod.job_key(j.title) == key), None)
+
+    def build_from_list(self, torrent: dict, nzbs: list, options: dict) -> "Job":
+        """A build the tracker list tab starts: refused (ValueError) when the torrent is
+        already on the jobs list - automatic or by hand, in any state."""
+        listed = self.listed(_rel(torrent).title)
+        if listed:
+            raise ValueError(f"already on the jobs list (job {listed.id})")
+        body = {"torrent": torrent, "nzbs": nzbs, "options": options}
+        title, run = build_job(self, body)
+        self.request.asked = {"path": "/api/build", "body": body}      # what Retry replays
+        try:
+            return self.start_job(title, "build", run)
+        finally:
+            self.request.asked = None
+
+    def start_tracklist(self, start: bool = True):
+        """The tracker list tab's queue: pasted lists, checked one after another."""
+        self.tracklist = tracklist_mod.Queue(
+            self, os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "tracklist.json"), start)
+        self.tracklist.on_save = lambda: self.events.publish("tracklist")
+
+    def queue(self) -> "tracklist_mod.Queue":
+        if getattr(self, "tracklist", None) is None:      # not started by serve (a test's app)
+            self.start_tracklist()
+        return self.tracklist
 
     def autobrr_memo(self, memo=None) -> dict:
         """What nzb2seed changed in autobrr, so unticking a filter puts it back:
@@ -736,6 +801,7 @@ class App:
                     "extra": {"added": True, "infohash": h, "tracker": rel.indexer, "have": frac, "short": short}}
 
         nj = self.start_job(f"Add via {rel.indexer}: {job.title}", "client", run)
+        nj.tracker = rel.indexer or ""
         self.watch_clients()
         return nj
 
@@ -765,8 +831,9 @@ class App:
                     time.sleep(0.5)
                 qb.wait_idle(h)
                 report.step("Checking what is already there")
+                before = (qb.info(h) or {}).get("progress")
                 qb.recheck(h)
-                qb.wait_idle(h, min_wait=5)
+                pipeline_mod.wait_recheck(qb, h, before=before)
             frac = (qb.info(h) or {}).get("progress", 0)
             have = pipeline_mod.exact_pct(frac)
             rest = pipeline_mod.exact_pct(1 - frac) if frac >= 1 else \
@@ -834,7 +901,9 @@ class App:
             report.info("its Usenet downloads are cleared once the torrent is complete")
             return {"result": f"in qBittorrent, downloading the last {rest}"}
 
-        return self.start_job(f"Finish in qBittorrent: {job.title}", "client", run)
+        nj = self.start_job(f"Finish in qBittorrent: {job.title}", "client", run)
+        nj.tracker = x.get("tracker") or ""
+        return nj
 
     def keep_originals(self, cfg, qb, h: str, save_path: str):
         """Before qBittorrent downloads into a torrent's files: every file it may write into
@@ -1178,7 +1247,30 @@ class App:
         box = getattr(self, "inbox", None)
         if job.kind == "auto":
             s["can_retry"] = bool(box and not job.retried_as and box.retryable_job(job.id))
+        s.update(self.queue_place(job))
         return s
+
+    def queue_place(self, job: "Job") -> dict:
+        """Where a running job stands, for the Jobs tab: waiting in a line for a slot
+        ({"queue": "build" or "auto", "place": 1 for next}), or an automatic build waiting
+        to look for its post again ({"next_try": when}). Nothing for one that is building."""
+        if job.status != "running":
+            return {}
+        lines = [("build", self.build_slots)]
+        box = getattr(self, "inbox", None)
+        if box is not None and hasattr(box.slots, "waiting"):
+            lines.append(("auto", box.slots))
+        for name, slots in lines:
+            for i, (rank, who) in enumerate(slots.line()):
+                if who is job:
+                    # the automatic line is newest torrent first: say how new
+                    return {"queue": name, "place": i + 1, **({"posted": -rank} if name == "auto" and rank else {})}
+        if box is not None and job.kind == "auto":
+            h = next((h for h, jid in box.running.items() if jid == job.id), None)
+            it = box.state.items.get(h) if h else None
+            if it and it.get("status") == "waiting" and (it.get("next_try") or 0) > time.time():
+                return {"next_try": it["next_try"]}
+        return {}
 
     def resume_builds(self) -> list[int]:
         """Carry on the Build-tab builds the last restart cut off, each as the same job - as
@@ -1193,21 +1285,25 @@ class App:
                 continue
             job.cut_off = False
             try:
-                title, run = build_job(self, dict(rq.get("body") or {}))
+                title, run = build_job(self, dict(rq.get("body") or {}), resume=job)
             except (KeyError, TypeError, ValueError, OSError) as e:
                 job.lines.append({"k": "warn", "t": f"could not carry on by itself ({e}) - build it again"})
                 continue
             if self.active_build(title):
                 continue
-            self.resume_job(job, run)
+            self.resume_job(job, run, save=False)
             resumed.append(job.id)
         if resumed:
+            # saved once for them all: the job list is rewritten whole, and saving it after
+            # each of a hundred resumed builds held the GUI up for minutes at start-up
+            self.store.changed(urgent=True)
             print(f"resumed {len(resumed)} build(s) the restart interrupted", flush=True)
         return resumed
 
-    def resume_job(self, job: "Job", fn) -> "Job":
+    def resume_job(self, job: "Job", fn, save: bool = True) -> "Job":
         """Carry on a job the last restart interrupted, as the same job: its list entry and
-        log continue, instead of an "interrupted" one left behind next to a new copy."""
+        log continue, instead of an "interrupted" one left behind next to a new copy.
+        ``save=False``: the caller saves the job list once, after resuming several."""
         with self.lock:
             if job.lines and job.lines[-1].get("t") == INTERRUPTED:
                 job.lines[-1] = {"k": "warn", "t": RESUMING}
@@ -1215,7 +1311,7 @@ class App:
                 job.lines.append({"k": "warn", "t": RESUMING})
             job.status, job.result, job.ended, job.progress = "running", "", None, ""
             job.cancel = threading.Event()
-        self.store.changed(urgent=True)
+        self.store.changed(urgent=save)
         self._launch(job, fn)
         return job
 
@@ -1377,13 +1473,44 @@ def within_roots(cfg, path: str) -> bool:
     return any(real == r or real.startswith(r.rstrip(os.sep) + os.sep) for r in data_roots(cfg))
 
 
-def build_job(app: "App", body: dict):
+def saved_torrent(cfg, infohash: str, since: float) -> tuple[bytes, str] | None:
+    """The .torrent a build saved (into the torrent folder) since it started, if it is still
+    there and still that torrent - so a build carried on after a restart need not download
+    it from the tracker again. Only files written since then are read."""
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", infohash or ""):
+        return None
+    try:
+        names = os.listdir(cfg.torrent_dir)
+    except OSError:
+        return None
+    for name in names:
+        path = os.path.join(cfg.torrent_dir, name)
+        try:
+            if not name.endswith(".torrent") or os.path.getmtime(path) < since - 60:
+                continue
+            with open(path, "rb") as fh:
+                data = fh.read()
+            if parse_torrent(data).infohash.lower() == infohash.lower():
+                return data, path
+        except (OSError, TorrentError, ValueError):
+            continue
+    return None
+
+
+def build_job(app: "App", body: dict, resume: "Job | None" = None):
     """A Build-tab build from its request: (title, the function the job runs). Used for
-    the request itself, and to carry on the build after a restart."""
+    the request itself, and to carry on the build after a restart (``resume``: that job -
+    the .torrent it already downloaded is used again)."""
     torrent = _rel(body["torrent"])
     groups = group_selection([_rel(n) for n in body.get("nzbs", [])])   # empty: the build finds them
     opts = _opts(body.get("options", {}))
     data = uploaded_data(app.cfg, torrent)   # None: download it through Prowlarr
+    reused = ""
+    if data is None and resume is not None:
+        got = saved_torrent(app.cfg, resume.infohash, resume.started)
+        if got:
+            data, reused = got
+    more = {"reused": reused} if reused else {}
     # built from another tracker: the downloads made for the first one are this build's to use
     first = app.jobs.get(int(body["other_tracker"])) if str(body.get("other_tracker") or "").isdigit() else None
     if first is not None and (first.extra or {}).get("infohash"):
@@ -1407,11 +1534,11 @@ def build_job(app: "App", body: dict):
         if finishing:
             report.info("built from another tracker with the downloads already made: "
                         "not waiting for a build slot")
-            return execute_run(cfg, opts, torrent, groups, torrent_data=data)
+            return execute_run(cfg, opts, torrent, groups, torrent_data=data, **more)
         take_slot(app.build_slot(), "Waiting for a build slot "
                   f"({max(1, int(getattr(cfg, 'build_parallel', 2) or 2))} build(s) run at once)")
         try:
-            return execute_run(cfg, opts, torrent, groups, torrent_data=data)
+            return execute_run(cfg, opts, torrent, groups, torrent_data=data, **more)
         finally:
             give_slot()          # not held if it was waiting on you when it ended
     return ("auto: " if auto else "") + torrent.title, run
@@ -1856,6 +1983,21 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                                        "usenet": [dataclasses.asdict(r) for r in nzbs]})
                 if path == "/api/pair":
                     return self.pair(body)
+                if path == "/api/tracklist/parse":
+                    return self._json({"names": tracklist_mod.parse(body.get("text") or "",
+                                                                    any_kind=bool(body.get("any_kind")))})
+                # the tracker list tab's queue: lists are checked here, one name at a time
+                if path == "/api/tracklist/lists":
+                    return self._json({"lists": app.queue().snapshot()})
+                if path == "/api/tracklist/add":
+                    return self._json({"id": app.queue().add(
+                        [str(n) for n in body.get("names") or []], str(body.get("tracker") or ""),
+                        bool(body.get("auto")), body.get("options") or {})})
+                if path in ("/api/tracklist/stop", "/api/tracklist/remove"):
+                    getattr(app.tracklist, path.rsplit("/", 1)[1])(body.get("list"))
+                    return self._json({"lists": app.queue().snapshot()})
+                if path == "/api/tracklist/build":
+                    return self._json(app.queue().build(body.get("list"), [str(n) for n in body.get("names") or []]))
                 if path == "/api/season/shows":
                     return self._json(metadata.tvmaze_search((body.get("query") or "").strip()))
                 if path == "/api/season/seasons":
@@ -2531,6 +2673,9 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             busy = app.active_build(torrent.title)
             if busy:
                 return self._err(f"{torrent.title} is already being built (job {busy.id})", 409)
+            listed = app.listed(torrent.title) if body.get("only_new") else None
+            if listed:              # the tracker list tab: never a second job beside an automatic one
+                return self._err(f"already on the jobs list (job {listed.id})", 409)
             title, run = build_job(app, body)
             job = app.start_job(title, "build", run)
             first = app.jobs.get(int(body["other_tracker"])) if str(body.get("other_tracker") or "").isdigit() else None
@@ -2622,6 +2767,7 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     app.start_inbox()
     app.start_library()
     app.start_mend()
+    app.start_tracklist()
     try:
         if app.cfg.sab_url and app.cfg.sab_key and \
                 hopeless.restore_after_restart(app.cfg, SABnzbd(app.cfg.sab_url, app.cfg.sab_key)):
