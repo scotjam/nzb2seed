@@ -864,6 +864,9 @@ class Library:
 
     # -- the next season
     def poll(self):
+        from .slots import PAUSED
+        if PAUSED.is_set():
+            return                              # paused (Jobs tab): no season is searched or built
         cfg = self.app.cfg
         if not cfg.library_roots:
             return

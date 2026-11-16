@@ -38,7 +38,7 @@ from .pipeline import Abort, Incomplete, Options, execute_run, local_release
 from .usenet_odds import odds_for
 from .report import Cancelled, check_cancel, info, step, warn
 from .report import sink as report_sink
-from .slots import FairSlots
+from .slots import PAUSED, FairSlots
 from .torrent import TorrentError, parse
 
 POLL_SECONDS = 20
@@ -209,6 +209,8 @@ class Inbox:
         self.stop_stale()                   # first: a full disk must not keep old ones alive
         if not cfg.auto_enabled or not cfg.auto_folder:
             return
+        if PAUSED.is_set():
+            return                      # paused (Jobs tab): new torrents wait in the folder
         if self.no_room(cfg):
             return                      # the disk is too full: new builds wait their turn
         self._said_full = False

@@ -109,3 +109,69 @@ def test_both_tabs_show_the_pause_button():
         assert "<${PauseButton} />" in (web / "tabs" / tab).read_text(encoding="utf-8")
     src = (web / "components" / "pause.js").read_text(encoding="utf-8")
     assert "Pause" in src and "Resume" in src and "/api/pause" in src
+
+
+# ---- everything else nzb2seed does by itself holds too
+
+def test_mend_starts_and_swaps_in_nothing_while_paused(tmp_path):
+    """The case that restarted a stopped torrent: mend finishing it from another copy."""
+    from test_mend import GOOD, _setup
+    m, qb, lib_file, mine = _setup(tmp_path)
+    slots.PAUSED.set()
+    m.round()
+    assert qb.started == [] and qb.prog["short"] == 0.5        # not started, not rechecked
+    assert mine.read_bytes() != GOOD                           # nothing swapped in
+    assert "paused" in m.state.log[-1][1]
+    m.round()
+    assert len([t for _, t in m.state.log if "paused" in t]) == 1    # said once
+    slots.PAUSED.clear()
+    m.round()                                                  # resumed: it goes on as before
+    assert qb.started == ["short"] and "resumed" in " ".join(t for _, t in m.state.log)
+
+
+def test_mend_downloads_nothing_from_a_tracker_while_paused(tmp_path, monkeypatch):
+    from test_mend import _alone
+    from nzb2seed.pathmap import map_path
+    m, qb, lib_file, mine = _alone(tmp_path, monkeypatch)
+    slots.PAUSED.set()
+    assert m.download_rest(qb, qb.info("short"), [], map_path) is False and qb.started == []
+
+
+def test_no_automatic_torrent_is_taken_up_while_paused(tmp_path):
+    import dataclasses
+    from helpers import make_torrent
+    from nzb2seed import gui
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    box = tmp_path / "inbox"
+    box.mkdir()
+    app.cfg = dataclasses.replace(app.cfg, auto_enabled=True, auto_folder=str(box))
+    app.start_inbox()
+    t = box / "Film.2020.1080p.WEB-DL-GRP.torrent"
+    t.write_bytes(make_torrent("Film.2020.1080p.WEB-DL-GRP", {"a.mkv": b"x" * 4000}))
+    import os
+    import time
+    os.utime(t, (time.time() - 60, time.time() - 60))
+    slots.PAUSED.set()
+    app.inbox.poll()
+    assert app.inbox.items() == [] and t.exists()              # left in the folder for later
+
+
+def test_the_library_searches_and_builds_nothing_while_paused():
+    from types import SimpleNamespace
+    from nzb2seed import library
+
+    class Untouchable:
+        def __getattr__(self, name):
+            raise AssertionError(f"read {name} while paused")
+    lib = object.__new__(library.Library)
+    lib.app = SimpleNamespace(cfg=Untouchable())
+    slots.PAUSED.set()
+    lib.poll()                                                 # returns before reading anything
+
+
+def test_the_pause_button_says_what_it_holds():
+    import pathlib
+    src = (pathlib.Path(slots.__file__).parent / "web" / "js" / "components" / "pause.js").read_text(encoding="utf-8")
+    assert "mend" in src and "automatic builds" in src and "clean-ups" in src

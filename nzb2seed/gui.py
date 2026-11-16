@@ -544,7 +544,10 @@ class App:
 
     def set_paused(self, on: bool) -> dict:
         """Pause: no build starts (automatic or by hand), a running build stops before its
-        next big step, SABnzbd's queue is paused and the tracker lists are not checked.
+        next big step, SABnzbd's queue is paused and the tracker lists are not checked. And
+        nothing else nzb2seed does by itself goes on: no new automatic torrent is taken up,
+        the Library searches and builds nothing, mend starts, rechecks and swaps in nothing,
+        and the retention sweep and the download clean-up remove nothing.
         qBittorrent is left alone - stopping a torrent mid-download can cost a private
         tracker's hit-and-run grace. Resume undoes only what Pause did."""
         note = self._pause_note()
@@ -1173,7 +1176,8 @@ class App:
         def loop():
             while True:
                 try:
-                    self.clean_downloads()
+                    if not slots_mod.PAUSED.is_set():   # paused: no download is cleared
+                        self.clean_downloads()
                 except Exception as e:           # never let the cleaner die
                     print(f"download clean-up: {type(e).__name__}: {e}", flush=True)
                 self._clean_now.wait(3600)
@@ -1292,6 +1296,8 @@ class App:
         def loop():
             while True:
                 time.sleep(3600)
+                if slots_mod.PAUSED.is_set():
+                    continue                     # paused: nothing is removed until you resume
                 cfg = self.cfg
                 self.sweep_downloads(cfg)
                 if not cfg.retention_enabled:

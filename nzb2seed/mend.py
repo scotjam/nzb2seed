@@ -54,6 +54,7 @@ import time
 from . import btledger, originals
 from . import config as config_mod
 from .clients import CHECKING, ApiError
+from .slots import PAUSED
 
 INTERVAL = 30 * 60
 CHECK_AGAIN = 6 * 3600       # cross-eyed's download-check (and a repair asked for) kept this long
@@ -255,6 +256,12 @@ class Mender:
 
     def round(self):
         from .pathmap import map_path
+        if PAUSED.is_set():
+            # paused (Jobs tab): mend starts, rechecks and swaps in nothing until you resume
+            self.say("paused", "paused - mend leaves every torrent as it is until you resume")
+            return
+        if self.flagged.pop("paused", None):
+            self.state.note("resumed - mend looks at stopped torrents again")
         cfg = self.app.cfg
         qb = self.app._qbit()
         if qb is None:
@@ -284,6 +291,8 @@ class Mender:
         kept = originals.kept_roots(cfg)
         self.rows = rows                            # finish_rest looks for a same-named lead
         for r in rows:
+            if PAUSED.is_set():
+                break                               # paused part-way: the rest waits for resume
             if not (r.get("state") in STOPPED and 0 < r.get("progress", 0) < 1 and r["hash"] not in busy):
                 continue
             if r["hash"].lower() in moving:
@@ -434,6 +443,8 @@ class Mender:
             if why:
                 self.say("dl:" + h, f"{r['name']}: not started - {why}")
                 return False
+        if PAUSED.is_set():
+            return False                                    # paused: nothing is started
         btledger.record_start(cfg, h, tracker, info, short)
         qb.start(h)
         self.state.started[h] = time.time()
@@ -490,6 +501,8 @@ class Mender:
                 break
         if not swaps:
             return "none"
+        if PAUSED.is_set():
+            return "tried"                                  # paused: tried again after resume
         if (qb.info(h) or {}).get("state") not in STOPPED:
             return "tried"                                  # started meanwhile
         self.state.pending = [[dst, dst + ORIG] for _, dst, *_ in swaps]
@@ -524,7 +537,11 @@ class Mender:
             self.state.save()
         better = len(done) - len(worse)
         pct = info.get("progress", 0) * 100
-        if info.get("progress", 0) >= 1:
+        if info.get("progress", 0) >= 1 and PAUSED.is_set():
+            # paused while it was rechecked: complete, but left stopped - you start it
+            self.state.note(f"{r['name']}: finished from {swaps[0][4]} - 100.0%, left stopped "
+                            "because nzb2seed is paused")
+        elif info.get("progress", 0) >= 1:
             qb.start(h)
             self.state.note(f"{r['name']}: finished from {swaps[0][4]} - 100.0%, seeding "
                             f"(was {r['progress'] * 100:.4f}%)")

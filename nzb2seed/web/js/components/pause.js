@@ -30,7 +30,9 @@ export function PauseButton() {
     <button type="button" class=${"btn" + (st.paused ? " primary" : "")} disabled=${busy} onClick=${flip}
       aria-pressed=${st.paused}>${st.paused ? "▶ Resume" : "❚❚ Pause"}</button>
     <span class="status">${st.paused
-      ? `Paused${st.since ? " " + when(st.since) : ""}: builds and the list queue are on hold. Seeding carries on.`
-      : "Pause holds every build and the list queue (torrents keep seeding)."}</span>
+      ? `Paused${st.since ? " " + when(st.since) : ""}: nzb2seed does nothing by itself - builds, the list queue, `
+        + "automatic builds, the Library, mend and the clean-ups are all on hold. Seeding carries on."
+      : "Pause holds everything nzb2seed does by itself: builds, the list queue, automatic builds, the Library, "
+        + "mend (it starts no stopped torrent) and the clean-ups. Torrents keep seeding."}</span>
   </div>`;
 }

@@ -31,7 +31,10 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
     # a Pause / Resume button above the jobs list
-    (re.compile(r"(?:❚❚ Pause|▶ Resume) (?:Pause holds every build and the list queue \(torrents keep seeding\)\.|Paused[^:]*: builds and the list queue are on hold\. Seeding carries on\.) ?"), ""),
+    # (everything nzb2seed does by itself holds: builds, the list queue, automatic builds,
+    # the Library, mend and the clean-ups)
+    (re.compile(r"(?:❚❚ Pause|▶ Resume) (?:Pause holds everything nzb2seed does by itself:.*?Torrents keep seeding\.|"
+                r"Paused[^:]*: nzb2seed does nothing by itself.*?Seeding carries on\.) ?"), ""),
     # the Jobs list is in parts - building now, queued in the order they start, ended - and
     # marks automatic builds in a column of their own (their names without "auto:")
     (re.compile(r"(?:Active|Queued|Finished) \(\d+\)(?: next to start at the top)? ?"), ""),
