@@ -335,14 +335,14 @@ def test_a_name_already_on_the_jobs_list_costs_no_search(queue, monkeypatch):
 
 def test_not_only_video_takes_books_programs_and_games_too():
     page = ("Books\nMP3\nA Long Title Here - An Author Name [2015] [AUDIOBOOK]\n(Anonymous)\n    N/A\n    140.51 MiB\n"
-            "Some Program v1.2.345 2024 - GRPA [MULTI]\nUploaderName\nA Game v1.0.1 Update 2024 - GRPB [MULTI]\n"
+            "Some Program v1.2.345 2024 - GRPA [MULTI]\nUploaderName\nA Game v1.0.1 2024 - GRPB [MULTI]\n"
             "How To Do Things - Some Writer\nA Manual Of Sorts - Another Writer [2008]\n"
             "Film 2010 1080p WEB-DL AAC2.0 H.264-Rel\nRelUploader\nJapanese (JP)\nPortuguese (BR)\n"
             "Seedbox: SomeHost | OtherHost\nTerms Privacy Policy DMCA IRC Chat\nRecently Downloaded, Un-Seeded Torrents\n")
     assert tracklist.parse(page) == ["Film 2010 1080p WEB-DL AAC2.0 H.264-Rel"]          # video only, as before
     assert tracklist.parse(page, any_kind=True) == [
         "A Long Title Here - An Author Name [2015] [AUDIOBOOK]", "Some Program v1.2.345 2024 - GRPA [MULTI]",
-        "A Game v1.0.1 Update 2024 - GRPB [MULTI]", "How To Do Things - Some Writer",
+        "A Game v1.0.1 2024 - GRPB [MULTI]", "How To Do Things - Some Writer",
         "A Manual Of Sorts - Another Writer [2008]", "Film 2010 1080p WEB-DL AAC2.0 H.264-Rel"]
 
 
@@ -355,3 +355,64 @@ def test_the_tab_offers_it_with_its_caveat():
     import pathlib
     src = (pathlib.Path(tracklist.__file__).parent / "web" / "js" / "tabs" / "tracklist.js").read_text(encoding="utf-8")
     assert "(less reliable parsing)" in src and "any_kind" in src
+
+
+def test_a_scene_game_is_found_by_its_title_and_group():
+    """A tracker lists "Title v1.0 2026 - GRP [MULTI]"; the group posts "Title-GRP"."""
+    name = "Some Game: Second Part v1.0 2026 - GRPA [MULTI]"
+    post = "Some.Game.Second.Part-GRPA"
+    assert tracklist.other_facets(name) == {"title": "Some Game Second Part", "key": "somegamesecondpart", "group": "grpa"}
+    assert tracklist.other_alike(post, tracklist.other_facets(name))
+    assert tracklist.other_alike(post + "-xpost", tracklist.other_facets(name))          # a repost
+    for other in ["Some.Game.Second.Part-GRPB",                  # another group
+                  "Some.Game.Second.Part.Update.v1.0.2-GRPA",    # an update, not the game
+                  "Some.Game.Second.Part.Trainer-GRPA",
+                  "Some.Game.Third.Part-GRPA"]:                  # another game
+        assert not tracklist.other_alike(other, tracklist.other_facets(name)), other
+    r = run({"Some Game Second Part": [rel(post, "usenet", 4 * GB, indexer="UsenetA")]}, name, tracker="")
+    assert r["on_usenet"] and post in r["verdict"] and r["verdict"].startswith("same release")
+
+
+def test_a_game_with_no_group_is_never_matched_by_its_title():
+    assert tracklist.other_facets("Some Game 11890051 2018 - NoGroup [MULTI]") is None
+    assert tracklist.other_facets("Some Game v1.1 1997 - GRPA [ENG] [PS1]")["title"] == "Some Game"
+
+
+def test_patches_and_updates_are_left_out_of_the_list():
+    text = ("Some Game v1.4.1 2026 - GRPA [MULTI] [PATCH]\nOther Game Patch v1.2 2025 - GRPB [MULTI]\n"
+            "Fourth Game v1.0.2 Update 2026 - GRPD [MULTI]\nThird Game v1.0 2026 - GRPC [MULTI]\n")
+    assert tracklist.DEFAULT_RULES["skip_words"] == ["patch", "update"]
+    assert tracklist.parse(text, any_kind=True) == ["Third Game v1.0 2026 - GRPC [MULTI]"]
+
+
+def test_rules_are_kept_per_tracker_with_the_default_ones_for_the_rest(tmp_path):
+    store = tracklist.RulesStore(str(tmp_path / "rules.json"))
+    assert store.rules("TrackerNine") == tracklist.DEFAULT_RULES and not store.own("TrackerNine")
+    store.save("TrackerNine", {"uploader_words": "anon, staff ,  ", "skip_words": [], "groupless_max_pct": "10",
+                               "must_agree": ["year", "bogus"], "nonsense": 1})
+    nine = tracklist.RulesStore(str(tmp_path / "rules.json")).rules("TrackerNine")      # read back from disk
+    assert nine["uploader_words"] == ["anon", "staff"] and nine["skip_words"] == []
+    assert nine["groupless_max_pct"] == 10.0 and nine["must_agree"] == ["year"] and "nonsense" not in nine
+    assert store.rules("TrackerX") == tracklist.DEFAULT_RULES                            # others: the defaults
+    store.save("", {"skip_words": ["sample"]})
+    assert store.rules("TrackerX")["skip_words"] == ["sample"] and store.rules("TrackerNine")["skip_words"] == []
+    store.reset("TrackerNine")
+    assert store.rules("TrackerNine")["skip_words"] == ["sample"] and not store.own("TrackerNine")
+
+
+def test_the_rules_change_how_names_are_read():
+    text = "Some Film 2020 1080p WEB-DL DDP5.1 H.264-Rel Staff\nOther Film 2021 1080p WEB-DL H.264-Rel SAMPLE\n"
+    assert tracklist.parse(text) == ["Some Film 2020 1080p WEB-DL DDP5.1 H.264-Rel",
+                                     "Other Film 2021 1080p WEB-DL H.264-Rel"]
+    with tracklist.using({"strip_uploader": False, "skip_words": ["sample"]}):
+        assert tracklist.parse(text) == ["Some Film 2020 1080p WEB-DL DDP5.1 H.264-Rel Staff"]
+
+
+def test_the_rules_change_what_has_to_agree():
+    post, name = "Some.Film.2020.1080p.NF.WEB-DL.DDP5.1.H.264-Rel", "Some Film 2020 1080p AMZN WEB-DL DD+ 5.1 H.264-Rel"
+    assert not tracklist.alike(post, name)                                   # another service
+    with tracklist.using({"must_agree": ["year", "source", "codec", "hdr"]}):
+        assert tracklist.alike(post, name)                                   # service left out
+    with tracklist.using({"renamed_match": False}):
+        r = run({"Some Film 2020": [rel(post, "usenet", 10 * GB)]}, "Some Film 2020 1080p NF WEB-DL DD+ 5.1 H.264-Rel", tracker="")
+        assert not r["on_usenet"]                                            # only the exact name will do

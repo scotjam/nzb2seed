@@ -27,9 +27,124 @@ from . import matching
 from .clients import Prowlarr, Release
 from .config import Config
 
+# ---------------------------------------------------------------- the rules (Advanced options)
+# How pasted names are read and matched. These are the defaults, which suit UNIT3D sites
+# (each torrent listed under its uploader's release name, the uploader in a column of its
+# own) and do no harm elsewhere; the tab's Advanced options
+# change them for one tracker (or for every tracker without its own), for a tracker whose
+# pages read badly. Kept in tracklist_rules.json next to the config.
+DEFAULT_RULES = {
+    "strip_uploader": True,       # the word after a release group is the uploader, and left off
+    "uploader_words": ["anon", "anonymous", "uploader"],         # stand-ins for a hidden uploader
+    "no_group_words": ["nogroup", "nogrp", "unknown"],           # a group that says there is none
+    "skip_words": ["patch", "update"],   # lines with any of these words are never names
+    "renamed_match": True,        # match names a tracker writes its own way by what the release is
+    "must_agree": ["year", "source", "codec", "hdr", "service"],  # ...and these have to agree
+    "title_year_search": True,    # also search a film by its title and year alone
+    "groupless_max_pct": 6,       # a post matched with no group: at most this much bigger than the torrent
+    "other_tags": ["audiobook", "ebook", "e-book", "pdf", "epub", "mobi", "azw", "azw3", "mp3", "m4b",
+                   "flac", "multi", "pack", "comic", "cbr", "cbz", "retail", "repack", "portable",
+                   "x64", "x86", "mac", "macos", "win", "windows"],     # end tags of other kinds of names
+    "repost_suffixes": ["xpost", "asrequested", "obfuscated", "postbot", "repost"],
+    "not_release_words": ["update", "patch", "trainer", "crack", "dlc"],  # posts that are not the game itself
+}
+AGREE = ("year", "source", "codec", "hdr", "service")
+_LISTS = ("uploader_words", "no_group_words", "skip_words", "other_tags", "repost_suffixes", "not_release_words")
+_active = threading.local()
+
+
+def clean_rules(r: dict) -> dict:
+    """Rules as given (from the page), checked: unknown keys dropped, lists of plain words."""
+    out = {}
+    for k, v in (r or {}).items():
+        if k not in DEFAULT_RULES:
+            continue
+        if k in _LISTS:
+            words = v.split(",") if isinstance(v, str) else (v if isinstance(v, list) else [])
+            out[k] = list(dict.fromkeys(str(w).strip().lower() for w in words if str(w).strip()
+                                        and re.fullmatch(r"[\w+.-]{1,40}", str(w).strip())))
+        elif k == "must_agree":
+            out[k] = [x for x in (v if isinstance(v, list) else []) if x in AGREE]
+        elif k == "groupless_max_pct":
+            try:
+                out[k] = max(0.0, min(100.0, float(v)))
+            except (TypeError, ValueError):
+                pass
+        else:
+            out[k] = bool(v)
+    return out
+
+
+class RulesStore:
+    """{"default": {...}, "trackers": {name: {...}}}: the rules saved from the tab."""
+
+    def __init__(self, path: str):
+        self.path, self.lock = path, threading.Lock()
+        try:
+            with open(path, encoding="utf-8") as fh:
+                self.data = json.load(fh)
+        except (OSError, ValueError):
+            self.data = {}
+        self.data.setdefault("default", {})
+        self.data.setdefault("trackers", {})
+
+    def rules(self, tracker: str = "") -> dict:
+        """The rules in force for this tracker: its own, else the default ones."""
+        own = self.data["trackers"].get((tracker or "").strip())
+        return {**DEFAULT_RULES, **clean_rules(self.data["default"]), **clean_rules(own or {})}
+
+    def own(self, tracker: str) -> bool:
+        return bool(tracker and tracker.strip() in self.data["trackers"])
+
+    def save(self, tracker: str, rules: dict):
+        with self.lock:
+            r = clean_rules(rules)
+            if tracker:
+                self.data["trackers"][tracker.strip()] = r
+            else:
+                self.data["default"] = r
+            self._write()
+
+    def reset(self, tracker: str):
+        with self.lock:
+            if tracker:
+                self.data["trackers"].pop(tracker.strip(), None)
+            else:
+                self.data["default"] = {}
+            self._write()
+
+    def _write(self):
+        tmp = f"{self.path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.data, fh, indent=1)
+        os.replace(tmp, self.path)
+
+
+class using:
+    """``with using(rules):`` - reading and matching in this thread follow these rules."""
+
+    def __init__(self, rules):
+        self.rules = {**DEFAULT_RULES, **(rules or {})}
+
+    def __enter__(self):
+        self.before = getattr(_active, "rules", None)
+        _active.rules = self.rules
+        return self.rules
+
+    def __exit__(self, *exc):
+        _active.rules = self.before
+
+
+def rule(key: str):
+    return (getattr(_active, "rules", None) or DEFAULT_RULES)[key]
+
+
+def _words_rx(words):
+    words = [re.escape(w) for w in words if w]
+    return re.compile(r"(?<![a-z0-9])(?:" + "|".join(words) + r")(?![a-z0-9])", re.I) if words else None
+
 ENOUGH = 0.97                # posts this much of the torrent's size are big enough (par2 aside)
 GIB = 1024 ** 3
-GROUPLESS_MAX = 1.06         # ...and a post matched with no release group to go by no bigger than this
 _RELEASEISH = re.compile(r"(?<![a-z0-9])(?:s\d{1,3}(?:e\d{1,4})?|(?:19|20)\d{2}|(?:2160|1080|720|576|480)[pi]"
                          r"|web-?dl|webrip|bluray|hdtv|remux|x26[45]|h\.?26[45])(?![a-z0-9])", re.I)
 _GROUP_END = re.compile(r"-[A-Za-z0-9]{2,}$")
@@ -70,8 +185,6 @@ def _score(cell: str) -> int:
 
 
 _NOT_GROUP = {"dl", "rip", "ray", "hd", "ma", "es"}       # WEB-DL, Blu-ray, DTS-HD MA ...
-_NO_GROUP = {"nogroup", "nogrp", "unknown"}                # what a tracker writes for a release with none
-_UPLOADER_WORDS = {"anon", "anonymous", "uploader"}       # what a tracker shows for a hidden uploader
 
 
 def bare(name: str) -> str:
@@ -81,21 +194,54 @@ def bare(name: str) -> str:
     written with spaces, or a dotted one followed by a space, carries one."""
     n = (name or "").strip()
     toks = n.split(" ")
-    if len(toks) < 2 or _RELEASEISH.search(toks[-1]) or (len(toks) == 2 and "." not in toks[0]):
+    if not rule("strip_uploader") or len(toks) < 2 or _RELEASEISH.search(toks[-1]) \
+            or (len(toks) == 2 and "." not in toks[0]):
         return n
     m = _GROUP_END.search(toks[-2])
-    if (m and m.group()[1:].lower() not in _NOT_GROUP) or toks[-1].lower() in _UPLOADER_WORDS:
+    if (m and m.group()[1:].lower() not in _NOT_GROUP) or toks[-1].lower() in rule("uploader_words"):
         return " ".join(toks[:-1])
     return n
 
 
 # Not only video (the tab's "less reliable parsing" option): books, audiobooks, software and
 # games name no resolution or source, so they are told by how such names end instead
-_TAG_END = re.compile(r"\[(?:audiobook|ebook|e-book|pdf|epub|mobi|azw3?|mp3|m4b|flac|multi|pack|"
-                      r"comic|cbr|cbz|retail|repack|portable|x64|x86|macos?|win(?:dows)?)\]$", re.I)
 _SCENE_END = re.compile(r"\s-\s[A-Z0-9][A-Za-z0-9]{1,}(?:\s\[[^\]]+\])*$")        # "... - GRP [MULTI]"
 _VERSION = re.compile(r"(?<![a-z0-9])v\d+(?:\.\d+)+(?![0-9])", re.I)            # "v1.2.345"
 _WORDS = re.compile(r"[^\W\d_]{2,}")
+
+# A scene game or program as a tracker lists it - "Title v1.0.3 2026 - GRP [MULTI]" - and
+# as its group posts it on Usenet: "Title-GRP" (a repost adds "-xpost" or the like)
+_OTHER = re.compile(r"^(?P<body>.+?)\s+-\s+(?P<group>[A-Za-z0-9]{2,})(?P<tags>(?:\s*\[[^\]]*\])*)\s*$")
+_TITLE_END = re.compile(r"\s+(?:v\d[\w.]*|(?:19|20)\d{2}|\d{6,})(?:\s|$)", re.I)  # version, year or build
+
+
+def other_facets(name: str) -> dict | None:
+    """Title and group of a game or program named the scene's way, or None: no group, or
+    one that names none ("NoGroup") - then only its exact name will do."""
+    m = _OTHER.match(bare(name).strip())
+    if not m:
+        return None
+    group = m.group("group")
+    if group.lower() in rule("no_group_words"):
+        return None
+    body = m.group("body")
+    end = _TITLE_END.search(body)
+    title = re.sub(r"\s+", " ", (body[:end.start()] if end else body).replace(":", " ")).strip()
+    return {"title": title, "key": loose(title), "group": group.lower()} if loose(title) else None
+
+
+def other_alike(post: str, o: dict) -> bool:
+    """Is ``post`` the same game or program from the same group: "Title-GRP", with no
+    update, patch or trainer in its name (those are not the release)?"""
+    p = post.strip()
+    reposts = [re.escape(w) for w in rule("repost_suffixes")]
+    if reposts:
+        p = re.sub(r"-(?:" + "|".join(reposts) + r")$", "", p, flags=re.I)
+    m = re.match(r"^(?P<title>.+)-(?P<group>[A-Za-z0-9]+)$", p)
+    not_it = _words_rx(rule("not_release_words"))
+    if not m or m.group("group").lower() != o["group"] or (not_it and not_it.search(m.group("title"))):
+        return False
+    return loose(m.group("title")) == o["key"]
 
 
 def _other_score(cell: str) -> int:
@@ -109,7 +255,9 @@ def _other_score(cell: str) -> int:
     words = _WORDS.findall(c)
     if len(words) < 2:
         return 0
-    if _TAG_END.search(c) or (_SCENE_END.search(c) and (_VERSION.search(c) or re.search(r"\[[^\]]+\]$", c))):
+    tags = [re.escape(t) for t in rule("other_tags")]
+    tag_end = re.search(r"\[(?:" + "|".join(tags) + r")\]$", c, re.I) if tags else None
+    if tag_end or (_SCENE_END.search(c) and (_VERSION.search(c) or re.search(r"\[[^\]]+\]$", c))):
         return 2
     if _VERSION.search(c) and len(words) >= 2:
         return 1
@@ -126,8 +274,11 @@ def parse(text: str, any_kind: bool = False) -> list[str]:
     after it. Duplicates once. ``any_kind``: books, audiobooks, programs and games too,
     told apart less reliably (see _other_score)."""
     score = (lambda c: _score(c) * 10 or _other_score(c)) if any_kind else _score
+    skip = _words_rx(rule("skip_words"))          # "[PATCH]": no release of its own
     out, seen = [], set()
     for line in (text or "").splitlines():
+        if skip and skip.search(line):
+            continue
         cells = [c.strip() for c in re.split(r"\t|\s{3,}", line) if c.strip()]
         best = max(cells, key=score, default="")
         if not best or not score(best):
@@ -261,7 +412,8 @@ def facets(name: str) -> dict:
             "season": int(se.group(1)) if se else None,
             "episode": int(se.group(2)) if se and se.group(2) else None,
             "res": res.group(1) if res else None, "kind": _kind(c), "codec": _codec(c), "hdr": _hdr(c), "service": _service(c), "audio": _audio(c),
-            "group": grp.group(1).lower() if grp and grp.group(1).lower() not in _NOT_GROUP | _NO_GROUP else None}
+            "group": grp.group(1).lower() if grp and grp.group(1).lower() not in _NOT_GROUP
+            and grp.group(1).lower() not in rule("no_group_words") else None}
 
 
 def alike(post: str, name: str, episode_of_pack: bool = False) -> bool:
@@ -288,10 +440,11 @@ def alike(post: str, name: str, episode_of_pack: bool = False) -> bool:
             return False
     elif a["episode"] != b["episode"]:
         return False
-    if a["hdr"] != b["hdr"]:            # HDR10+ or not is another file, even where one name says nothing
+    agree = rule("must_agree")
+    if "hdr" in agree and a["hdr"] != b["hdr"]:   # HDR10+ or not is another file, even where one name says nothing
         return False
-    for k in ("year", "kind", "codec", "service"):
-        if a[k] and b[k] and a[k] != b[k]:
+    for k, f in (("year", "year"), ("source", "kind"), ("codec", "codec"), ("service", "service")):
+        if k in agree and a[f] and b[f] and a[f] != b[f]:
             return False
     return True
 
@@ -325,11 +478,12 @@ def check(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[i
                                        usenet(query) + nzbs)
     renamed = False
     groupless = facets(name)["group"] is None
-    if not exact and not eps and (short_query(name) or title_year(name)):
+    if not exact and not eps and rule("renamed_match") and (short_query(name) or title_year(name)):
         # a tracker that writes release names its own way ("DD+ 5.1", "iT", spaces) is
         # matched by what the release is, from a search by its title - and by its title
         # and year alone, as an edition after the year is written in many ways
-        found = nzbs + [r for q in (short_query(name), title_year(name)) if q for r in usenet(q)]
+        found = nzbs + [r for q in (short_query(name), title_year(name) if rule("title_year_search") else None)
+                        if q for r in usenet(q)]
         exact = matching.rank_nzbs([n for n in found if alike(n.title, name)])
         if not exact:
             best: dict[int, Release] = {}
@@ -340,6 +494,13 @@ def check(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[i
                         best[e] = n
             eps = [best[e] for e in sorted(best)]
         renamed = bool(exact or eps)
+    o = None if exact or eps or not rule("renamed_match") else other_facets(name)
+    if o and loose(o["title"]) != loose(name):
+        # a game or program the tracker lists with its version, year and tags, which its
+        # group posts as just "Title-GRP": looked for by its title, matched by title and group
+        exact = matching.rank_nzbs([n for n in nzbs + usenet(o["title"]) if other_alike(n.title, o)])
+        renamed = bool(exact)
+        groupless = False                  # matched by its group: none of the groupless caveats
     if not exact and not eps:
         out["verdict"] = "no Usenet post of this release" + (" - the tracker was not asked" if tracker else "")
         return out
@@ -360,7 +521,7 @@ def check(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[i
     tracker_search = lambda q: [r for r in pr.search(q, ids, cfg.categories) if r.protocol == "torrent"]
     is_it = lambda t: _same(t.title, name) or alike(t.title, name)
     torrents = tracker_search(name)
-    for q in (short_query(name), title_year(name)):              # by its title, if not by its whole name
+    for q in (short_query(name), title_year(name) if rule("title_year_search") else None):   # by its title
         if q and not any(is_it(t) for t in torrents):
             torrents = tracker_search(q) or torrents
     same = sorted((t for t in torrents if is_it(t)), key=lambda t: -(t.seeders or 0))
@@ -374,7 +535,7 @@ def check(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[i
     if exact:
         # with no group to go by, a post must be the torrent's size, not merely hold it
         big = [n for n in exact if not t.size or (n.size >= t.size * ENOUGH
-                                                  and not (renamed and groupless and n.size > t.size * GROUPLESS_MAX))]
+                                                  and not (renamed and groupless and n.size > t.size * (1 + rule("groupless_max_pct") / 100)))]
         if big:
             out.update(nzbs=[dataclasses.asdict(n) for n in big], plausible=True,
                        verdict=f"same release on Usenet ({len(big)} post{'s' if len(big) != 1 else ''}: "
@@ -422,6 +583,8 @@ class Queue:
                 if r["state"] == "checking":
                     r["state"] = "waiting"
         self.next_id = max((l["id"] for l in self.lists), default=0) + 1
+        # the Advanced options: how names are read and matched, per tracker
+        self.rules = RulesStore(os.path.join(os.path.dirname(os.path.abspath(path)), "tracklist_rules.json"))
         self.on_save = None
         self.wake = threading.Event()
         if start:
@@ -539,7 +702,8 @@ class Queue:
         try:
             cfg = self.app.cfg
             pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
-            result = check(cfg, pr, row["name"], lst["tracker"], usenet_indexers(cfg, pr))
+            with using(self.rules.rules(lst["tracker"])):
+                result = check(cfg, pr, row["name"], lst["tracker"], usenet_indexers(cfg, pr))
             listed = self.app.listed(result["torrent"]["title"]) if result.get("torrent") else None
             with self.lock:
                 row.update(state="done", result=result)

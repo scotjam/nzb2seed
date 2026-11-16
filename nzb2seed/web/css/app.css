@@ -547,3 +547,11 @@ nav a.tour-here { outline: 2px solid var(--torrent); outline-offset: 2px; }
 .joblist .jmeter .bar { flex: 1; max-width: 260px; height: 6px; border-radius: 3px; background: var(--idle); overflow: hidden; }
 .joblist .jmeter .bar i { display: block; height: 100%; background: var(--usenet); transition: width .6s; }
 .joblist .jmeter small { color: var(--ink-2); font-size: .76rem; white-space: nowrap; }
+
+/* Torrent list 2 Seed: Advanced options - the rules names are read and matched by */
+.tadvanced { margin: 6px 0; }
+.trules { margin-top: 8px; border: 1px solid var(--rule); border-radius: 8px; padding: 10px 14px; }
+.trules legend { font-weight: 700; padding: 0 6px; }
+.trules .tagree { margin: 0 0 6px 26px; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .9rem; }
+.trules .tagree > span { flex-basis: 100%; color: var(--ink-2); }
+.trules .field input[type="text"] { width: 100%; }

@@ -1984,8 +1984,18 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 if path == "/api/pair":
                     return self.pair(body)
                 if path == "/api/tracklist/parse":
-                    return self._json({"names": tracklist_mod.parse(body.get("text") or "",
-                                                                    any_kind=bool(body.get("any_kind")))})
+                    with tracklist_mod.using(app.queue().rules.rules(str(body.get("tracker") or ""))):
+                        return self._json({"names": tracklist_mod.parse(body.get("text") or "",
+                                                                        any_kind=bool(body.get("any_kind")))})
+                # the Advanced options: the rules for reading and matching a tracker's names
+                if path == "/api/tracklist/rules":
+                    store, tracker = app.queue().rules, str(body.get("tracker") or "").strip()
+                    if body.get("save") is not None:
+                        store.save(tracker, body.get("save") or {})
+                    elif body.get("reset"):
+                        store.reset(tracker)
+                    return self._json({"rules": store.rules(tracker), "defaults": tracklist_mod.DEFAULT_RULES,
+                                       "own": store.own(tracker)})
                 # the tracker list tab's queue: lists are checked here, one name at a time
                 if path == "/api/tracklist/lists":
                     return self._json({"lists": app.queue().snapshot()})

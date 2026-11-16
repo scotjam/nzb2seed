@@ -4,7 +4,7 @@
 // for those) the tracker for the torrent - so a list goes on being checked with the page
 // closed. Only plausible names are built (as they are found, or when Build ticked is
 // pressed), and never one already on the jobs list.
-import { html, useEffect, useReducer, useRef } from "../lib.js";
+import { html, useEffect, useReducer, useRef, useState } from "../lib.js";
 import { api, onChange } from "../api.js";
 import { refreshJobs, toast } from "../store.js";
 import { keep, remember, size, when } from "../util.js";
@@ -75,6 +75,72 @@ function List({ l, place, open, unpicked, redraw }) {
   </details>`;
 }
 
+/* Advanced options: the rules names are read and matched by - for the tracker chosen, or
+   the default ones (for trackers without their own, and Not specified). For a tracker whose
+   pages read badly: change them, save, and the pasted list is read again. */
+const AGREE = [["year", "year"], ["source", "source (WEB-DL, Blu-ray, Remux, disc)"], ["codec", "codec (H.264, H.265)"],
+               ["hdr", "HDR / Dolby Vision"], ["service", "streaming service (NF, AMZN...)"]];
+const LISTS = [
+  ["uploader_words", "Words that stand for a hidden uploader", "left off the end of a name"],
+  ["no_group_words", "Words that mean no release group", "such a name is matched only very strictly"],
+  ["skip_words", "Skip lines with any of these words", "e.g. patch - never searched"],
+  ["other_tags", "End tags of books, programs and games", "for Not only video: [AUDIOBOOK], [PDF]..."],
+  ["repost_suffixes", "Repost endings on Usenet names", "left off a post's name: -xpost..."],
+  ["not_release_words", "Posts with these words are not the release", "for games and programs: update, trainer..."],
+];
+function Advanced({ tracker, saved }) {
+  const [open, setOpen] = useState(false);
+  const [r, setR] = useState(null), [own, setOwn] = useState(false), [busy, setBusy] = useState(false);
+  const load = (fields = {}) => api("/api/tracklist/rules", { tracker, ...fields })
+    .then(d => { setR({ ...d.rules, ...Object.fromEntries(LISTS.map(([k]) => [k, d.rules[k].join(", ")])) }); setOwn(d.own); })
+    .catch(err => toast("Could not read the rules: " + err.message));
+  useEffect(() => { if (open) load(); }, [open, tracker]);
+  const set = (k, v) => setR({ ...r, [k]: v });
+  const act = async (fields, said) => {
+    setBusy(true);
+    try { await load(fields); saved(); toast(said); } finally { setBusy(false); }
+  };
+  const who = tracker || "the default rules";
+  return html`<div class="tadvanced">
+    <button type="button" class="btn" aria-expanded=${open} onClick=${() => setOpen(!open)}>
+      ${open ? "Hide advanced options" : "Advanced options"}</button>
+    ${open && r && html`<fieldset class="trules">
+      <legend>${tracker ? `Rules for ${tracker}` : "Default rules (UNIT3D)"}
+        <small class="status">${tracker ? (own ? " - its own" : " - the default (UNIT3D) ones, until saved for it")
+          : " - for trackers without their own, and Not specified"}</small></legend>
+      ${!tracker && html`<p class="status">The defaults suit UNIT3D sites - those Prowlarr lists with "(API)" after
+        their name: each torrent is listed under its uploader's release name, with the uploader in a column of its own.
+        A site that lists them its own way (renamed, or with the uploader after the name) is best given rules of its own.</p>`}
+      <p class="status">How names pasted from ${tracker || "a tracker"} are read, and matched to Usenet posts. Change
+        them if its pages are not read well; the pasted list is read again when saved.</p>
+      <label class="check"><input type="checkbox" checked=${r.strip_uploader} onChange=${(e) => set("strip_uploader", e.target.checked)} />
+        The word after a release group is the uploader - leave it off</label>
+      <label class="check"><input type="checkbox" checked=${r.renamed_match} onChange=${(e) => set("renamed_match", e.target.checked)} />
+        Match names this tracker writes its own way by what the release is (spaces, "DD+ 5.1", "iT"...)</label>
+      ${r.renamed_match && html`<div class="tagree"><span>These have to agree as well as title, year or season,
+          resolution and group:</span>
+        ${AGREE.map(([k, label]) => html`<label class="check"><input type="checkbox" checked=${r.must_agree.includes(k)}
+          onChange=${(e) => set("must_agree", e.target.checked ? [...r.must_agree, k] : r.must_agree.filter(x => x !== k))} />${label}</label>`)}</div>`}
+      <label class="check"><input type="checkbox" checked=${r.title_year_search} onChange=${(e) => set("title_year_search", e.target.checked)} />
+        Also search a film by its title and year alone (an edition after the year is written in many ways)</label>
+      <label class="field"><span>A post matched with no release group: at most this much bigger than the torrent (%)</span>
+        <input type="number" min="0" max="100" step="0.5" value=${r.groupless_max_pct}
+          onInput=${(e) => set("groupless_max_pct", e.target.value)} /></label>
+      ${LISTS.map(([k, label, hint]) => html`<label class="field"><span>${label} <small class="status">${hint}</small></span>
+        <input type="text" value=${r[k]} placeholder="none" onInput=${(e) => set(k, e.target.value)} /></label>`)}
+      <div class="actions">
+        <button type="button" class="btn primary" disabled=${busy}
+          onClick=${() => act({ save: { ...r, groupless_max_pct: Number(r.groupless_max_pct) } }, `Saved for ${who}.`)}>
+          ${tracker ? `Save for ${tracker}` : "Save as the default rules"}</button>
+        <button type="button" class="btn" disabled=${busy || (tracker && !own)}
+          title=${tracker ? "Forget this tracker's own rules: it follows the default ones again" : "Back to the rules nzb2seed comes with"}
+          onClick=${() => act({ reset: true }, tracker ? `${tracker} follows the default rules again.` : "The default rules are as nzb2seed came.")}>
+          ${tracker ? "Use the default (UNIT3D) rules" : "Reset to how nzb2seed came"}</button>
+      </div>
+    </fieldset>`}
+  </div>`;
+}
+
 export function TracklistTab({ active }) {
   const s = useRef({ text: "", tracker: remember("tracklist.tracker", ""), trackers: [], lists: [],
                      auto: remember("tracklist.auto", "1") === "1",     // on unless unticked
@@ -83,6 +149,24 @@ export function TracklistTab({ active }) {
                      unpicked: new Set(), sent: new Set() }).current;
   const [, redraw] = useReducer(n => n + 1, 0);
   const [opts, setOpts] = useOptions();
+  // coming to this tab, or back to the browser tab showing it: the names are selected, so
+  // the next list pasted replaces them
+  const box = useRef(null);
+  useEffect(() => {
+    if (!active) return;
+    let clicked = 0;                         // coming back by clicking something on the page: left to that
+    const down = () => { clicked = Date.now(); };
+    const pick = () => setTimeout(() => {
+      const el = box.current;
+      if (!el || document.hidden || Date.now() - clicked < 400) return;
+      el.focus({ preventScroll: true });
+      el.select();
+    }, 50);
+    pick();
+    window.addEventListener("focus", pick);
+    document.addEventListener("pointerdown", down, true);
+    return () => { window.removeEventListener("focus", pick); document.removeEventListener("pointerdown", down, true); };
+  }, [active]);
   useEffect(() => {
     if (!active || s.trackers.length) return;
     api("/api/library/indexers", {}).then(r => { s.trackers = r.indexers || []; redraw(); }).catch(() => {});
@@ -104,7 +188,8 @@ export function TracklistTab({ active }) {
     s.reading = true; redraw();
     s.timer = setTimeout(async () => {
       try {
-        const names = (await api("/api/tracklist/parse", { text, any_kind: s.anyKind })).names;
+        const names = (await api("/api/tracklist/parse", { text, any_kind: s.anyKind,
+                                                         tracker: s.tracker === NO_TRACKER ? "" : s.tracker })).names;
         if (n !== s.seq) return;                    // typed again meanwhile
         s.preview = names;
         for (const x of [...s.skip]) if (!names.includes(x)) s.skip.delete(x);
@@ -154,7 +239,7 @@ export function TracklistTab({ active }) {
       torrent-content downloads</p>
     <form class="form" onSubmit=${add}>
       <label class="field"><span>Torrent names</span>
-        <textarea rows="10" placeholder="One per line - copied rows of a tracker's list are fine: sizes, dates and the like beside the names are ignored"
+        <textarea ref=${box} rows="10" placeholder="One per line - copied rows of a tracker's list are fine: sizes, dates and the like beside the names are ignored"
           value=${s.text} onInput=${(e) => pasted(e.target.value)}></textarea></label>
       <label class="check"><input type="checkbox" checked=${s.anyKind} onChange=${setAnyKind} />
         Not only video: books, audiobooks, programs and games too (less reliable parsing)</label>
@@ -180,7 +265,7 @@ export function TracklistTab({ active }) {
               s.sent.has(x) && html` <small class="tadded">added</small>`}</label></li>`)}</ul>`}
       </div>`}
       <label class="field"><span>Tracker</span>
-        <select value=${s.tracker} onChange=${(e) => { s.tracker = e.target.value; redraw(); }}>
+        <select value=${s.tracker} onChange=${(e) => { s.tracker = e.target.value; if (s.text.trim()) pasted(s.text); else redraw(); }}>
           <option value="">${s.trackers.length ? "Choose…" : "Loading the trackers from Prowlarr…"}</option>
           <option value=${NO_TRACKER}>Not specified (search Usenet only)</option>
           ${s.trackers.map(t => html`<option value=${t}>${t}</option>`)}
@@ -189,6 +274,8 @@ export function TracklistTab({ active }) {
         to see which releases are there. No tracker is asked for the torrent, so nothing can be built from this
         list - choose a tracker for that.</small>`}
       <div class="opts actions"><${Options} value=${opts} onChange=${setOpts} matchTorrent /></div>
+      <${Advanced} tracker=${s.tracker && s.tracker !== NO_TRACKER ? s.tracker : ""}
+        saved=${() => { if (s.text.trim()) pasted(s.text); }} />
       <label class=${"check" + (noTracker ? " disabled" : "")}
         title=${noTracker ? "Choose a tracker first: without one there is no torrent to build" : ""}>
         <input type="checkbox" checked=${auto} disabled=${noTracker} onChange=${setAuto} />
