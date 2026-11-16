@@ -9,6 +9,7 @@ import { api, onChange } from "../api.js";
 import { refreshJobs, toast } from "../store.js";
 import { keep, remember, size, when } from "../util.js";
 import { Options, useOptions } from "../components/options.js";
+import { PauseButton } from "../components/pause.js";
 
 const ACTIVE = ["queued", "checking"];
 // the tracker choice for a list searched on Usenet only: no torrent is looked for, nothing built
@@ -25,7 +26,28 @@ function stateOf(l, place) {
   if (l.state === "queued") return `queued${place > 1 ? ` (${place - 1} list${place > 2 ? "s" : ""} ahead)` : " - next"} · ${l.rows.length} names`;
   return `${l.state === "stopped" ? "stopped" : "checked"}: ${c.done} of ${l.rows.length} · ${c.plausible} plausible`;
 }
-const buildable = (r) => r.state === "done" && r.result.plausible && !r.job && !r.listed;
+const buildable = (r) => r.state === "done" && (r.result.plausible || r.result.download) && !r.job && !r.listed;
+
+/* How a list goes about its names. Only the first is safe: the other two download from the
+   tracker over BitTorrent, using its ratio and bringing its seeding (hit-and-run) rules. */
+const RISK = "WARNING: uses tracker ratio and creates HnR exposure";
+const MODES = [
+  ["normal", "Normal safe operation", "built from Usenet only - nothing comes over BitTorrent"],
+  ["fallback", "Download from torrents if not on usenet", `${RISK} - don't do this`],
+  ["torrent", "Skip usenet search and just download from torrent tracker", `${RISK} - don't do this`],
+];
+const MODE_SHORT = { fallback: "downloads over BitTorrent if not on Usenet", torrent: "downloads over BitTorrent only" };
+
+/* a list queued with a warning option: what it downloads over BitTorrent, and from where */
+function ListWarning({ l }) {
+  if (!MODE_SHORT[l.mode]) return null;
+  const rows = l.rows.filter(r => r.state === "done" && r.result?.download);
+  const bytes = rows.reduce((n, r) => n + (r.result.torrent?.size || 0), 0);
+  const going = ACTIVE.includes(l.state);
+  return html`<div class="twarn tlistwarn">${RISK} - ${l.tracker}: ${MODE_SHORT[l.mode]} ·
+    ${size(bytes)} to download over BitTorrent in ${rows.length} torrent${rows.length === 1 ? "" : "s"}${
+    going ? " so far (still checking)" : ""}${l.auto ? "" : " - when built with Build ticked"}</div>`;
+}
 
 /* one list in the queue: its names, what was found, and its buttons */
 function List({ l, place, open, unpicked, redraw }) {
@@ -43,7 +65,8 @@ function List({ l, place, open, unpicked, redraw }) {
     } catch (err) { toast("Could not start them: " + err.message); }
   };
   return html`<details class="tqueue" open=${open}>
-    <summary><b>${l.tracker || "Usenet only (no tracker)"}</b> <span class="status">· added ${when(l.added)} · ${stateOf(l, place)}${l.auto ? " · builds as found" : ""}</span></summary>
+    <summary><b>${l.tracker || "Usenet only (no tracker)"}</b> <span class="status">· added ${when(l.added)} · ${stateOf(l, place)}${l.auto ? " · builds as found" : ""}</span>
+      <${ListWarning} l=${l} /></summary>
     <div class="actions">
       ${ACTIVE.includes(l.state)
         ? html`<button type="button" class="btn" onClick=${() => act("stop")}>Stop this list</button>`
@@ -54,7 +77,7 @@ function List({ l, place, open, unpicked, redraw }) {
     <ul class="trows">${l.rows.map(row => {
       const r = row.result, t = r?.torrent;
       const job = row.job || row.listed;
-      return html`<li class=${row.state === "done" ? (r.plausible || r.on_usenet ? "good" : "poor") : ""}>
+      return html`<li class=${row.state === "done" ? (r.plausible || r.on_usenet || r.download ? "good" : "poor") : ""}>
         ${buildable(row) && html`<input type="checkbox" checked=${!unpicked.has(key(row))} aria-label=${"Build " + row.name}
           onChange=${(e) => { e.target.checked ? unpicked.delete(key(row)) : unpicked.add(key(row)); redraw(); }} />`}
         <div>
@@ -88,7 +111,7 @@ const LISTS = [
   ["repost_suffixes", "Repost endings on Usenet names", "left off a post's name: -xpost..."],
   ["not_release_words", "Posts with these words are not the release", "for games and programs: update, trainer..."],
 ];
-function Advanced({ tracker, saved }) {
+function Advanced({ tracker, saved, mode, setMode, noTracker }) {
   const [open, setOpen] = useState(false);
   const [r, setR] = useState(null), [own, setOwn] = useState(false), [busy, setBusy] = useState(false);
   const load = (fields = {}) => api("/api/tracklist/rules", { tracker, ...fields })
@@ -101,9 +124,17 @@ function Advanced({ tracker, saved }) {
     try { await load(fields); saved(); toast(said); } finally { setBusy(false); }
   };
   const who = tracker || "the default rules";
-  return html`<div class="tadvanced">
+  return html`<div class=${"tadvanced" + (open ? " open" : "")}>
     <button type="button" class="btn" aria-expanded=${open} onClick=${() => setOpen(!open)}>
       ${open ? "Hide advanced options" : "Advanced options"}</button>
+    ${open && html`<fieldset class="trules tmodes">
+      <legend>How names are fetched</legend>
+      ${noTracker && html`<p class="status">With no tracker chosen nothing is downloaded: Normal safe operation only.</p>`}
+      ${MODES.map(([k, label, hint]) => html`<label class=${"check" + (noTracker && k !== "normal" ? " disabled" : "")}>
+        <input type="radio" name="tracklist-mode" value=${k} checked=${mode === k}
+          disabled=${noTracker && k !== "normal"} onChange=${() => setMode(k)} />
+        ${label}<small class=${k === "normal" ? "status" : "twarn"}>${hint}</small></label>`)}
+    </fieldset>`}
     ${open && r && html`<fieldset class="trules">
       <legend>${tracker ? `Rules for ${tracker}` : "Default rules (UNIT3D)"}
         <small class="status">${tracker ? (own ? " - its own" : " - the default (UNIT3D) ones, until saved for it")
@@ -145,27 +176,33 @@ export function TracklistTab({ active }) {
   const s = useRef({ text: "", tracker: remember("tracklist.tracker", ""), trackers: [], lists: [],
                      auto: remember("tracklist.auto", "1") === "1",     // on unless unticked
                      anyKind: remember("tracklist.anykind", "0") === "1",  // books, programs, games too
+                     mode: remember("tracklist.mode", "normal"),            // see MODES
+                     asking: false, nowarn: false,                          // the BitTorrent warning
+                     warn: remember("tracklist.nowarn", "0") !== "1",       // "Warn me": on unless switched off
                      adding: false, preview: [], reading: false, seq: 0, timer: null, skip: new Set(),
                      unpicked: new Set(), sent: new Set() }).current;
   const [, redraw] = useReducer(n => n + 1, 0);
   const [opts, setOpts] = useOptions();
-  // coming to this tab, or back to the browser tab showing it: the names are selected, so
-  // the next list pasted replaces them
+  // coming to this tab, or back to the browser tab showing it (by a click on the page too):
+  // the names are scrolled to and selected, so the next list pasted replaces them
   const box = useRef(null);
   useEffect(() => {
     if (!active) return;
-    let clicked = 0;                         // coming back by clicking something on the page: left to that
-    const down = () => { clicked = Date.now(); };
-    const pick = () => setTimeout(() => {
-      const el = box.current;
-      if (!el || document.hidden || Date.now() - clicked < 400) return;
-      el.focus({ preventScroll: true });
-      el.select();
-    }, 50);
+    let timer = 0;
+    const pick = () => {
+      clearTimeout(timer);
+      // after a click that brought the window back has put the focus where it landed
+      timer = setTimeout(() => {
+        const el = box.current;
+        if (!el || document.hidden) return;
+        el.focus({ preventScroll: true });
+        el.select();
+        el.scrollIntoView({ block: "center" });
+      }, 150);
+    };
     pick();
     window.addEventListener("focus", pick);
-    document.addEventListener("pointerdown", down, true);
-    return () => { window.removeEventListener("focus", pick); document.removeEventListener("pointerdown", down, true); };
+    return () => { clearTimeout(timer); window.removeEventListener("focus", pick); };
   }, [active]);
   useEffect(() => {
     if (!active || s.trackers.length) return;
@@ -202,6 +239,20 @@ export function TracklistTab({ active }) {
 
   async function add(e) {
     e.preventDefault();
+    if (risky && s.warn) {
+      s.asking = true; s.nowarn = false; redraw();          // asked first: OK proceed, or Cancel
+      return;
+    }
+    return send();
+  }
+  const answer = (go) => {
+    s.asking = false;
+    if (go && s.nowarn) setWarn(false);           // Don't warn me again: the switch goes off
+    redraw();
+    if (go) send();
+  };
+
+  async function send() {
     if (!s.tracker) return toast("Choose the tracker the names are from, or Not specified to search Usenet only.");
     if (s.reading) return toast("Still reading the list - a moment.");
     const names = toSearch();
@@ -210,7 +261,7 @@ export function TracklistTab({ active }) {
     s.adding = true; redraw();
     try {
       const r = await api("/api/tracklist/add", { names, tracker: noTracker ? "" : s.tracker,
-                                                   auto: auto, options: opts });
+                                                   auto: auto, options: opts, mode });
       // the pasted list stays, with what was just added unticked: the next few can be picked from it
       names.forEach(x => { s.sent.add(x); s.skip.add(x); });
       s.lists = (await api("/api/tracklist/lists", {})).lists || s.lists;
@@ -226,6 +277,10 @@ export function TracklistTab({ active }) {
     if (s.text.trim()) pasted(s.text); else redraw();       // the names read again, the new way
   };
   const noTracker = s.tracker === NO_TRACKER;
+  const mode = noTracker || !MODES.some(([k]) => k === s.mode) ? "normal" : s.mode;
+  const risky = mode !== "normal";
+  const setMode = (k) => { s.mode = k; keep("tracklist.mode", k); redraw(); };
+  const setWarn = (on) => { s.warn = on; keep("tracklist.nowarn", on ? "0" : "1"); redraw(); };
   const auto = s.auto && !noTracker;       // nothing can be built without a tracker to take the torrent from
   const busy = s.lists.filter(l => ACTIVE.includes(l.state)).reverse();      // in the order they are checked
   const ended = s.lists.filter(l => !ACTIVE.includes(l.state));
@@ -275,7 +330,7 @@ export function TracklistTab({ active }) {
         list - choose a tracker for that.</small>`}
       <div class="opts actions"><${Options} value=${opts} onChange=${setOpts} matchTorrent /></div>
       <${Advanced} tracker=${s.tracker && s.tracker !== NO_TRACKER ? s.tracker : ""}
-        saved=${() => { if (s.text.trim()) pasted(s.text); }} />
+        saved=${() => { if (s.text.trim()) pasted(s.text); }} mode=${mode} setMode=${setMode} noTracker=${noTracker} />
       <label class=${"check" + (noTracker ? " disabled" : "")}
         title=${noTracker ? "Choose a tracker first: without one there is no torrent to build" : ""}>
         <input type="checkbox" checked=${auto} disabled=${noTracker} onChange=${setAuto} />
@@ -287,6 +342,10 @@ export function TracklistTab({ active }) {
         Build ticked.</small>
       <div class="actions">
         <button class="btn primary" disabled=${s.adding || s.reading || !toSearch().length}>${busy.length ? label + " - add to the queue" : label}</button>
+        ${risky && html`<span class="twarn tbtnwarn" role="alert">${RISK}</span>
+          <label class="switch tswitch" title="Ask before downloading over BitTorrent">
+            <input type="checkbox" role="switch" checked=${s.warn} onChange=${(e) => setWarn(e.target.checked)} />
+            <span>Warn me</span></label>`}
       </div>
       ${auto && html`<small class="status thelp">"Auto start plausible builds when found" is
         ticked, so this checks and builds in one go: each plausible name's build starts without asking first. Untick it
@@ -294,8 +353,26 @@ export function TracklistTab({ active }) {
       ${busy.length > 0 && html`<small class="status thelp">A list is still being checked: this one is added to the
         queue and checked after it. The lists go on being checked with this page closed.</small>`}
     </form>
+    <${PauseButton} />
     ${busy.length > 0 && html`<h2 class="tqhead">Queue</h2>
       ${busy.map((l, i) => html`<${List} key=${l.id} l=${l} place=${i + 1} open=${i === 0} unpicked=${s.unpicked} redraw=${redraw} />`)}`}
     ${ended.length > 0 && html`<h2 class="tqhead">Checked lists</h2>
-      ${ended.map((l, i) => html`<${List} key=${l.id} l=${l} open=${i === 0 && !busy.length} unpicked=${s.unpicked} redraw=${redraw} />`)}`}`;
+      ${ended.map((l, i) => html`<${List} key=${l.id} l=${l} open=${i === 0 && !busy.length} unpicked=${s.unpicked} redraw=${redraw} />`)}`}
+    ${s.asking && html`<div class="tconfirm" onKeyDown=${(e) => { if (e.key === "Escape") answer(false); }}>
+      <div class="tconfirm-card" role="alertdialog" aria-modal="true" aria-labelledby="tconfirm-title" aria-describedby="tconfirm-text">
+        <h2 id="tconfirm-title" class="twarn">Download over torrents?</h2>
+        <p id="tconfirm-text">${mode === "torrent"
+          ? "Usenet is not searched: every name found on the tracker will be downloaded from it over BitTorrent."
+          : "Names that cannot be built from Usenet will be downloaded from the tracker over BitTorrent instead."}
+          This will download over torrents and could create problems if you have insufficient ratio or you
+          do not seed for long enough (hit-and-run).</p>
+        <label class="check"><input type="checkbox" checked=${s.nowarn}
+          onChange=${(e) => { s.nowarn = e.target.checked; redraw(); }} />Don't warn me again</label>
+        <div class="actions">
+          <button type="button" class="btn primary" ref=${(el) => el && !el.dataset.f && (el.dataset.f = "1", el.focus())}
+            onClick=${() => answer(true)}>OK proceed</button>
+          <button type="button" class="btn" onClick=${() => answer(false)}>Cancel</button>
+        </div>
+      </div>
+    </div>`}`;
 }

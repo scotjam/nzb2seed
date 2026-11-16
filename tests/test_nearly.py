@@ -251,7 +251,7 @@ class RecheckQbit:
     def info(self, h):
         return {"state": "stoppedDL", "progress": self.found} if self.added else None
 
-    def add_stopped(self, *a):
+    def add_stopped(self, *a, **kw):
         self.added = True
 
     def wait_idle(self, h, min_wait=0):

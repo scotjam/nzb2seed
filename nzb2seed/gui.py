@@ -466,6 +466,121 @@ class App:
         finally:
             self.request.asked = None
 
+    def download_from_list(self, torrent: dict, tracker: str) -> "Job":
+        """A tracker list set to download over BitTorrent (its advanced options): the torrent is
+        added to qBittorrent and started, to download all of it from the tracker - nothing is
+        built from Usenet. This uses the tracker's ratio and brings its seeding (hit-and-run)
+        rules with it, so it is tagged "<tracker> (downloaded)", never as an nzb2seed build.
+        Refused (ValueError) when it is already on the jobs list."""
+        rel = _rel(torrent)
+        listed = self.listed(rel.title)
+        if listed:
+            raise ValueError(f"already on the jobs list (job {listed.id})")
+        name = re.sub(r"\s*\(API\)$", "", (tracker or rel.indexer or "tracker").strip(), flags=re.I)
+        tag = f"{name.replace(',', ' ')} (downloaded)"
+
+        def run(cfg):
+            qb = self._qbit()
+            if qb is None:
+                raise Abort("no qBittorrent is set up")
+            if not cfg.output_dir:
+                raise Abort("no output folder is set (Settings) to download it into")
+            report.info("chosen for this list: downloaded over BitTorrent - this uses your ratio on "
+                        f"{rel.indexer} and you have to seed it as long as its rules ask")
+            report.step(f"Downloading .torrent from {rel.indexer}")
+            pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
+            t, path = pipeline_mod.save_torrent(cfg, pr.fetch(rel))
+            if qb.info(t.infohash):
+                raise Abort("this torrent is already in qBittorrent - left as it is")
+            save_path = map_path(cfg.output_dir, cfg.local_to_qbit)
+            report.step("Adding to qBittorrent")
+            with open(path, "rb") as fh:
+                qb.add_stopped(fh.read(), os.path.basename(path), save_path, cfg.qbit_category, tag,
+                               tracker=tracker or rel.indexer)
+            info = None
+            for _ in range(40):
+                info = qb.info(t.infohash)
+                if info:
+                    break
+                time.sleep(0.5)
+            if not info:
+                raise Abort("qBittorrent accepted the torrent but it does not show up")
+            qb.wait_idle(t.infohash)
+            btledger.record_start(cfg, t.infohash, rel.indexer, info, t.total_size)
+            qb.start(t.infohash)
+            report.info(f"started in qBittorrent, tagged {tag!r}: all {pipeline_mod.gb(t.total_size)} "
+                        f"comes from {rel.indexer} over BitTorrent")
+            self.store.changed(urgent=True)
+            return {"result": f"in qBittorrent, downloading all of it from {rel.indexer} over BitTorrent",
+                    "extra": {"added": True, "infohash": t.infohash, "tracker": rel.indexer,
+                              "downloaded_whole": True}}
+
+        nj = self.start_job(f"Download over BitTorrent: {rel.title}", "client", run)
+        nj.tracker = rel.indexer or ""
+        self.watch_clients()
+        return nj
+
+    # ------------------------------------------------ Pause (the Jobs tab)
+    def _pause_path(self) -> str:
+        return os.path.join(os.path.dirname(os.path.abspath(self.cfg.path)), "pause.json")
+
+    def _pause_note(self) -> dict:
+        try:
+            with open(self._pause_path(), encoding="utf-8") as fh:
+                d = json.load(fh)
+            return {"paused": bool(d.get("paused")), "since": d.get("since"), "sab": bool(d.get("sab"))}
+        except (OSError, ValueError, AttributeError):
+            return {"paused": False, "since": None, "sab": False}
+
+    def pause_state(self) -> dict:
+        n = self._pause_note()
+        return {"paused": slots_mod.PAUSED.is_set(), "since": n["since"] if slots_mod.PAUSED.is_set() else None}
+
+    def restore_pause(self):
+        """At start-up: still paused if it was paused when nzb2seed stopped."""
+        if self._pause_note()["paused"]:
+            slots_mod.PAUSED.set()
+            print("nzb2seed is paused (Jobs tab: Resume)", flush=True)
+
+    def set_paused(self, on: bool) -> dict:
+        """Pause: no build starts (automatic or by hand), a running build stops before its
+        next big step, SABnzbd's queue is paused and the tracker lists are not checked.
+        qBittorrent is left alone - stopping a torrent mid-download can cost a private
+        tracker's hit-and-run grace. Resume undoes only what Pause did."""
+        note = self._pause_note()
+        sab = self._sab()
+        if on:
+            if not slots_mod.PAUSED.is_set():
+                slots_mod.PAUSED.set()
+                note.update(paused=True, since=time.time())
+                if sab is not None:
+                    try:
+                        if not sab.queue_paused():   # already paused (by you, or the space guard): left be
+                            sab.pause_all()
+                            note["sab"] = True
+                    except (ApiError, OSError) as e:
+                        print(f"pause: could not pause SABnzbd: {e}", flush=True)
+        else:
+            slots_mod.PAUSED.clear()
+            if note.get("sab") and sab is not None and not self.guard().holding():
+                try:
+                    sab.resume_all()
+                except (ApiError, OSError) as e:
+                    print(f"resume: could not resume SABnzbd: {e}", flush=True)
+            note.update(paused=False, since=None, sab=False)
+            for s in (self.build_slots, getattr(getattr(self, "inbox", None), "slots", None)):
+                if s is not None:
+                    s.resize(s.size)              # wakes the builds waiting in line
+            if getattr(self, "tracklist", None) is not None:
+                self.tracklist.wake.set()
+        tmp = self._pause_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(note, fh)
+        os.replace(tmp, self._pause_path())
+        self.events.publish("pause")
+        self.store.changed(urgent=True)
+        return self.pause_state()
+
     def start_tracklist(self, start: bool = True):
         """The tracker list tab's queue: pasted lists, checked one after another."""
         self.tracklist = tracklist_mod.Queue(
@@ -774,7 +889,8 @@ class App:
             try:
                 return pipeline_mod.finish(cfg, opts, t, path, sources, out_dir, qb, existing,
                                            sources_are_ours=not first_in_client,
-                                           keep_dirs=placed_dirs if first_in_client else [], ours_dirs=[])
+                                           keep_dirs=placed_dirs if first_in_client else [], ours_dirs=[],
+                                           tracker=rel.indexer or "")
             except pipeline_mod.Incomplete as e:
                 h, frac, short = e.infohash, e.have, e.short
             rest = f"{math.ceil((1 - frac) * 1000000) / 10000:.4f}%"
@@ -824,7 +940,7 @@ class App:
                 report.step("Adding it to qBittorrent")
                 with open(x["torrent_path"], "rb") as fh:
                     qb.add_stopped(fh.read(), os.path.basename(x["torrent_path"]), x["save_path"],
-                                   cfg.qbit_category, ",".join(cfg.qbit_tags))
+                                   cfg.qbit_category, ",".join(cfg.qbit_tags), tracker=x.get("tracker") or "")
                 for _ in range(40):
                     if qb.info(h):
                         break
@@ -1271,6 +1387,25 @@ class App:
             if it and it.get("status") == "waiting" and (it.get("next_try") or 0) > time.time():
                 return {"next_try": it["next_try"]}
         return {}
+
+    def jump_queue(self, job: "Job", how: str) -> str:
+        """Move a job waiting for a slot to the top of its line ("top"), or start it now on
+        top of the builds already running ("force"). Says what happened, for the toast."""
+        if how not in ("top", "force"):
+            raise ValueError("top or force")
+        box = getattr(self, "inbox", None)
+        lines = [("build", self.build_slots)]
+        if box is not None and hasattr(box.slots, "to_front"):
+            lines.append(("automatic", box.slots))
+        for name, slots in lines:
+            if (slots.to_front if how == "top" else slots.force)(job):
+                self.store.changed(urgent=True)
+                if how == "top":
+                    return f"Moved to the top of the {name} queue: it starts next."
+                return ("Paused: it starts as soon as you resume, ahead of the queue."
+                        if slots_mod.PAUSED.is_set() else
+                        f"Starting now, on top of the {slots.used} build{'s' if slots.used != 1 else ''} already running.")
+        raise ValueError("that job is not waiting in a queue")
 
     def resume_builds(self) -> list[int]:
         """Carry on the Build-tab builds the last restart cut off, each as the same job - as
@@ -1997,12 +2132,17 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     return self._json({"rules": store.rules(tracker), "defaults": tracklist_mod.DEFAULT_RULES,
                                        "own": store.own(tracker)})
                 # the tracker list tab's queue: lists are checked here, one name at a time
+                if path == "/api/pause":
+                    if body.get("on") is not None:
+                        return self._json(app.set_paused(bool(body.get("on"))))
+                    return self._json(app.pause_state())
                 if path == "/api/tracklist/lists":
                     return self._json({"lists": app.queue().snapshot()})
                 if path == "/api/tracklist/add":
                     return self._json({"id": app.queue().add(
                         [str(n) for n in body.get("names") or []], str(body.get("tracker") or ""),
-                        bool(body.get("auto")), body.get("options") or {})})
+                        bool(body.get("auto")), body.get("options") or {},
+                        str(body.get("mode") or "normal"))})
                 if path in ("/api/tracklist/stop", "/api/tracklist/remove"):
                     getattr(app.tracklist, path.rsplit("/", 1)[1])(body.get("list"))
                     return self._json({"lists": app.queue().snapshot()})
@@ -2057,6 +2197,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                     choice = body.get("choice")
                     job.answer(None if choice is None else int(choice))
                     return self._json({"ok": True})
+                if path.startswith("/api/jobs/") and (path.endswith("/top") or path.endswith("/force")):
+                    job = app.jobs.get(int(path.split("/")[3]))
+                    if not job:
+                        return self._err("no such job", 404)
+                    return self._json({"ok": True, "said": app.jump_queue(job, path.rsplit("/", 1)[1])})
                 if path.startswith("/api/jobs/") and path.endswith("/cancel"):
                     job = app.jobs.get(int(path.split("/")[3]))
                     if not job:
@@ -2777,6 +2922,7 @@ def serve(config_path: str | None, host: str, port: int, password: str | None,
     app.start_inbox()
     app.start_library()
     app.start_mend()
+    app.restore_pause()
     app.start_tracklist()
     try:
         if app.cfg.sab_url and app.cfg.sab_key and \

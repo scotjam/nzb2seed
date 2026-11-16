@@ -3362,7 +3362,7 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
            output_dir: str, qb: QBittorrent | None, existing: dict | None,
            sources_are_ours: bool = True, retry: Retry | None = None,
            earlier_dirs: list[str] = (), keep_dirs: list[str] = (),
-           ours_dirs: list[str] | None = None) -> dict:
+           ours_dirs: list[str] | None = None, tracker: str = "") -> dict:
     """``sources_are_ours``: the source folders are SABnzbd jobs this build submitted, so
     their leftovers may be deleted. False for folders the user pointed at (assemble)."""
     step(f"Laying out files for the torrent in {output_dir}")
@@ -3504,7 +3504,7 @@ def finish(cfg: Config, opts: Options, t: Torrent, torrent_path: str, source_dir
     if existing is None:
         with open(torrent_path, "rb") as fh:
             qb.add_stopped(fh.read(), os.path.basename(torrent_path), save_path,
-                           cfg.qbit_category, ",".join(cfg.qbit_tags))
+                           cfg.qbit_category, ",".join(cfg.qbit_tags), tracker=tracker or _tracker_now())
         tinfo = None
         for _ in range(20):
             tinfo = qb.info(t.infohash)

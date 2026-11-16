@@ -38,6 +38,43 @@ export const SCENARIOS = {
     return out;
   },
 
+  /* the new page only: a queued build can be moved to the top or started now */
+  async queueJump({ act, doc, server, calls }) {
+    const base = server.jobs.find(j => j.id === 9);
+    server.jobs.unshift({ ...base, id: 21, title: "Queued.Second.2020", queue: "build", place: 2, steps: ["Waiting for a build slot"], progress: "" },
+                        { ...base, id: 20, title: "Queued.First.2020", queue: "build", place: 1, steps: ["Waiting for a build slot"], progress: "" });
+    await act.go("jobs");
+    const row = (t) => [...doc.querySelectorAll(".jrow")].find(r => r.textContent.includes(t));
+    const labels = (r) => [...r.querySelectorAll(".jqueue .btn")].map(b => b.textContent.trim());
+    const out = { first: labels(row("Queued.First")), second: labels(row("Queued.Second")),
+                  headings: [...doc.querySelectorAll(".joblist h3, .joblist h2")].map(h => h.textContent) };
+    [...row("Queued.Second").querySelectorAll(".jqueue .btn")].find(b => b.textContent.trim() === "Move to top").click();
+    await act.settle();
+    [...row("Queued.First").querySelectorAll(".jqueue .btn")].find(b => b.textContent.trim() === "Start now").click();
+    await act.settle();
+    out.posted = calls.map(c => c.path).filter(p => /\/(top|force)$/.test(p));
+    out.hash = location.hash;
+    return out;
+  },
+
+  /* the new page only: a torrent already built says so under its greyed-out Build button */
+  async builtAlready({ act, doc, server, w }) {
+    server.jobs.unshift({ ...server.jobs.find(j => j.id === 6), id: 11, title: "Film.2020.2160p.BluRay-GRPZ" });
+    await act.go("jobs"); await act.go("build");                    // the jobs list is read again
+    await act.type("Search Prowlarr", "Film.2020");
+    await act.submit("Search Prowlarr");
+    await act.settle();
+    await showAll(act, doc);
+    [...doc.querySelectorAll("button")].find(b => b.textContent.trim() === "Full list")?.click();
+    await act.settle();
+    const row = [...doc.querySelectorAll(".side.torrent .row")].find(r => r.textContent.includes("GRPZ"));
+    row.querySelector("input").click();
+    await act.settle();
+    const btn = [...doc.querySelectorAll(".buildbar button")].find(b => b.textContent.trim() === "Build");
+    return { disabled: btn.disabled, why: act.text(doc.querySelector(".buildbar .why")),
+             described: btn.getAttribute("aria-describedby") };
+  },
+
   /* the new page only: the release groups found, to filter the torrents by */
   async groups({ act, doc }) {
     await act.go("build");

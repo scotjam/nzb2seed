@@ -93,6 +93,75 @@ def test_the_jobs_list_says_where_a_waiting_build_stands(tmp_path):
     assert app.queue_place(building) == {}                   # not in line: building
 
 
+def test_a_build_moved_to_the_top_starts_next():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)
+    a, b, c = slots.enter("a"), slots.enter("b"), slots.enter("c")
+    assert slots.to_front("c")
+    assert slots.waiting() == ["c", "a", "b"]
+    assert slots.to_front("b")                                # the latest move goes on top
+    assert slots.waiting() == ["b", "c", "a"]
+    assert not slots.to_front("not waiting")
+    slots.release()
+    assert not slots.take(a, 0.05) and slots.take(b, 1)
+
+
+def test_moving_to_the_top_keeps_how_new_the_torrent_is():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)
+    slots.enter("new", -3000.0), slots.enter("old", -1000.0)
+    slots.to_front("old")
+    assert slots.line() == [(-1000.0, "old"), (-3000.0, "new")]   # the Jobs tab still says when it was posted
+
+
+def test_a_forced_build_starts_on_top_of_the_slots_in_use():
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)                    # the only slot is busy
+    a, b = slots.enter("a"), slots.enter("b")
+    assert slots.force("b")
+    assert slots.take(b, 1)                                 # starts now, past the limit
+    assert slots.used == 2 and slots.waiting() == ["a"]
+    slots.release()                                         # one ends: still one more than the limit
+    assert not slots.take(a, 0.05)
+    slots.release()
+    assert slots.take(a, 1)
+    assert not slots.force("not waiting")
+
+
+def test_a_forced_build_still_waits_while_paused():
+    from nzb2seed.slots import PAUSED
+    slots = FairSlots(1)
+    t = slots.enter("a")
+    PAUSED.set()
+    try:
+        slots.force("a")
+        assert not slots.take(t, 0.05)
+    finally:
+        PAUSED.clear()
+    assert slots.take(t, 1)
+
+
+def test_the_jobs_tab_can_move_or_start_a_queued_build(tmp_path):
+    import pytest
+    from nzb2seed import gui
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    app.build_slots = FairSlots(1)
+    assert app.build_slots.acquire(blocking=False)
+    first, second, building = (gui.Job(i, f"Film.{i}", "build") for i in (1, 2, 3))
+    app.build_slots.enter(first)
+    ticket = app.build_slots.enter(second)
+    assert "top of the build queue" in app.jump_queue(second, "top")
+    assert app.queue_place(second) == {"queue": "build", "place": 1}
+    assert "Starting now, on top of the 1 build already running" in app.jump_queue(first, "force")
+    with pytest.raises(ValueError):
+        app.jump_queue(building, "top")                      # not waiting: nothing to move
+    with pytest.raises(ValueError):
+        app.jump_queue(second, "sideways")
+    assert ticket
+
+
 def test_a_download_shows_how_far_it_is_and_how_fast(monkeypatch):
     from nzb2seed import pipeline, report
     seen = []

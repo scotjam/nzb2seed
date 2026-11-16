@@ -402,14 +402,24 @@ function BuildBar({ s, all, picked, opts, setOpts, build }) {
       + "Click a ticked torrent to pick its NZBs."}</small>`;
   }
   const one = entries.length === 1 ? blockedFor(t, all) : null;
+  // say under the button why it is greyed out, not only in a hover title
+  const why = s.starting ? "Starting the build…"
+    : s.pairing ? "Waiting while the matching NZBs are found…"
+    : one ? (one.status === "done"
+        ? `Already built (job ${one.id} in Jobs). Remove that job to build it again.`
+        : `Being built now (job ${one.id} in Jobs). You can build it again if that build fails.`)
+    : !ready.length ? "All of these are already built or building (see Jobs)."
+    : "";
   return html`
     <div class="buildbar"><div class="inner">
       <div class="what">${what}</div>
       <div class="opts"><${Options} value=${opts} onChange=${setOpts} /></div>
-      <button class="btn primary" disabled=${s.pairing || s.starting || !ready.length} onClick=${build}
-        title=${!one ? "" : one.status === "done" ? "This torrent was already built (see Jobs)"
-          : "This torrent is being built (see Jobs); you can build it again if that build fails"}>
-        ${entries.length > 1 ? `Build ${ready.length} torrents` : "Build"}</button>
+      <div class="go">
+        <button class="btn primary" disabled=${s.pairing || s.starting || !ready.length} onClick=${build}
+          aria-describedby=${why ? "buildwhy" : null}>
+          ${entries.length > 1 ? `Build ${ready.length} torrents` : "Build"}</button>
+        ${why && html`<small id="buildwhy" class="why">${why}</small>`}
+      </div>
     </div></div>`;
 }
 

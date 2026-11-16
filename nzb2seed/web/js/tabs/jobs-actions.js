@@ -16,6 +16,13 @@ async function each(list, path, done, failed, ok) {
   ok?.();
 }
 
+/* a queued build: to the top of its queue ("top"), or started now past the slot limit ("force") */
+export async function jumpQueue(j, how) {
+  try { toast((await api(`/api/jobs/${j.id}/${how}`, {})).said); }
+  catch (err) { toast(err.message); }
+  await refreshJobs();
+}
+
 export async function retryJob(j) {
   try {
     await api("/api/jobs/retry", { id: j.id });

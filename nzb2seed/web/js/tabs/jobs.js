@@ -1,5 +1,6 @@
 // The Jobs tab: the list of builds with a filter and bulk actions, and the open job with
 // its piece map, steps and log. Both follow the server live.
+import { PauseButton } from "../components/pause.js";
 import { html, useEffect, useLayoutEffect, useRef, useState } from "../lib.js";
 import { api, onChange } from "../api.js";
 import { backToJobs, jobs, jobScreen, limitSet, nearlyLimitText, openJob, openJobId, setTrackerLimit, settings, shortEnough, toast, trackerLimit, useStore } from "../store.js";
@@ -8,7 +9,7 @@ import { SortSelect } from "../components/sort.js";
 import { LimitNote, LimitPick, limitWarning } from "../components/limitpick.js";
 import { BADLY_ENDED, JOB_KINDS, SELECT, builtLater, canAdd, canRemove, canRetry, dotOf, finalOf, isLive, kindOf, skippedAuto, trackerLabel, trackersOf, viaTracker } from "./jobs-rules.js";
 import { OtherTrackers, approved } from "./jobs-other.js";
-import { addFromTrackers, addToClient, cancelMany, clearAndDelete, fullPosts, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
+import { addFromTrackers, addToClient, cancelMany, clearAndDelete, fullPosts, jumpQueue, overrideAdd, removeMany, retryJob, retryMany, wholePosts, wholePostsText } from "./jobs-actions.js";
 
 export function JobsTab({ active }) {
   const all = useStore(jobs);
@@ -45,6 +46,7 @@ export function JobsTab({ active }) {
         <p class="status jobtip">Tip: a job's Usenet downloads are kept while it is on the list. Clear from list,
           delete files removes them; Clear from list, keep files leaves them in your Usenet downloads folder.</p>
         <${MendLog} />
+        <${PauseButton} />
         <div class="joblist" id="joblist">
           ${shown.length ? SECTIONS.map(([key, label, note]) => {
             const rows = sections(shown)[key];
@@ -66,7 +68,7 @@ export function JobsTab({ active }) {
 const SECTIONS = [
   ["active", "Active", ""],
   ["queued", "Queued", "next to start at the top"],
-  ["ended", "Completed and failed", ""],
+  ["ended", "Finished", ""],
 ];
 const stageOf = (j) => j.queue || j.next_try ? "queued" : isLive(j) ? "active" : "ended";
 function sections(list) {
@@ -172,9 +174,21 @@ function JobRow({ j, all, on, via, current, tick }) {
         ${j.meter && !j.queue && html`<${Meter} m=${j.meter} />`}
         ${j.started > 0 && html`<div class="w">started ${when(j.started)}</div>`}
       </div>
+      ${j.queue && html`<${QueueActions} j=${j} Btn=${Act} />`}
       ${(BADLY_ENDED.includes(j.status) || skippedAuto(j) || j.extra?.settled?.length > 0) && html`<${JobActions} j=${j} all=${all} />`}
     </div>`;
 }
+
+/* a build waiting in a queue: put it next in line, or start it now on top of those running */
+function QueueActions({ j, Btn }) {
+  return html`<div class="jretry jqueue">
+    ${j.place > 1 && html`<${Btn} label="Move to top" title="Make this the next build to start when a slot frees up"
+      onPress=${() => jumpQueue(j, "top")} />`}
+    <${Btn} label="Start now" title="Start this build straight away, as one more on top of those already running - the rest of the queue still waits for a free slot"
+      onPress=${() => jumpQueue(j, "force")} />
+  </div>`;
+}
+const PlainBtn = ({ label, title, onPress }) => html`<button type="button" class="btn" title=${title} onClick=${onPress}>${label}</button>`;
 
 /* how far the stage under way is - downloading from Usenet, or qBittorrent's recheck */
 const speedText = (b) => b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB/s` : `${Math.round(b / 1024)} KB/s`;
@@ -339,7 +353,8 @@ function JobView({ id }) {
         <div><button type="button" class="btn jback" onClick=${backToJobs}>← All jobs</button>
           <h2>${job.title}${trackerLabel(job) && html` <span class="jtrk">${trackerLabel(job)}</span>`}</h2><p class=${"result " + job.status}>${result}</p>
           ${job.started > 0 && html`<p class="when">Started ${when(job.started)}</p>`}</div>
-        ${isLive(job) && html`<button class="btn danger" onClick=${cancel}>Cancel build</button>`}
+        <div class="jtopacts">${job.queue && html`<${QueueActions} j=${job} Btn=${PlainBtn} />`}
+          ${isLive(job) && html`<button class="btn danger" onClick=${cancel}>Cancel build</button>`}</div>
       </div>
       <${PieceMap} pieces=${job.pieces} />
       ${job.auto_remove != null && html`<${AutoRemove} id=${id} on=${job.auto_remove} />`}

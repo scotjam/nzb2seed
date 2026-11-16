@@ -30,3 +30,25 @@ def test_an_existing_category_is_left_as_it_is():
     sab, calls = fake_sab([{"name": "*"}, {"name": "NZB2seed"}])
     assert sab.ensure_category("nzb2seed", "nzb2seed") is False
     assert not [c for c in calls if c[0] == "set_config"]
+
+
+def test_every_torrent_added_is_tagged_tracker_dot_nzb2seed():
+    from nzb2seed.clients import QBittorrent, tracker_tag
+    from tests.helpers import make_torrent
+    data = make_torrent("Film", {"a.mkv": b"x" * 10})
+    assert tracker_tag("ExampleTracker (API)") == "ExampleTracker.nzb2seed"
+    assert tracker_tag("", data) == "tracker.example.nzb2seed"          # the site it announces to
+    assert tracker_tag("") == "unknown.nzb2seed"
+    sent = {}
+
+    class R:
+        status_code, text = 200, "Ok."
+
+    qb = QBittorrent("http://qb")
+    qb.ensure_category = lambda c: None
+    qb._req = lambda method, path, data=None, files=None: sent.update(data) or R()
+    qb._ok = lambda r, what: r
+    qb.add_stopped(data, "f.torrent", "/data", "nzb2seed", "nzb2seed", tracker="ExampleTracker (API)")
+    assert sent["tags"] == "nzb2seed,ExampleTracker.nzb2seed" and sent["stopped"] == "true"
+    qb.add_stopped(data, "f.torrent", "/data", "nzb2seed", "")
+    assert sent["tags"] == "tracker.example.nzb2seed"

@@ -246,7 +246,7 @@ def test_a_job_title_reads_as_the_torrent_name():
 class FakeApp:
     def __init__(self, on_list=()):
         self.cfg = Config("x.json")
-        self.on_list, self.built = set(on_list), []
+        self.on_list, self.built, self.downloaded = set(on_list), [], []
 
     def listed(self, title):
         return type("J", (), {"id": 5})() if title in self.on_list else None
@@ -257,10 +257,14 @@ class FakeApp:
         self.built.append((torrent["title"], options["pp"]))
         return type("J", (), {"id": 100 + len(self.built)})()
 
+    def download_from_list(self, torrent, tracker):
+        self.downloaded.append((torrent["title"], tracker))
+        return type("J", (), {"id": 200 + len(self.downloaded)})()
+
 
 @pytest.fixture
 def queue(tmp_path, monkeypatch):
-    def fake_check(cfg, pr, name, tracker, ids):
+    def fake_check(cfg, pr, name, tracker, ids, mode="normal"):
         ok = name.startswith("Good")
         return {"name": name, "torrent": {"title": name}, "nzbs": [], "plausible": ok, "verdict": "v"}
     monkeypatch.setattr(tracklist, "check", fake_check)
@@ -322,7 +326,7 @@ def test_an_auto_list_never_builds_what_is_already_on_the_jobs_list(queue):
 
 def test_a_name_already_on_the_jobs_list_costs_no_search(queue, monkeypatch):
     searched = []
-    monkeypatch.setattr(tracklist, "check", lambda cfg, pr, name, tracker, ids: searched.append(name) or
+    monkeypatch.setattr(tracklist, "check", lambda cfg, pr, name, tracker, ids, mode="normal": searched.append(name) or
                         {"name": name, "torrent": {"title": name}, "nzbs": [], "plausible": True, "verdict": "v"})
     q = queue(FakeApp(on_list={"Good.A"}))
     q.add(["Good.A", "Good.B"], "TrackerNine", False, {})
@@ -416,3 +420,115 @@ def test_the_rules_change_what_has_to_agree():
     with tracklist.using({"renamed_match": False}):
         r = run({"Some Film 2020": [rel(post, "usenet", 10 * GB)]}, "Some Film 2020 1080p NF WEB-DL DD+ 5.1 H.264-Rel", tracker="")
         assert not r["on_usenet"]                                            # only the exact name will do
+
+
+# ---------------------------------------------------------------- downloading over BitTorrent
+
+def test_normal_mode_never_downloads_over_bittorrent():
+    name = "Film.2020.1080p.BluRay.x264-Rel"
+    r = run({name: [rel(name, "torrent", 10 * GB, seeders=5)]}, name)
+    assert not r["plausible"] and not r.get("download")
+
+
+def test_fallback_downloads_what_usenet_does_not_have():
+    name = "Film.2020.1080p.BluRay.x264-Rel"
+    r = tracklist.check(Config("x.json"), FakeProwlarr({name: [rel(name, "torrent", 10 * GB, seeders=5)]}),
+                        name, "TrackerNine", [9], "fallback")
+    assert r["download"] and not r["plausible"] and r["torrent"]["title"] == name
+    assert "over BitTorrent" in r["verdict"]
+
+
+def test_fallback_still_builds_what_usenet_has():
+    name = "Film.2020.1080p.BluRay.x264-Rel"
+    r = tracklist.check(Config("x.json"), FakeProwlarr({name: [rel(name, "usenet", 10.4 * GB, indexer="UsenetA"),
+                                                              rel(name, "torrent", 10 * GB, seeders=5)]}),
+                        name, "TrackerNine", [9], "fallback")
+    assert r["plausible"] and not r.get("download")
+
+
+def test_fallback_downloads_when_the_usenet_post_is_too_small():
+    name = "Film.2020.1080p.BluRay.x264-Rel"
+    r = tracklist.check(Config("x.json"), FakeProwlarr({name: [rel(name, "usenet", 5 * GB, indexer="UsenetA"),
+                                                              rel(name, "torrent", 10 * GB, seeders=5)]}),
+                        name, "TrackerNine", [9], "fallback")
+    assert r["download"] and not r["plausible"]
+
+
+def test_torrent_only_never_asks_usenet_and_skips_unseeded_torrents():
+    name = "Film.2020.1080p.BluRay.x264-Rel"
+    pr = FakeProwlarr({name: [rel(name, "usenet", 10.4 * GB, indexer="UsenetA"), rel(name, "torrent", 10 * GB, seeders=3)]})
+    r = tracklist.check(Config("x.json"), pr, name, "TrackerNine", [], "torrent")
+    assert r["download"] and not r["on_usenet"]
+    assert all(ids != (9,) for _, ids in pr.asked)                    # Usenet was not asked
+    dead = tracklist.check(Config("x.json"), FakeProwlarr({name: [rel(name, "torrent", 10 * GB, seeders=0)]}),
+                           name, "TrackerNine", [], "torrent")
+    assert not dead.get("download") and "no seeders" in dead["verdict"]
+
+
+def test_a_list_with_no_tracker_never_downloads_whatever_its_mode(tmp_path):
+    q = tracklist.Queue(FakeApp(), str(tmp_path / "t.json"), start=False)
+    assert q._find(q.add(["Film.2020.1080p.BluRay.x264-Rel"], "", True, {}, "torrent"))["mode"] == "normal"
+    with pytest.raises(ValueError):
+        q.add(["X.2020.1080p-Rel"], "TrackerNine", True, {}, "everything")
+
+
+def test_a_download_list_starts_downloads_not_builds(tmp_path, monkeypatch):
+    def fake_check(cfg, pr, name, tracker, ids, mode="normal"):
+        assert mode == "torrent" and ids == []
+        return {"name": name, "torrent": {"title": name}, "nzbs": [], "plausible": False,
+                "download": True, "verdict": "v"}
+    monkeypatch.setattr(tracklist, "check", fake_check)
+    monkeypatch.setattr(tracklist, "Prowlarr", lambda *a: None)
+    monkeypatch.setattr("nzb2seed.pipeline.usenet_indexers", lambda cfg, pr: pytest.fail("Usenet asked"))
+    app = FakeApp()
+    q = tracklist.Queue(app, str(tmp_path / "t.json"), start=False)
+    q.add(["Film.A", "Film.B"], "TrackerNine", True, {}, "torrent")
+    while q.step():
+        pass
+    assert app.built == [] and app.downloaded == [("Film.A", "TrackerNine"), ("Film.B", "TrackerNine")]
+
+
+def test_the_tab_warns_before_downloading_over_bittorrent():
+    import pathlib
+    src = (pathlib.Path(tracklist.__file__).parent / "web" / "js" / "tabs" / "tracklist.js").read_text(encoding="utf-8")
+    for text in ("Normal safe operation", "Download from torrents if not on usenet",
+                 "Skip usenet search and just download from torrent tracker",
+                 "WARNING: uses tracker ratio and creates HnR exposure", "don't do this",
+                 "OK proceed", "Cancel", "Don't warn me again", 'type="radio"', "Warn me", 'role="switch"'):
+        assert text in src, text
+
+
+def test_a_download_job_reads_as_the_torrent_name():
+    assert tracklist.job_key("Download over BitTorrent: Film.2020.1080p-Rel") == tracklist.job_key("Film.2020.1080p-Rel")
+
+
+def test_each_list_keeps_the_mode_it_was_queued_with(tmp_path, monkeypatch):
+    seen = []
+
+    def fake_check(cfg, pr, name, tracker, ids, mode="normal"):
+        seen.append((name, mode))
+        return {"name": name, "torrent": {"title": name}, "nzbs": [], "plausible": False,
+                "download": mode != "normal", "verdict": "v"}
+    monkeypatch.setattr(tracklist, "check", fake_check)
+    monkeypatch.setattr(tracklist, "Prowlarr", lambda *a: None)
+    monkeypatch.setattr("nzb2seed.pipeline.usenet_indexers", lambda cfg, pr: [9])
+    app = FakeApp()
+    q = tracklist.Queue(app, str(tmp_path / "t.json"), start=False)
+    q.add(["Old.A", "Old.B"], "TrackerNine", True, {})                 # queued in normal mode
+    q.step()                                                           # one checked...
+    q.add(["New.C"], "TrackerNine", True, {}, "fallback")             # ...then a warning mode is chosen
+    while q.step():
+        pass
+    assert seen == [("Old.A", "normal"), ("Old.B", "normal"), ("New.C", "fallback")]
+    assert app.downloaded == [("New.C", "TrackerNine")]               # only the new list downloads
+    old = tracklist.Queue(app, str(tmp_path / "t.json"), start=False)  # kept across a restart
+    assert [l.get("mode") for l in old.snapshot()] == ["fallback", "normal"]
+
+
+def test_a_list_queued_with_a_warning_option_says_so_in_its_header():
+    import pathlib
+    src = (pathlib.Path(tracklist.__file__).parent / "web" / "js" / "tabs" / "tracklist.js").read_text(encoding="utf-8")
+    assert "<${ListWarning} l=${l} />" in src
+    body = src[src.index("function ListWarning"):src.index("function stateOf") if src.index("function stateOf") > src.index("function ListWarning") else None]
+    for part in ("${RISK}", "${l.tracker}", "to download over BitTorrent", "result.torrent?.size"):
+        assert part in body, part

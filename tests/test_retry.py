@@ -243,7 +243,7 @@ class HashingQbit:
         self.t, self.out = t, out
         self.rechecks, self.started, self.state, self.states = 0, False, None, []
 
-    def add_stopped(self, data, name, save_path, cat, tags):
+    def add_stopped(self, data, name, save_path, cat, tags, tracker=""):
         self.state = "stoppedDL"
 
     def info(self, h):

@@ -56,18 +56,28 @@ def wait_for_room(step=None, progress=None, sleep=None, role: str = "output"):
     It is a pause, not a failure: the build goes on by itself once there is room, and
     stopping the build still works while it waits."""
     from .report import check_cancel, info
+    from .slots import PAUSED
     gate, said = GATE, False
-    if gate is None:
+    if gate is None and not PAUSED.is_set():
         return
     while True:
         check_cancel()
         try:
-            why = gate(role)
+            why = gate(role) if gate is not None else ""
         except Exception:               # a broken gate must never wedge a build
-            return
+            why = ""
+        if PAUSED.is_set():
+            why = "paused - press Resume on the Jobs tab"
+            if not said:
+                said = True
+                (step or info)(why)
+            if progress:
+                progress(why)
+            (sleep or time.sleep)(min(WAIT_POLL, 5.0))
+            continue
         if not why:
             if said:
-                info("there is room again - carrying on")
+                info("carrying on")
             return
         if not said:
             said = True
@@ -248,7 +258,11 @@ class Guard:
         return {"paused": n, "resumed": 0}
 
     def _resume(self, sab, qb, state: dict, log) -> dict:
+        from .slots import PAUSED
         n = 0
+        if state["sab"] and sab is not None and PAUSED.is_set():
+            state["sab"] = False                     # paused by you now: Resume starts it again
+            log("there is room again - SABnzbd's queue stays paused, as you paused nzb2seed")
         if state["sab"] and sab is not None:
             try:
                 sab.resume_all()

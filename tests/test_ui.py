@@ -30,9 +30,11 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # the differences made on purpose: the new page always names the tracker a nearly complete
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
+    # a Pause / Resume button above the jobs list
+    (re.compile(r"(?:❚❚ Pause|▶ Resume) (?:Pause holds every build and the list queue \(torrents keep seeding\)\.|Paused[^:]*: builds and the list queue are on hold\. Seeding carries on\.) ?"), ""),
     # the Jobs list is in parts - building now, queued in the order they start, ended - and
     # marks automatic builds in a column of their own (their names without "auto:")
-    (re.compile(r"(?:Active|Queued|Completed and failed) \(\d+\)(?: next to start at the top)? ?"), ""),
+    (re.compile(r"(?:Active|Queued|Finished) \(\d+\)(?: next to start at the top)? ?"), ""),
     (re.compile(r"(\[[x ]\]) Auto (\S+)"), r"\1 auto: \2"),
     # Build and Demand open with a heading and what the tab is for
     (re.compile(r"^Build Find a torrent and matching nzbs so Usenet downloads can be used to build a torrent seed\. "), ""),
@@ -306,6 +308,22 @@ console.log(JSON.stringify({ order: got.map(g => [g.name, g.seasons.size, g.coun
     out = json.loads(done.stdout)
     assert out["order"] == [["GRPC", 3, 1], ["GRPA", 2, 2], ["GRPB", 1, 3]]   # most seasons first
     assert out["ep"] == [2] and out["range"] == [1, 2, 3]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_queued_build_can_be_moved_to_the_top_or_started_now(settings_file):
+    seen = run("new", "queueJump", settings_file)["seen"]
+    assert seen["first"] == ["Start now"]                    # already next: nothing to move
+    assert seen["second"] == ["Move to top", "Start now"]
+    assert seen["posted"] == ["/api/jobs/21/top", "/api/jobs/20/force"]
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_greyed_out_build_button_says_why_under_it(settings_file):
+    seen = run("new", "builtAlready", settings_file)["seen"]
+    assert seen["disabled"] is True
+    assert seen["why"] == "Already built (job 11 in Jobs). Remove that job to build it again."
+    assert seen["described"] == "buildwhy"          # screen readers hear the reason with the button
 
 
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")

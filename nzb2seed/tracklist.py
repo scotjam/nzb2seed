@@ -290,7 +290,7 @@ def parse(text: str, any_kind: bool = False) -> list[str]:
     return out
 
 
-_JOB_PREFIX = re.compile(r"^auto:\s*", re.I)
+_JOB_PREFIX = re.compile(r"^(?:auto|download over bittorrent):\s*", re.I)
 _VIDEO = re.compile(r"\.(?:mkv|mp4|avi|ts|m2ts)$", re.I)
 
 
@@ -449,7 +449,70 @@ def alike(post: str, name: str, episode_of_pack: bool = False) -> bool:
     return True
 
 
-def check(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[int]) -> dict:
+# How a list goes about its names (the tab's advanced options). "normal": built from Usenet
+# only - the safe way, nothing comes over BitTorrent. The other two download from the tracker
+# over BitTorrent, which uses its ratio and brings hit-and-run obligations there: "fallback"
+# for names Usenet cannot build, "torrent" for every name, Usenet not searched at all.
+MODES = ("normal", "fallback", "torrent")
+
+
+def check(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[int],
+          mode: str = "normal") -> dict:
+    """check_usenet(), and for a list set to download over BitTorrent the torrent to download:
+    "download" is then True on a name to be downloaded whole from ``tracker`` instead of built."""
+    tracker = (tracker or "").strip()
+    if mode not in MODES[1:] or not tracker:
+        return check_usenet(cfg, pr, name, tracker, usenet_ids)
+    if mode == "torrent":
+        out = {"name": name, "torrent": None, "others": [], "nzbs": [], "plausible": False, "on_usenet": False}
+        same, torrents = on_tracker(cfg, pr, bare(name), tracker)
+        if not same:
+            out["others"] = [t.title for t in torrents[:8]]
+            out["verdict"] = f"not found on {tracker} by that name" + (
+                f" ({len(torrents)} other result{'s' if len(torrents) != 1 else ''})" if torrents else "")
+            return out
+        out["torrent"] = dataclasses.asdict(same[0])
+        return _by_bittorrent(out, tracker, "Usenet not searched")
+    out = check_usenet(cfg, pr, name, tracker, usenet_ids)
+    if out["plausible"]:
+        return out
+    if out["torrent"] is None and not out["on_usenet"]:      # the tracker was not asked yet
+        same, torrents = on_tracker(cfg, pr, bare(name), tracker)
+        if not same:
+            out["others"] = [t.title for t in torrents[:8]]
+            out["verdict"] = f"no Usenet post of this release, and not found on {tracker} by that name"
+            return out
+        out["torrent"] = dataclasses.asdict(same[0])
+    if out["torrent"] is None:
+        return out
+    return _by_bittorrent(out, tracker, out["verdict"])
+
+
+def _by_bittorrent(out: dict, tracker: str, why: str) -> dict:
+    """A torrent to download whole over BitTorrent - unless nobody seeds it."""
+    if out["torrent"].get("seeders") == 0:
+        out["verdict"] = f"{why} - on {tracker}, but with no seeders, so it cannot be downloaded"
+        return out
+    out["download"] = True
+    out["verdict"] = f"{why} - to download from {tracker} over BitTorrent"
+    return out
+
+
+def on_tracker(cfg: Config, pr: Prowlarr, name: str, tracker: str) -> tuple[list[Release], list[Release]]:
+    """The torrents on ``tracker`` of this release, most seeded first, and all it found."""
+    ids = [i for i, n in pr.indexers() if n and n.strip().lower() == tracker.lower()]
+    if not ids:
+        raise ValueError(f"{tracker} is not an enabled torrent indexer in Prowlarr")
+    tracker_search = lambda q: [r for r in pr.search(q, ids, cfg.categories) if r.protocol == "torrent"]
+    is_it = lambda t: _same(t.title, name) or alike(t.title, name)
+    torrents = tracker_search(name)
+    for q in (short_query(name), title_year(name) if rule("title_year_search") else None):   # by its title
+        if q and not any(is_it(t) for t in torrents):
+            torrents = tracker_search(q) or torrents
+    return sorted((t for t in torrents if is_it(t)), key=lambda t: -(t.seeders or 0)), torrents
+
+
+def check_usenet(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[int]) -> dict:
     """What Usenet has for one pasted name, and the torrent on ``tracker`` it would build.
 
     Usenet is asked first: the tracker is only searched for names Usenet has a post of, so
@@ -518,13 +581,7 @@ def check(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids: list[i
                           + (" - neither names a release group, so only the torrent's size could tell" if maybe else "")
                           + " - no tracker chosen, so no torrent was looked for")
         return out
-    tracker_search = lambda q: [r for r in pr.search(q, ids, cfg.categories) if r.protocol == "torrent"]
-    is_it = lambda t: _same(t.title, name) or alike(t.title, name)
-    torrents = tracker_search(name)
-    for q in (short_query(name), title_year(name) if rule("title_year_search") else None):   # by its title
-        if q and not any(is_it(t) for t in torrents):
-            torrents = tracker_search(q) or torrents
-    same = sorted((t for t in torrents if is_it(t)), key=lambda t: -(t.seeders or 0))
+    same, torrents = on_tracker(cfg, pr, name, tracker)
     if not same:
         out["others"] = [t.title for t in torrents[:8]]
         out["verdict"] = f"on Usenet, but not found on {tracker} by that name" + (
@@ -563,7 +620,8 @@ KEEP_LISTS = 20              # finished lists kept on the page, newest first
 class Queue:
     """Pasted lists, checked one after another on this machine.
 
-    Each list is {"id", "tracker", "auto", "options", "added", "state", "rows"}; its state is
+    Each list is {"id", "tracker", "auto", "options", "mode", "added", "state", "rows"} (``mode``:
+    one of MODES - how it goes about its names; "normal" when missing); its state is
     "queued", "checking", "done" or "stopped". Each row is {"name", "state", "result"?,
     "note"?, "job"?, "listed"?}, its state "waiting", "checking", "done", "error" or
     "skipped" (its list was stopped first). One name is checked at a time, whichever list
@@ -606,15 +664,19 @@ class Queue:
         with self.lock:
             return copy.deepcopy(self.lists)
 
-    def add(self, names: list[str], tracker: str, auto: bool, options: dict) -> int:
-        """A list to check. With no tracker it is searched on Usenet only, and never builds."""
+    def add(self, names: list[str], tracker: str, auto: bool, options: dict, mode: str = "normal") -> int:
+        """A list to check. With no tracker it is searched on Usenet only, and never builds -
+        nor downloads anything over BitTorrent, whatever ``mode`` says."""
         names = [n.strip() for n in names if n and n.strip()]
         if not names:
             raise ValueError("a list of names is needed")
         tracker = (tracker or "").strip()
+        if mode not in MODES:
+            raise ValueError(f"unknown mode {mode!r}")
         with self.lock:
             lst = {"id": self.next_id, "tracker": tracker, "auto": bool(auto) and bool(tracker),
-                   "options": {**(options or {}), "pp": "auto"}, "added": time.time(), "state": "queued",
+                   "options": {**(options or {}), "pp": "auto"}, "mode": mode if tracker else "normal",
+                   "added": time.time(), "state": "queued",
                    "rows": [{"name": n, "state": "waiting"} for n in dict.fromkeys(names)]}
             self.next_id += 1
             self.lists.insert(0, lst)
@@ -660,10 +722,13 @@ class Queue:
 
     def _build(self, lst: dict, r: dict):
         res = r.get("result") or {}
-        if not res.get("plausible") or r.get("job"):
+        if not (res.get("plausible") or res.get("download")) or r.get("job"):
             return None
         try:
-            job = self.app.build_from_list(res["torrent"], res.get("nzbs") or [], lst["options"])
+            if res.get("plausible"):
+                job = self.app.build_from_list(res["torrent"], res.get("nzbs") or [], lst["options"])
+            else:                                # chosen for the list: downloaded over BitTorrent
+                job = self.app.download_from_list(res["torrent"], lst["tracker"])
         except ValueError as e:                  # already on the jobs list, or being built
             r["note"] = str(e)
             return None
@@ -685,8 +750,11 @@ class Queue:
         return None, None
 
     def step(self) -> bool:
-        """Check the next waiting name; False when there is none."""
+        """Check the next waiting name; False when there is none (or nzb2seed is paused)."""
         from .pipeline import usenet_indexers
+        from .slots import PAUSED
+        if PAUSED.is_set():
+            return False
         lst, row = self._next()
         self.save()
         if lst is None:
@@ -703,13 +771,15 @@ class Queue:
             cfg = self.app.cfg
             pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
             with using(self.rules.rules(lst["tracker"])):
-                result = check(cfg, pr, row["name"], lst["tracker"], usenet_indexers(cfg, pr))
+                mode = lst.get("mode") or "normal"
+                ids = usenet_indexers(cfg, pr) if mode != "torrent" else []
+                result = check(cfg, pr, row["name"], lst["tracker"], ids, mode)
             listed = self.app.listed(result["torrent"]["title"]) if result.get("torrent") else None
             with self.lock:
                 row.update(state="done", result=result)
                 if listed:
                     row["listed"] = listed.id
-            if not listed and lst["auto"] and result.get("plausible"):
+            if not listed and lst["auto"] and (result.get("plausible") or result.get("download")):
                 self._build(lst, row)
         except Exception as e:                   # noqa: BLE001 - one name never stops the list
             with self.lock:

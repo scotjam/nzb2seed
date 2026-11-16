@@ -143,6 +143,8 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .buildbar .what small { display: block; color: var(--ink-2); }
 .buildbar .opts { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .92rem; align-items: center; }
 .buildbar select { width: auto; padding: 5px 8px; }
+.buildbar .go { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
+.buildbar .go .why { color: var(--ink-2); max-width: 300px; text-align: right; }
 
 /* ---------- jobs */
 .jobs { display: grid; grid-template-columns: minmax(380px, 2fr) minmax(0, 3fr); gap: 20px; align-items: start; }
@@ -182,6 +184,8 @@ a.pagelink:hover { text-decoration-color: currentColor; }
 .limitinfo { color: var(--ink-2); font-size: .82rem; flex-basis: 100%; }
 table.limits tr.limitnote td { padding-top: 0; padding-bottom: 8px; border-bottom: 1px solid var(--rule); }
 .joblist .jretry .btn { display: inline-block; padding: 3px 10px; font-size: .84rem; }
+.job .jtopacts { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; justify-content: flex-end; }
+.job .jtopacts .jqueue { display: flex; gap: 8px; }
 .joblist .jretry .info { display: inline-grid; place-items: center; width: 20px; height: 20px;
   border-radius: 50%; border: 1px solid var(--ink-2); color: var(--ink-2); font-size: .75rem;
   font-weight: 700; font-style: italic; cursor: help; }
@@ -555,3 +559,22 @@ nav a.tour-here { outline: 2px solid var(--torrent); outline-offset: 2px; }
 .trules .tagree { margin: 0 0 6px 26px; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: .9rem; }
 .trules .tagree > span { flex-basis: 100%; color: var(--ink-2); }
 .trules .field input[type="text"] { width: 100%; }
+/* Torrent list 2 Seed: the modes that download over BitTorrent, and their warning */
+.twarn { color: var(--bad); font-weight: 700; }
+.tmodes .check small { display: block; margin-left: 26px; font-size: .85rem; }
+.tmodes .check small.twarn { font-weight: 600; }
+.tbtnwarn { align-self: center; }
+.tconfirm { position: fixed; inset: 0; z-index: 30; display: flex; align-items: center; justify-content: center;
+  background: rgb(0 0 0 / .45); padding: 16px; }
+.tconfirm-card { width: min(520px, 100%); background: var(--sheet); color: var(--ink); border: 2px solid var(--bad);
+  border-radius: 12px; padding: 16px 20px; box-shadow: 0 10px 40px rgb(0 0 0 / .3); }
+.tconfirm-card h2 { margin: 0 0 8px; font-size: 1.15rem; }
+.tconfirm-card p { margin: 0 0 12px; }
+.tswitch { font-size: .95rem; }
+/* the advanced options, boxed while open */
+.tadvanced.open { border: 1px solid var(--rule); border-radius: 10px; padding: 10px 14px; background: var(--sheet); max-width: 880px; }
+/* Pause / Resume */
+.pausebar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0 12px; }
+.pausebar.on { border: 1px solid var(--warn); border-radius: 8px; padding: 8px 12px; }
+.pausebar.on .status { color: var(--warn); font-weight: 700; }
+.tlistwarn { font-size: .9rem; margin: 2px 0 0 18px; }

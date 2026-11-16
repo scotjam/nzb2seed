@@ -154,6 +154,22 @@ class Prowlarr:
         raise ApiError("too many redirects while downloading release")
 
 
+def tracker_tag(tracker: str, torrent_bytes: bytes = b"") -> str:
+    """The tag on every torrent nzb2seed adds to qBittorrent: "<tracker>.nzb2seed" - the
+    tracker as Prowlarr names it, without "(API)" ("ExampleTracker.nzb2seed"), else the site the
+    torrent announces to ("tracker.example.org.nzb2seed")."""
+    name = re.sub(r"\s*\(API\)\s*$", "", (tracker or "").strip(), flags=re.I)
+    if not name and torrent_bytes:
+        try:
+            from .torrent import parse
+            urls = parse(torrent_bytes).trackers
+            name = (urlsplit(urls[0]).hostname or "") if urls else ""
+        except Exception:                        # noqa: BLE001 - a tag never stops an add
+            name = ""
+    name = re.sub(r"\s+", " ", name.replace(",", " ")).strip() or "unknown"
+    return f"{name}.nzb2seed"
+
+
 # ================================================================ autobrr
 
 class Autobrr:
@@ -461,8 +477,13 @@ class QBittorrent:
             pass                         # not worth failing a build over
 
     def add_stopped(self, torrent_bytes: bytes, filename: str, save_path: str,
-                    category: str = "", tags: str = ""):
+                    category: str = "", tags: str = "", tracker: str = ""):
+        """Add a torrent stopped. Every torrent nzb2seed adds is also tagged
+        "<tracker>.nzb2seed" (tracker_tag) - ``tracker`` is Prowlarr's name for it, else the
+        site the torrent announces to."""
         self.ensure_category(category)
+        mine = tracker_tag(tracker, torrent_bytes)
+        tags = ",".join(dict.fromkeys(t for t in [*(tags or "").split(","), mine] if t.strip()))
         data = {
             "savepath": save_path,
             "paused": "true",            # WebAPI < 2.11 (qBittorrent 4.x)

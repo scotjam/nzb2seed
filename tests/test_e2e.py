@@ -79,7 +79,7 @@ class FakeQB:
             return None
         return {"state": self.state, "progress": self.progress, "save_path": self.save_path}
 
-    def add_stopped(self, data, fn, save_path, cat, tags):
+    def add_stopped(self, data, fn, save_path, cat, tags, tracker=""):
         self.calls.append("add")
         self.category = cat
         self.t = parse(data)
