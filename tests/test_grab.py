@@ -264,3 +264,19 @@ def test_a_kept_nzb_gives_its_password_without_asking_the_indexer(tmp_path, monk
     assert src.kept(rel()) == locked and archives._passwords == ["s3cret"]
     assert src.sab.log == []                             # nothing fetched
     assert src.kept(rel("other")) is None
+
+
+def test_a_second_instance_names_its_jobs_apart(monkeypatch):
+    """Two nzb2seeds sharing one SABnzbd: NZB2SEED_INSTANCE gives the second its own job
+    names, which the first one's prefix never matches (and the other way round)."""
+    import importlib
+    monkeypatch.setenv("NZB2SEED_INSTANCE", "Second 2")
+    other = importlib.reload(grab)
+    try:
+        assert other.CHECK_PREFIX == "nzb2seed-second2-check-"
+        assert not other.CHECK_PREFIX.startswith("nzb2seed-check-")
+        assert not "nzb2seed-check-ab12".startswith(other.CHECK_PREFIX)
+    finally:
+        monkeypatch.delenv("NZB2SEED_INSTANCE")
+        importlib.reload(grab)
+    assert grab.CHECK_PREFIX == "nzb2seed-check-"

@@ -597,7 +597,7 @@ def reuse(cfg: Config, sab: SABnzbd, rel: Release, ok) -> tuple[str, str | None]
     return None
 
 
-PEEK_PREFIX = "nzb2seed-peek-"
+PEEK_PREFIX = f"nzb2seed-{grab.INSTANCE}-peek-" if grab.INSTANCE else "nzb2seed-peek-"   # see grab.INSTANCE
 PEEK_QUIET = 600       # seconds a finished peek is left before a sweep may remove it
 
 # the peek jobs this process is reading right now - never swept up from under a build

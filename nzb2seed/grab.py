@@ -29,7 +29,10 @@ from .config import Config
 from .pathmap import map_path
 from .report import check_cancel
 
-CHECK_PREFIX = "nzb2seed-check-"
+# Another nzb2seed sharing this SABnzbd (NZB2SEED_INSTANCE=name) names its jobs
+# "nzb2seed-<name>-check-...": neither one's sweep ever matches the other's jobs.
+INSTANCE = re.sub(r"[^a-z0-9]+", "", os.environ.get("NZB2SEED_INSTANCE", "").lower())
+CHECK_PREFIX = f"nzb2seed-{INSTANCE}-check-" if INSTANCE else "nzb2seed-check-"
 FETCH_TIMEOUT = 180
 # SABnzbd takes a job out of its queue while it reads the NZB it fetched, and puts it back
 # once read - in neither queue nor history meanwhile. A season's NZB (hundreds of files)

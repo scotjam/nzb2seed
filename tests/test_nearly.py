@@ -585,6 +585,40 @@ def test_a_build_handed_to_qbittorrent_turns_complete_from_its_change_feed(serve
     wait(lambda: not app._watching)                       # nothing left to follow: it stops
 
 
+def test_the_change_feed_keeps_one_qbittorrent_session(server, monkeypatch):  # noqa: F811
+    """qBittorrent keeps a full copy of every torrent for each session that asks for
+    sync/maindata, for an hour: a new login per poll (every 10 s) grew it by ~450 MB a minute
+    and took the NAS down. One session for the whole feed - and a fresh one, from rid 0,
+    only after a failure."""
+    from nzb2seed.clients import ApiError
+    app, _ = server
+    real_sleep = time.sleep
+    monkeypatch.setattr(gui.time, "sleep", lambda s: real_sleep(0.01))
+    logins, asked = [], []
+    feed = [{"rid": 1, "full_update": True, "torrents": {H: {"progress": 0.5}}},
+            {"rid": 2, "torrents": {}}, ApiError("boom"),
+            {"rid": 1, "full_update": True, "torrents": {}}, {"rid": 2, "torrents": {}},
+            {"rid": 3, "torrents": {H: {"progress": 1.0}}}]
+
+    class Q:
+        def __init__(self):
+            logins.append(self)
+
+        def sync_maindata(self, rid):
+            asked.append((len(logins), rid))
+            x = feed.pop(0) if feed else {"rid": rid, "torrents": {}}
+            if isinstance(x, Exception):
+                raise x
+            return x
+    monkeypatch.setattr(app, "_qbit", lambda: Q())
+    job = failed_part_way(app, have=0.5)
+    job.extra = {**job.extra, "added": True}
+    app.watch_clients()
+    wait(lambda: job.extra.get("complete"))
+    assert len(logins) == 2                               # once, and once more after the failure
+    assert asked[:6] == [(1, 0), (1, 1), (1, 2), (2, 0), (2, 1), (2, 2)]
+
+
 def test_a_build_left_stopped_says_seeding_once_it_is_started(server, monkeypatch):  # noqa: F811
     """Its result is kept current from qBittorrent's change feed - and one removed from
     qBittorrent says so, rather than being followed for ever."""

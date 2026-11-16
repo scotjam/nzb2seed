@@ -1228,21 +1228,27 @@ class App:
             self._watching = True
 
         def loop():
-            rid = 0
+            # One login for the whole feed. qBittorrent keeps a full copy of every torrent for
+            # each session that asks for sync/maindata, for an hour (web_ui_session_timeout):
+            # logging in afresh every 10 s left ~360 of them - 5,500 torrents each - and grew
+            # qBittorrent by ~450 MB a minute until it took the NAS down (2026-11-16).
+            rid, qb = 0, None
             try:
                 while True:
                     waiting = self._waiting_in_client()
                     if not waiting:
                         return
-                    qb = self._qbit()
                     if qb is None:
-                        return
+                        qb = self._qbit()
+                        rid = 0                       # a new session starts from a full update
+                        if qb is None:
+                            return
                     try:
                         data = qb.sync_maindata(rid)
-                    except ApiError as e:
+                    except (ApiError, OSError) as e:
                         print(f"qBittorrent change feed: {e}", flush=True)
                         time.sleep(60)
-                        rid = 0
+                        qb, rid = None, 0             # log in again (once) after a failure
                         continue
                     rid = data.get("rid", rid)
                     torrents = {h.lower(): c for h, c in (data.get("torrents") or {}).items()}
