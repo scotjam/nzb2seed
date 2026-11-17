@@ -789,11 +789,19 @@ def category_dir(cfg: Config, sab: SABnzbd) -> str:
     return ""
 
 
+def _job_key(name: str) -> str:
+    """A SABnzbd job's name as its folder is named: letters and digits only, as SABnzbd may
+    replace characters a filesystem does not take (and add ".1" for a second job of a name)."""
+    return re.sub(r"[^a-z0-9]", "", (name or "").casefold())
+
+
 def remove_old_downloads(cfg: Config, sab: SABnzbd, qb, days: float, now: float | None = None,
                          log=print) -> tuple[int, int]:
     """Delete nzb2seed's own SABnzbd downloads nothing has touched for ``days``: (folders,
     bytes freed). A build removes what it used, but posts tried and dropped, and downloads
-    of builds that failed and were never retried, used to stay for good. Never touched:
+    of builds that failed and were never retried, used to stay for good. Only a folder of a
+    job nzb2seed recorded submitting (its ledger) - anything else in the category folder (a
+    job added by hand, another instance's download) is never touched. Never touched either:
     anything changed within ``days``, anything still in SABnzbd's queue, the downloads of a
     build running now, and any folder a qBittorrent torrent has its files in. Nothing at
     all when qBittorrent or SABnzbd cannot be asked."""
@@ -811,12 +819,16 @@ def remove_old_downloads(cfg: Config, sab: SABnzbd, qb, days: float, now: float 
         return 0, 0
     if not root or not os.path.isdir(root):
         return 0, 0
-    busy = [j.get("title") or "" for j in ledger_for(cfg).all() if j.get("torrent") in _building]
+    jobs = ledger_for(cfg).all()
+    busy = [j.get("title") or "" for j in jobs if j.get("torrent") in _building]
+    own = {_job_key(j.get("title") or "") for j in jobs} - {""}
     gone, freed = 0, 0
     for n in sorted(os.listdir(root)):
         p = os.path.normpath(os.path.join(root, n))
         if n in queued or n.startswith(PEEK_PREFIX) or any(b and n.startswith(b) for b in busy):
             continue
+        if _job_key(n) not in own and _job_key(re.sub(r"\.\d+$", "", n)) not in own:
+            continue                        # not a download nzb2seed recorded: never its to delete
         if any(s == p or s.startswith(p + os.sep) or p.startswith(s + os.sep) for s in seeded):
             continue
         try:

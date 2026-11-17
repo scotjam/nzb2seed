@@ -208,11 +208,16 @@ def test_old_downloads_nothing_uses_are_removed(tmp_path, monkeypatch):
     qb = SimpleNamespace(torrents=lambda: [{"content_path": str(seeded / "a.7z.001")}])
     cfg = SimpleNamespace(sab_category="nzb2seed", sab_to_local=[], local_to_qbit=[],
                           path=str(tmp_path / "nzb2seed.toml"))
+    by_hand = folder("Added.By.Hand", 5)     # in the category, but not a job nzb2seed submitted
+    again = folder("Dropped.Post.1", 5)       # SABnzbd's second job of a name
     pipeline.ledger_for(cfg).record("nzo1", "Busy.Build.S01E01", torrent="abc")
+    for i, t in enumerate(("Dropped.Post", "Fresh.Post", "Still.Queued", "Seeded.Here", "Another.Dropped")):
+        pipeline.ledger_for(cfg).record(f"nzo{i + 2}", t)
     monkeypatch.setattr(pipeline, "_building", {"abc"})
     n, freed = pipeline.remove_old_downloads(cfg, sab, qb, 3, now=1_000_000, log=lambda t: None)
-    assert (n, freed) == (1, 10)
-    assert not old.exists() and new.exists() and queued.exists() and seeded.exists() and building.exists()
+    assert (n, freed) == (2, 20)
+    assert not old.exists() and not again.exists() and by_hand.exists()
+    assert new.exists() and queued.exists() and seeded.exists() and building.exists()
     folder("Another.Dropped", 5)            # qBittorrent not answering: nothing is removed
     assert pipeline.remove_old_downloads(cfg, sab, None, 3, now=1_000_000) == (0, 0)
 
