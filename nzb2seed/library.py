@@ -62,6 +62,7 @@ def unreachable(e: BaseException) -> bool:
 
 
 CHECKING_RETRY = 5 * 60
+DELETE_RECHECK = 10 * 60             # a moved season's original folder: tried again after, by auto delete
 REPLACE_RECHECK = 6 * 3600           # another tracker's pack not yet safe to delete: looked at again after
 
 
@@ -1438,12 +1439,15 @@ class Library:
             return
         if getattr(cfg, "library_auto_delete", False):
             for key, it in list(self.state.seasons.items()):
-                if it.get("status") != MOVED:
+                if it.get("status") != MOVED or time.time() - (it.get("delete_checked") or 0) < DELETE_RECHECK:
                     continue
+                it["delete_checked"] = time.time()
                 try:
                     self.delete_original(key)
-                except (ValueError, OSError):
-                    pass                        # not yet (still checking, ...) - tried again next time
+                except (ValueError, OSError) as e:
+                    # not yet (still checking, a torrent in it not safe yet...) - said, and tried again later
+                    it["why"] = f"original folder not deleted yet: {e}"
+                    self.state.save()
             for key, it in list(self.state.seasons.items()):
                 if it.get("status") == ORIGINAL_DELETED and it.get("replaces") \
                         and time.time() - (it.get("replace_checked") or 0) > REPLACE_RECHECK:
@@ -1477,7 +1481,14 @@ class Library:
 
     def delete_original(self, key: str) -> dict:
         """A moved season: your original season folder goes, once its torrent is seen
-        seeding at 100.0% from the library and nothing in qBittorrent has files in it."""
+        seeding at 100.0% from the library and nothing in qBittorrent has files in it.
+
+        Before that, cross-eyed is asked about every torrent with files in the folder, and
+        every torrent sharing their files (cross-seeds on other trackers): only when it counts
+        each of them safe from a hit-and-run are they queued in cross-eyed for deletion, with
+        their files - the folder itself goes on a later pass, once none of them is left in
+        qBittorrent. Not safe yet, cross-eyed not reachable, or a torrent it does not know:
+        nothing is deleted."""
         from .pathmap import map_path
         it, s = self.state.seasons.get(key), self.seasons.get(key)
         if not it or it.get("status") != MOVED:
@@ -1501,9 +1512,9 @@ class Library:
         paths = self.in_client()
         f = os.path.normcase(os.path.abspath(folder))
         busy = [p for p in paths if p == f or p.startswith(f + os.sep)]
-        if not paths or busy:
-            raise ValueError("a torrent in qBittorrent has files in it - nothing deleted" if busy
-                             else "qBittorrent cannot be reached - nothing deleted")
+        if not paths:
+            raise ValueError("qBittorrent cannot be reached - nothing deleted")
+        self._hand_over_folder(cfg, it, s, f, bool(busy))
         size = sum(os.path.getsize(os.path.join(dp, n)) for dp, _, ns in os.walk(folder) for n in ns)
         shutil.rmtree(folder)
         self.state.update(key, status=ORIGINAL_DELETED,
@@ -1512,6 +1523,57 @@ class Library:
         self.state.scanned_at = 0
         self.wake.set()
         return self.state.seasons[key]
+
+    def _hand_over_folder(self, cfg, it: dict, s, folder: str, busy: bool):
+        """The torrents with files in ``folder`` (the season's original one), as cross-eyed
+        groups them with every torrent sharing their files: queued in cross-eyed for deletion
+        when every one is safe from a hit-and-run - and ValueError, so the folder stays until
+        they are gone. ValueError too while any is not safe, or cross-eyed cannot tell."""
+        from .pathmap import map_path
+        if not getattr(cfg, "library_cross_eyed_url", ""):
+            if busy:
+                raise ValueError("a torrent in qBittorrent has files in it - nothing deleted")
+            return
+        ce = CrossEyed(cfg.library_cross_eyed_url, getattr(cfg, "library_cross_eyed_prefix", "/host"))
+        back = [(b, a) for a, b in (getattr(cfg, "local_to_qbit", None) or [])]
+        inside = lambda p: p == folder or p.startswith(folder + os.sep)
+        where = lambda x: os.path.normcase(os.path.abspath(map_path(x.get("content_path") or "", back)))
+        query = s.show if s is not None else (it.get("show") or "")
+        try:
+            groups = [g for g in ce.groups(query) if any(inside(where(x)) for x in g.get("torrents") or [])]
+        except (ApiError, ValueError) as e:
+            raise ValueError(f"cross-eyed cannot say whether that is safe ({e}) - nothing deleted") from None
+        if busy and not groups:
+            raise ValueError("a torrent in qBittorrent has files in it that cross-eyed does not know yet - "
+                             "nothing deleted")
+        if not groups:
+            return
+        mine = (it.get("infohash") or "").lower()
+        moved = os.path.normcase(os.path.abspath(it.get("moved_to") or "")) if it.get("moved_to") else ""
+        ts = [x for g in groups for x in g.get("torrents") or []]
+        if any((x.get("hash") or "").lower() == mine for x in ts) or \
+                (moved and any(where(x) == moved or where(x).startswith(moved + os.sep) for x in ts)):
+            raise ValueError("a torrent with files in it shares them with the season's own torrent - nothing deleted")
+        risky = [x for x in ts if x.get("hnr_risk") != "safe"]
+        if risky:
+            raise ValueError("torrents with files in it are not safe to delete yet: " + "; ".join(
+                f"{x.get('hnr_rule_name') or x.get('tracker_domain') or '?'} "
+                + (f"{max(1, round((x.get('hnr_remaining_seconds') or 0) / 86400))} day(s) to go"
+                   if x.get("hnr_risk") == "danger" else "no hit-and-run rule in cross-eyed")
+                for x in risky) + " - nothing deleted")
+        queued = set(it.get("original_batches") or [])
+        for g in groups:
+            if str(g["content_id"]) in (it.get("original_groups") or []):
+                continue
+            try:
+                queued.add(ce.delete_content(g["content_id"]))
+            except (ApiError, ValueError) as e:
+                raise ValueError(f"cross-eyed would not queue its torrents for deletion ({e}) - nothing deleted") from None
+            it.setdefault("original_groups", []).append(str(g["content_id"]))
+        it["original_batches"] = sorted(queued)
+        self.state.save()
+        raise ValueError(f"{len(ts)} torrent(s) with files in it - every one safe from a hit-and-run - queued in "
+                         "cross-eyed for deletion; the folder goes once they are gone")
 
     def queue_replaced(self, cfg, key: str) -> list[str]:
         """A season downloaded again for the ticked trackers in place of another tracker's

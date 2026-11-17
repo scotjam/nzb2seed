@@ -441,6 +441,13 @@ class FakeCrossEyed:
     def dry_run(self):
         return self.mode_dry
 
+    def groups(self, name):
+        return getattr(self, "g", [])
+
+    def delete_content(self, content_id):
+        self.calls.append(("delete", content_id))
+        return f"del{content_id}"
+
 
 def test_approve_with_cross_eyed_moves_the_torrent_in_and_lists_the_original(tmp_path, library, monkeypatch):
     w, s = _client_worker(tmp_path, library, [], library_cross_eyed_url="http://ce", library_cross_eyed_prefix="/host",
@@ -490,6 +497,23 @@ def test_approve_with_cross_eyed_moves_the_torrent_in_and_lists_the_original(tmp
     with pytest.raises(ValueError):
         w.delete_original(s.key)                    # a torrent has files in the original
     assert os.path.isdir(s.dir)
+    # a torrent with files in the original: deleted only through cross-eyed, once it is safe
+    w.in_client = lambda: {os.path.normcase(os.path.abspath(os.path.join(s.dir, "x.mkv")))}
+    old = {"hash": "o1", "content_path": os.path.join(s.dir, "x.mkv"), "hnr_risk": "danger",
+           "hnr_remaining_seconds": 3 * 86400, "hnr_rule_name": "TrackerA"}
+    xs = {"hash": "x1", "content_path": "/elsewhere/x.mkv", "hnr_risk": "safe", "hnr_rule_name": "TrackerB"}
+    ce.g = [{"content_id": 4, "torrents": [old, xs]}]
+    with pytest.raises(ValueError, match="TrackerA 3 day"):
+        w.delete_original(s.key)
+    assert os.path.isdir(s.dir) and not any(c[0] == "delete" for c in ce.calls if isinstance(c, tuple))
+    old["hnr_risk"] = "safe"
+    with pytest.raises(ValueError, match="queued in cross-eyed"):
+        w.delete_original(s.key)
+    assert ("delete", 4) in ce.calls and os.path.isdir(s.dir)
+    with pytest.raises(ValueError):
+        w.delete_original(s.key)                    # still there: not queued twice
+    assert ce.calls.count(("delete", 4)) == 1
+    ce.g = []                                        # cross-eyed deleted them
     w.in_client = lambda: {"/elsewhere"}
     w.delete_original(s.key)
     assert not os.path.exists(s.dir) and w.state.seasons[s.key]["status"] == lib.ORIGINAL_DELETED
