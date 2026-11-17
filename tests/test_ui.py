@@ -37,7 +37,8 @@ INTENDED = [
                 r"Paused[^:]*: nzb2seed does nothing by itself.*?Seeding carries on\.) ?"), ""),
     # the Jobs list is in parts - building now, queued in the order they start, ended - and
     # marks automatic builds in a column of their own (their names without "auto:")
-    (re.compile(r"(?:Active|Queued|Finished) \(\d+\)(?: next to start at the top)? ?"), ""),
+    (re.compile(r"(?:Active|Build queue|Automatic queue|Finished) \(\d+\)"
+                r"(?: next to start at the top(?: - newest torrent first)?)? ?"), ""),
     (re.compile(r"(\[[x ]\]) Auto (\S+)"), r"\1 auto: \2"),
     # Build and Demand open with a heading and what the tab is for
     (re.compile(r"^Build Find a torrent and matching nzbs so Usenet downloads can be used to build a torrent seed\. "), ""),

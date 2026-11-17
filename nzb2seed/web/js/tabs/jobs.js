@@ -62,22 +62,25 @@ export function JobsTab({ active }) {
     </div>`;
 }
 
-/* The list in three parts: what is building now; what waits, in the order it will start
-   (builds you started go in the order added, automatic ones newest torrent first - each
-   line has its own slots); and what has ended. */
+/* The list in four parts: what is building now; the two lines waiting for a slot, each
+   in the order it will start (builds you started: in the order added, unless moved to the
+   top; automatic ones: newest torrent first - each line has its own slots, so a #1 of
+   each starts next); and what has ended. */
 const SECTIONS = [
   ["active", "Active", ""],
-  ["queued", "Queued", "next to start at the top"],
+  ["build", "Build queue", "next to start at the top"],
+  ["auto", "Automatic queue", "next to start at the top - newest torrent first"],
   ["ended", "Finished", ""],
 ];
-const stageOf = (j) => j.queue || j.next_try ? "queued" : isLive(j) ? "active" : "ended";
+const stageOf = (j) => j.queue === "build" ? "build" : j.queue || j.next_try ? "auto" : isLive(j) ? "active" : "ended";
 function sections(list) {
-  const out = { active: [], queued: [], ended: [] };
+  const out = { active: [], build: [], auto: [], ended: [] };
   for (const j of list) out[stageOf(j)].push(j);
-  // a place in a line first (the two lines start side by side: #1 of each, then #2...),
-  // then automatic builds waiting to look for their post again, soonest first
-  out.queued.sort((a, b) => (a.queue ? 0 : 1) - (b.queue ? 0 : 1) || (a.place || 0) - (b.place || 0)
-    || (a.queue === "build" ? 0 : 1) - (b.queue === "build" ? 0 : 1) || (a.next_try || 0) - (b.next_try || 0));
+  out.build.sort((a, b) => (a.place || 0) - (b.place || 0));
+  // a place in the line first, then automatic builds waiting to look for their post
+  // again, soonest first
+  out.auto.sort((a, b) => (a.queue ? 0 : 1) - (b.queue ? 0 : 1) || (a.place || 0) - (b.place || 0)
+    || (a.next_try || 0) - (b.next_try || 0));
   return out;
 }
 const ago = (t) => {
