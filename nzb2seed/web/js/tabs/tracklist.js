@@ -57,6 +57,10 @@ function List({ l, place, open, unpicked, redraw }) {
     try { await api("/api/tracklist/" + what, { list: l.id }); }
     catch (err) { toast(`Could not ${what} it: ${err.message}`); }
   };
+  const again = async (row) => {
+    try { await api("/api/tracklist/recheck", { list: l.id, name: row.name }); }
+    catch (err) { toast("Could not search it again: " + err.message); }
+  };
   const build = async () => {
     try {
       const r = await api("/api/tracklist/build", { list: l.id, names: picked.map(x => x.name) });
@@ -89,6 +93,9 @@ function List({ l, place, open, unpicked, redraw }) {
               : row.state === "error" ? row.note : r.verdict}</span>
             ${job && html`<span>${row.job ? "started as" : "already on the jobs list:"} <a href=${"#jobs/" + job}>job ${job}</a></span>`}
             ${row.state === "done" && !job && row.note && html`<span>${row.note}</span>`}
+            ${row.state === "done" && r.reused && html`<button type="button" class="btn"
+              title="Another list found no Usenet post of this lately, so it was not searched again - search Usenet for it now"
+              onClick=${() => again(row)}>Search again</button>`}
           </div>
           ${row.state === "done" && !t && r.others?.length > 0 && html`<details><summary>what the tracker found</summary>
             ${r.others.map(o => html`<div><small>${o}</small></div>`)}</details>`}

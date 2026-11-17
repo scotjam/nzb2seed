@@ -532,3 +532,51 @@ def test_a_list_queued_with_a_warning_option_says_so_in_its_header():
     body = src[src.index("function ListWarning"):src.index("function stateOf") if src.index("function stateOf") > src.index("function ListWarning") else None]
     for part in ("${RISK}", "${l.tracker}", "to download over BitTorrent", "result.torrent?.size"):
         assert part in body, part
+
+
+def none_check(searched):
+    def check(cfg, pr, name, tracker, ids, mode="normal"):
+        searched.append(name)
+        return {"name": name, "torrent": None, "others": [], "nzbs": [], "plausible": False,
+                "on_usenet": False, "verdict": "no Usenet post of this release - the tracker was not asked"}
+    return check
+
+
+def test_a_name_another_list_found_nothing_of_lately_is_not_searched_again(queue, monkeypatch):
+    searched = []
+    monkeypatch.setattr(tracklist, "check", none_check(searched))
+    q = queue(FakeApp())
+    q.add(["Nothing.2015.1080p.WEB-DL-GRP"], "TrackerNine", False, {})
+    while q.step():
+        pass
+    second = q.add(["Nothing 2015 1080p WEB-DL-GRP", "Other.2015.1080p-GRP"], "TrackerX", False, {})
+    while q.step():
+        pass
+    assert searched == ["Nothing.2015.1080p.WEB-DL-GRP", "Other.2015.1080p-GRP"]
+    row = {r["name"]: r for r in q._find(second)["rows"]}["Nothing 2015 1080p WEB-DL-GRP"]
+    assert row["result"]["reused"] and "not searched again" in row["result"]["verdict"]
+    q.recheck(second, "Nothing 2015 1080p WEB-DL-GRP")             # Search again: asked now
+    while q.step():
+        pass
+    assert searched[-1] == "Nothing 2015 1080p WEB-DL-GRP"
+    assert "reused" not in {r["name"]: r for r in q._find(second)["rows"]}["Nothing 2015 1080p WEB-DL-GRP"]["result"]
+
+
+def test_an_old_search_or_a_list_that_downloads_asks_usenet_again(queue, monkeypatch):
+    searched = []
+    monkeypatch.setattr(tracklist, "check", none_check(searched))
+    q = queue(FakeApp())
+    first = q.add(["Nothing.2015.1080p-GRP"], "TrackerNine", False, {})
+    while q.step():
+        pass
+    q.add(["Nothing.2015.1080p-GRP"], "TrackerNine", False, {}, mode="fallback")
+    while q.step():
+        pass
+    assert len(searched) == 2                                     # it would ask the tracker instead
+    q._find(first)["rows"][0]["result"]["searched"] -= tracklist.REUSE_NONE_FOR + 1
+    for l in q.lists[:1]:
+        l["rows"][0]["result"]["searched"] -= tracklist.REUSE_NONE_FOR + 1
+    q.add(["Nothing.2015.1080p-GRP"], "TrackerNine", False, {})
+    while q.step():
+        pass
+    assert len(searched) == 3                                     # five days on: searched again

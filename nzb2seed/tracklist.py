@@ -615,6 +615,11 @@ def check_usenet(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids:
 # ---------------------------------------------------------------- the queue
 
 KEEP_LISTS = 20              # finished lists kept on the page, newest first
+REUSE_NONE_FOR = 5 * 24 * 3600   # a name another list found no Usenet post of this recently is not searched again
+
+
+def _age(s: float) -> str:
+    return f"{max(1, round(s / 3600))} h" if s < 48 * 3600 else f"{round(s / 86400)} days"
 
 
 class Queue:
@@ -720,6 +725,24 @@ class Queue:
         self.save()
         return {"started": started}
 
+    def recheck(self, list_id, name: str):
+        """Search Usenet for a name again now - one whose "nothing on Usenet" came from an
+        earlier list's search (Search again)."""
+        with self.lock:
+            lst = self._find(list_id)
+            r = next((r for r in lst["rows"] if r["name"] == name), None)
+            if r is None:
+                raise ValueError("no such name in that list")
+            if r["state"] in ("waiting", "checking"):
+                return
+            for k in ("result", "note", "listed"):
+                r.pop(k, None)
+            r.update(state="waiting", fresh=True)
+            if lst["state"] not in ("queued", "checking"):
+                lst["state"] = "queued"
+        self.save()
+        self.wake.set()
+
     def _build(self, lst: dict, r: dict):
         res = r.get("result") or {}
         if not (res.get("plausible") or res.get("download")) or r.get("job"):
@@ -749,6 +772,32 @@ class Queue:
                 return lst, row
         return None, None
 
+    def _none_lately(self, lst: dict, name: str) -> tuple[int, float] | None:
+        """(the list, when) that searched Usenet for ``name`` in the last 5 days and found no
+        post of it - under the same rules as ``lst`` (they decide what counts as a post of
+        it). Only a list that builds from Usenet alone takes it: one that would download
+        from the tracker instead still asks the tracker. A result taken this way keeps the
+        time of the search, so it is never carried on past 5 days."""
+        if (lst.get("mode") or "normal") != "normal":
+            return None
+        key, rules = job_key(name), self.rules.rules(lst["tracker"])
+        now = time.time()
+        with self.lock:
+            for other in self.lists:
+                if other is lst:
+                    continue
+                for r in other["rows"]:
+                    res = r.get("result") or {}
+                    if r.get("state") != "done" or job_key(r["name"]) != key:
+                        continue
+                    if res.get("on_usenet") is not False or res.get("torrent") or \
+                            not str(res.get("verdict", "")).startswith("no Usenet post"):
+                        continue
+                    when = res.get("searched") or other.get("added") or 0
+                    if now - when < REUSE_NONE_FOR and self.rules.rules(other["tracker"]) == rules:
+                        return other["id"], when
+        return None
+
     def step(self) -> bool:
         """Check the next waiting name; False when there is none (or nzb2seed is paused)."""
         from .pipeline import usenet_indexers
@@ -767,6 +816,18 @@ class Queue:
                                    "plausible": False, "verdict": "not searched"})
             self.save()
             return True
+        gone = None if row.pop("fresh", False) else self._none_lately(lst, row["name"])
+        if gone:                                 # another list found nothing on Usenet just now
+            prev, when = gone
+            with self.lock:
+                row.update(state="done", result={
+                    "name": row["name"], "torrent": None, "others": [], "nzbs": [], "plausible": False,
+                    "on_usenet": False, "searched": when, "reused": prev,
+                    "verdict": f"no Usenet post of this release - as list {prev} found "
+                               f"{_age(time.time() - when)} ago, not searched again (Search again asks Usenet now)"
+                               + (" - the tracker was not asked" if lst["tracker"] else "")})
+            self.save()
+            return True
         try:
             cfg = self.app.cfg
             pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
@@ -775,6 +836,8 @@ class Queue:
                 ids = usenet_indexers(cfg, pr) if mode != "torrent" else []
                 result = check(cfg, pr, row["name"], lst["tracker"], ids, mode)
             listed = self.app.listed(result["torrent"]["title"]) if result.get("torrent") else None
+            if mode != "torrent":
+                result["searched"] = time.time()  # when Usenet was searched for it
             with self.lock:
                 row.update(state="done", result=result)
                 if listed:

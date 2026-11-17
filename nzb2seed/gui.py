@@ -2172,6 +2172,9 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 if path in ("/api/tracklist/stop", "/api/tracklist/remove"):
                     getattr(app.tracklist, path.rsplit("/", 1)[1])(body.get("list"))
                     return self._json({"lists": app.queue().snapshot()})
+                if path == "/api/tracklist/recheck":
+                    app.queue().recheck(body.get("list"), str(body.get("name") or ""))
+                    return self._json({"lists": app.queue().snapshot()})
                 if path == "/api/tracklist/build":
                     return self._json(app.queue().build(body.get("list"), [str(n) for n in body.get("names") or []]))
                 if path == "/api/season/shows":
