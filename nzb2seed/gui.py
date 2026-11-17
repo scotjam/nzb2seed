@@ -46,17 +46,27 @@ _held = threading.local()
 
 
 def take_slot(slots, why: str = "Waiting for a build slot"):
-    """Queue for a build slot, first come first served (a build waiting for one can still
-    be cancelled). The line remembers whose place each is, for the Jobs tab."""
-    if not slots.acquire(blocking=False):
+    """Queue for a build slot (a build waiting for one can still be cancelled). The line
+    remembers whose place each is, for the Jobs tab, and goes by job number - the order
+    they were queued in - not by which thread got there first: after a restart every
+    interrupted build comes back at once, and racing for places shuffled the queue. A
+    "Move to top" or "Start now" kept on the job is carried over the restart too."""
+    job = getattr(report.sink(), "job", None)
+    got = True
+    marks = slots_mod.queue_marks(job)
+    # one that held a slot when nzb2seed stopped takes one back first, even when a slot is
+    # free: the builds already waiting are behind it anyway
+    if marks["front"] == float("inf") or not slots.acquire(blocking=False):
         report.step(why)
-        place = slots.enter(getattr(report.sink(), "job", None))
+        rank = float(getattr(job, "id", 0) or 0)
+        place = slots.enter(job, rank, **marks)
         try:
-            while not slots.take(place, timeout=5):
+            while not (got := slots.take(place, timeout=5)):
                 report.check_cancel()
         except BaseException:
             slots.leave(place)
             raise
+    slots_mod.clear_queue_marks(job, forced=got == "forced")
     _held.slots = slots
 
 
@@ -65,6 +75,7 @@ def give_slot():
     slots, _held.slots = getattr(_held, "slots", None), None
     if slots is not None:
         slots.release()
+        slots_mod.let_go(getattr(report.sink(), "job", None))
     return slots
 from . import torrent as torrent_mod
 from . import matching
@@ -1410,7 +1421,10 @@ class App:
         if box is not None and hasattr(box.slots, "to_front"):
             lines.append(("automatic", box.slots))
         for name, slots in lines:
-            if (slots.to_front if how == "top" else slots.force)(job):
+            if (slots.to_front(job) if how == "top" else slots.force(job)):
+                # kept on the job, so a restart does not forget it (take_slot puts it back)
+                mark = {"queue_front": slots.front_of(job)} if how == "top" else {"queue_forced": True}
+                job.extra = {**(job.extra or {}), **mark}
                 self.store.changed(urgent=True)
                 if how == "top":
                     return f"Moved to the top of the {name} queue: it starts next."

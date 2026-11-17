@@ -38,7 +38,7 @@ from .pipeline import Abort, Incomplete, Options, execute_run, local_release
 from .usenet_odds import odds_for
 from .report import Cancelled, check_cancel, info, step, warn
 from .report import sink as report_sink
-from .slots import PAUSED, FairSlots
+from .slots import PAUSED, FairSlots, clear_queue_marks, let_go, queue_marks
 from .torrent import TorrentError, parse
 
 POLL_SECONDS = 20
@@ -392,16 +392,20 @@ class Inbox:
             info("waiting for a free build slot" if self.slot_count > 1 else "waiting for the build slot")
             # in line newest torrent first: the tracker's posting time, or when it arrived here
             posted = (rel.published if rel.published else None) or it.get("first_seen") or time.time()
-            place = self.slots.enter(getattr(report_sink(), "job", None), rank=-posted)
+            job = getattr(report_sink(), "job", None)
+            # a kept Move to top / Start now, or the slot it held when nzb2seed stopped
+            place = self.slots.enter(job, rank=-posted, **queue_marks(job))
             try:
-                while not self.slots.take(place, timeout=5):
+                while not (got := self.slots.take(place, timeout=5)):
                     check_cancel()
             except BaseException:
                 self.slots.leave(place)
                 raise
+            clear_queue_marks(job, forced=got == "forced")
             attempts = it.get("attempts", 0) + 1
             if not self.state.move_on(h, status="building", attempts=attempts):
                 self.slots.release()        # stopped while it waited: never starts building
+                let_go(job)
                 raise Cancelled("stopped")
             try:
                 opts = Options(unattended=True, start=cfg.auto_start,
@@ -446,6 +450,7 @@ class Inbox:
                 raise Abort(why) from None
             finally:
                 self.slots.release()
+                let_go(job)
             self.state.update(h, status="done", why=out.get("result", "done"))
             self._move(it["file"], DONE)
             return out

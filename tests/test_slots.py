@@ -162,6 +162,129 @@ def test_the_jobs_tab_can_move_or_start_a_queued_build(tmp_path):
     assert ticket
 
 
+def test_builds_resumed_at_once_keep_the_order_they_were_queued_in(tmp_path, monkeypatch):
+    """After a restart every interrupted build comes back at once, each from its own thread:
+    the line goes by job number, not by which thread happens to get there first."""
+    from nzb2seed import gui, report
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    app.build_slots = FairSlots(1)
+    assert app.build_slots.acquire(blocking=False)               # one build running
+    jobs = {i: gui.Job(i, f"Film.{i}", "build") for i in (5, 3, 9, 4)}
+
+    class Sink:
+        def __init__(self, job):
+            self.job = job
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+    monkeypatch.setattr(report, "check_cancel", lambda: None)
+    started, threads = [], []
+    for i in (9, 4, 5, 3):                                       # threads arriving out of order
+        def run(job=jobs[i]):
+            report.use(Sink(job))
+            gui.take_slot(app.build_slots)
+            started.append(job.id)
+            gui.give_slot()
+        t = threading.Thread(target=run)
+        t.start()
+        threads.append(t)
+        while jobs[i] not in app.build_slots.waiting():
+            time.sleep(0.005)
+    assert [j.id for j in app.build_slots.waiting()] == [3, 4, 5, 9]
+    app.build_slots.release()
+    for t in threads:
+        t.join(5)
+    assert started == [3, 4, 5, 9]
+
+
+def test_a_build_cut_off_part_way_gets_its_slot_back_first(tmp_path, monkeypatch):
+    """A build that held a slot when nzb2seed stopped (SABnzbd already downloading for it)
+    takes one back before older builds that had not started - and one you had started now
+    is started now again. Handing the slot back (done, or waiting on you) forgets it."""
+    from nzb2seed import gui, report, slots as slots_mod
+    monkeypatch.setattr(report, "check_cancel", lambda: None)
+
+    class Sink:
+        def __init__(self, job):
+            self.job = job
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+    old, cut_off, forced = gui.Job(1, "Film.1", "build"), gui.Job(5, "Film.5", "build"), gui.Job(7, "Film.7", "build")
+    cut_off.extra = {slots_mod.HOLDING: "slot"}                      # kept in jobs.json over the restart
+    forced.extra = {slots_mod.HOLDING: "forced"}
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)                             # the only slot is busy
+    slots.enter(old, 1.0, **slots_mod.queue_marks(old))
+    got = []
+
+    def run(job):
+        report.use(Sink(job))
+        gui.take_slot(slots)
+        got.append(job.id)
+        assert job.extra.get(slots_mod.HOLDING)                       # holds one now
+        if job is cut_off:
+            gui.give_slot()
+            assert slots_mod.HOLDING not in job.extra               # handed back: forgotten
+    t7 = threading.Thread(target=run, args=(forced,))
+    t7.start()
+    t7.join(5)
+    assert got == [7]                                                 # started now again, past the limit
+    t5 = threading.Thread(target=run, args=(cut_off,))
+    t5.start()
+    while cut_off not in slots.waiting():
+        time.sleep(0.005)
+    assert slots.waiting() == [cut_off, old]                          # ahead of the older one
+    slots.release()                                                   # the forced build's slot
+    slots.release()                                                   # the one that was busy
+    t5.join(5)
+    assert got == [7, 5]
+
+
+def test_every_line_breaks_ties_by_job_number_not_arrival():
+    """The automatic line (newest torrent first) too: torrents posted at the same moment, or
+    with no time known, go in the order their jobs were made, whichever thread is first."""
+    from nzb2seed import gui
+    slots = FairSlots(1)
+    assert slots.acquire(blocking=False)
+    j7, j2, j5 = (gui.Job(i, f"Film.{i}", "auto") for i in (7, 2, 5))
+    for j in (j7, j2, j5):                                        # arriving 7, 2, 5
+        slots.enter(j, -1_000.0)                                  # same posting time
+    assert [j.id for j in slots.waiting()] == [2, 5, 7]
+    newer = gui.Job(9, "Film.9", "auto")
+    slots.enter(newer, -2_000.0)                                  # posted later: still first
+    assert [j.id for j in slots.waiting()] == [9, 2, 5, 7]
+
+
+def test_move_to_top_and_start_now_survive_a_restart(tmp_path):
+    """Kept on the job, so the line rebuilt after a restart puts them back - and forgotten
+    once the build has its slot."""
+    from nzb2seed import gui, slots as slots_mod
+    cfgfile = tmp_path / "nzb2seed.toml"
+    cfgfile.write_text("")
+    app = gui.App(str(cfgfile))
+    app.build_slots = FairSlots(1)
+    assert app.build_slots.acquire(blocking=False)
+    a, b, c = (gui.Job(i, f"Film.{i}", "build") for i in (1, 2, 3))
+    for j in (a, b, c):
+        app.build_slots.enter(j, float(j.id))
+    app.jump_queue(c, "top")
+    app.jump_queue(b, "force")
+    assert c.extra.get("queue_front") and b.extra.get("queue_forced")
+    # the restart: a new line, everyone back in it in whatever order
+    after = FairSlots(1)
+    assert after.acquire(blocking=False)
+    tb = after.enter(b, 2.0, **slots_mod.queue_marks(b))
+    after.enter(a, 1.0, **slots_mod.queue_marks(a))
+    after.enter(c, 3.0, **slots_mod.queue_marks(c))
+    assert after.waiting()[0] is c                               # still on top
+    assert after.take(tb, 1)                                     # still started now, past the limit
+    slots_mod.clear_queue_marks(b)
+    assert "queue_forced" not in (b.extra or {})
+
+
 def test_a_download_shows_how_far_it_is_and_how_fast(monkeypatch):
     from nzb2seed import pipeline, report
     seen = []
