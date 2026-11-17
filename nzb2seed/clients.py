@@ -474,6 +474,11 @@ class QBittorrent:
         """Every torrent in the client (read only)."""
         return self._ok(self._req("GET", "torrents/info"), "info").json()
 
+    def properties(self, infohash: str) -> dict:
+        """The torrent's general properties (piece_size, total_size, ...)."""
+        return self._ok(self._req("GET", "torrents/properties", params={"hash": infohash}),
+                        "properties").json()
+
     def piece_states(self, infohash: str) -> list[int]:
         """0 = not downloaded, 1 = downloading, 2 = downloaded (verified)."""
         return self._ok(self._req("GET", "torrents/pieceStates", params={"hash": infohash}),

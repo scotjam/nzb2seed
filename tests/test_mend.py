@@ -409,3 +409,75 @@ def test_mend_says_when_a_torrent_it_left_alone_is_picked_up_again_after_a_resta
     said = [t for _, t in m.state.log]
     assert any("cross-eyed's job on it is over - mend looks at it again" in t for t in said)
     assert qb.started == ["short"]
+
+
+PIECE = 1000
+TRUE = b"".join(bytes([65 + i]) * PIECE for i in range(4))      # the torrent's file: 4 pieces
+
+
+def _mixed(good: set[int]) -> bytes:
+    """A version of the file right in pieces ``good`` only."""
+    return b"".join((bytes([65 + i]) if i in good else b"z") * PIECE for i in range(4))
+
+
+class PieceQb(FakeQb):
+    """Checks the short torrent's file piece by piece against TRUE."""
+
+    def __init__(self, *a, piece_size=PIECE):
+        super().__init__(*a)
+        self.piece_size, self.states = piece_size, {"short": [], "whole": [2] * 4}
+        self.recheck("short")
+
+    def files(self, h):
+        st = self.states[h]
+        return [{"name": "Rel/ep.mkv", "size": len(TRUE), "progress": sum(x == 2 for x in st) / 4,
+                 "priority": 1, "index": 0}]
+
+    def recheck(self, h):
+        with open(os.path.join(self.dirs[h], "Rel", "ep.mkv"), "rb") as fh:
+            data = fh.read()
+        self.states[h] = [2 if data[i * PIECE:(i + 1) * PIECE] == TRUE[i * PIECE:(i + 1) * PIECE] else 0
+                          for i in range(4)]
+        self.prog[h] = sum(x == 2 for x in self.states[h]) / 4
+
+    def piece_states(self, h):
+        return self.states[h]
+
+    def properties(self, h):
+        return {"piece_size": self.piece_size}
+
+
+def _pieces_setup(tmp_path, mine: set[int], theirs: set[int], **kw):
+    lib_file = tmp_path / "tv" / "ep.mkv"
+    lib_file.parent.mkdir()
+    lib_file.write_bytes(_mixed(mine))
+    short = tmp_path / "short" / "Rel"
+    short.mkdir(parents=True)
+    os.link(lib_file, short / "ep.mkv")
+    whole = tmp_path / "whole" / "Rel"
+    whole.mkdir(parents=True)
+    (whole / "ep.mkv").write_bytes(_mixed(theirs))
+    qb = PieceQb(str(tmp_path / "short"), str(tmp_path / "whole"), **kw)
+    m = object.__new__(mend.Mender)
+    m.app = SimpleNamespace(cfg=SimpleNamespace(local_to_qbit=[]), _qbit=lambda: qb, jobs={})
+    m.state = mend.State(str(tmp_path / "mend.json"))
+    return m, qb, lib_file, short / "ep.mkv", whole / "ep.mkv"
+
+
+def test_a_better_copy_that_loses_a_piece_gets_the_old_files_piece_back(tmp_path):
+    """The old file had pieces 0 and 1 right, the other copy 1, 2 and 3: both versions' good
+    parts are kept - the torrent finishes, and nothing it had is lost."""
+    m, qb, lib_file, mine, theirs = _pieces_setup(tmp_path, {0, 1}, {1, 2, 3})
+    m.round()
+    assert qb.states["short"] == [2, 2, 2, 2] and qb.started == ["short"]
+    assert mine.read_bytes() == TRUE and not os.path.exists(str(mine) + mend.ORIG)
+    assert lib_file.read_bytes() == _mixed({0, 1})                # the library's file untouched
+    assert theirs.read_bytes() == _mixed({1, 2, 3})               # nor the other torrent's
+
+
+def test_when_a_lost_piece_cannot_be_merged_back_the_old_file_returns(tmp_path):
+    m, qb, lib_file, mine, theirs = _pieces_setup(tmp_path, {0, 1}, {1, 2, 3}, piece_size=0)
+    m.round()
+    assert qb.states["short"] == [2, 2, 0, 0] and qb.started == []
+    assert os.stat(mine).st_ino == os.stat(lib_file).st_ino       # the old file is back, whole
+    assert "put back" in m.state.log[-1][1]

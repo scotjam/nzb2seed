@@ -10,6 +10,10 @@ such torrent gets that version of its incomplete files and a recheck:
 * the file is replaced by a hard link to the other copy (or a copy of it, from another drive)
   - never written into, so the library and any torrent sharing the old file keep theirs;
 * a file that comes out no better is put back as it was;
+* no piece that passed before may fail after: one that does gets the old file's bytes of it
+  back (written into the new file's own copy - both versions' good parts kept) and is checked
+  again; still short of what it had, every old file is put back. Only then does the old
+  file's name go;
 * at 100.0% the torrent is started - it only seeds, nothing was downloaded.
 
 A copy that was tried is not tried again. ``mend.json`` keeps what was tried and done.
@@ -162,6 +166,11 @@ def put_back(dst: str):
 def let_go(dst: str):
     if os.path.lexists(dst + ORIG):
         os.remove(dst + ORIG)
+
+
+def good_pieces(states) -> set[int]:
+    """The pieces qBittorrent has verified (state 2)."""
+    return {i for i, x in enumerate(states or []) if x == 2}
 
 
 class Mender:
@@ -455,6 +464,45 @@ class Mender:
                            if in_place else ""))
         return True
 
+    def merge_back(self, qb, h: str, kept: list[tuple[str, str]], lost: set[int]) -> int:
+        """Write the old file's bytes (``path + ORIG``) of each piece in ``lost`` back into the
+        new file in ``kept`` [(name, path)] - into a copy of its own first, so the torrent it
+        was linked from keeps its bytes. How many byte ranges were written (0: none could be -
+        no piece size, or no room for a copy)."""
+        from .assemble import own_copy
+        try:
+            plen = int((qb.properties(h) or {}).get("piece_size") or 0)
+            files = sorted(qb.files(h), key=lambda f: f.get("index", 0))
+        except (ApiError, AttributeError, ValueError):
+            return 0
+        if plen <= 0:
+            return 0
+        where, off = {}, 0
+        for f in files:
+            where[f["name"]] = (off, int(f.get("size") or 0))
+            off += int(f.get("size") or 0)
+        n = 0
+        for name, d in kept:
+            if name not in where or not os.path.lexists(d + ORIG):
+                continue
+            start, size = where[name]
+            spans = [(max(i * plen, start) - start, min((i + 1) * plen, start + size) - start)
+                     for i in sorted(lost)]
+            spans = [(a, b) for a, b in spans if a < b]
+            if not spans:
+                continue
+            try:
+                own_copy(d)
+                with open(d + ORIG, "rb") as old, open(d, "r+b") as new:
+                    for a, b in spans:
+                        old.seek(a)
+                        new.seek(a)
+                        new.write(old.read(b - a))
+            except OSError:
+                return 0                        # no room for a copy: put back instead
+            n += len(spans)
+        return n
+
     def mend(self, qb, r: dict, others: list[dict], back, map_path) -> str:
         """"done": finished; "tried": copies were tried (more may be left for the next
         round); "none": nothing here left to try."""
@@ -508,7 +556,11 @@ class Mender:
         self.state.pending = [[dst, dst + ORIG] for _, dst, *_ in swaps]
         self.state.save()
         done = []
+        restored = ""
         try:
+            # the pieces that pass now, and how far it is: what a swap must never lose
+            had = good_pieces(qb.piece_states(h))
+            was = (qb.info(h) or {}).get("progress", 0)
             for name, dst, src, mark, _ in swaps:
                 put_in(src, dst)
                 done.append((name, dst))
@@ -519,14 +571,33 @@ class Mender:
             # no better: the old file goes back (it is the library's, or shared with a torrent)
             worse = [(n, d) for n, d in done
                      if after.get(n, {}).get("progress", 0) <= before[n].get("progress", 0)]
-            for n, d in done:
-                if (n, d) in worse:
-                    put_back(d)
-                else:
-                    let_go(d)
+            for n, d in worse:
+                put_back(d)
             if worse:
                 qb.recheck(h)
                 info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
+            kept = [x for x in done if x not in worse]
+            if kept:
+                # a piece that passed with the old file and fails now: the old file's bytes of
+                # it are written back into the new one (its own copy first) - both versions'
+                # good parts - and it is checked again
+                lost = had - good_pieces(qb.piece_states(h))
+                if lost and self.merge_back(qb, h, kept, lost):
+                    qb.recheck(h)
+                    info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
+                    lost = had - good_pieces(qb.piece_states(h))
+                if lost or info.get("progress", 0) < was:
+                    # still short of what it had: everything goes back as it was
+                    for n, d in kept:
+                        put_back(d)
+                    worse += kept
+                    restored = (f" - {len(lost)} piece(s) that passed before failed with it, so "
+                                "the old file(s) were put back")
+                    qb.recheck(h)
+                    info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
+                else:
+                    for n, d in kept:
+                        let_go(d)                   # every piece it had still passes: the old name goes
         except Exception:
             for _, d in done:
                 if os.path.lexists(d + ORIG):
@@ -551,5 +622,5 @@ class Mender:
                 lib.wake.set()
         else:
             self.state.note(f"{r['name']}: tried {len(done)} file(s) from {swaps[0][4]}, {better} "
-                            f"better - now {pct:.4f}% (was {r['progress'] * 100:.4f}%)")
+                            f"better - now {pct:.4f}% (was {r['progress'] * 100:.4f}%){restored}")
         return "done" if info.get("progress", 0) >= 1 else "tried"
