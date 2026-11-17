@@ -619,3 +619,12 @@ def test_an_old_search_or_a_list_that_downloads_asks_usenet_again(queue, monkeyp
     while q.step():
         pass
     assert len(searched) == 3                                     # five days on: searched again
+
+
+def test_a_post_far_larger_than_the_torrent_is_another_release_not_downloaded():
+    """A 2.3 MB crack fix and the 27 GB game its group posted under the bare title."""
+    name = "Game.2026.CRACKFIX-GRP"
+    r = run({name: [rel(name, "torrent", 2.3 * 1024 ** 2), rel(name, "usenet", 27 * GB, indexer="UsenetA")]}, name)
+    assert not r["plausible"] and not r["nzbs"] and "another release" in r["verdict"]
+    assert tracklist.too_large(27 * GB, 2.3 * 1024 ** 2) and not tracklist.too_large(11 * GB, 10 * GB)
+    assert not tracklist.too_large(9 * 1024 ** 2, 2 * 1024 ** 2)      # par2 can triple a tiny post

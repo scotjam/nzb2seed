@@ -590,6 +590,16 @@ def check_usenet(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids:
     t = same[0]
     out["torrent"] = dataclasses.asdict(t)
     if exact:
+        # far larger than the torrent is another release by that name (the full game for a
+        # crack fix, a remux for an encode): never downloaded to build this one
+        huge = [n for n in exact if too_large(n.size, t.size)]
+        exact = [n for n in exact if n not in huge]
+        if huge and not exact:
+            out["verdict"] = (f"a post by that name is on Usenet, but {huge[0].size / max(1, t.size):.0f}× the "
+                              f"torrent's size ({gb_text(huge[0].size)} for {gb_text(t.size)}) - another release, "
+                              "not downloaded")
+            return out
+    if exact:
         # with no group to go by, a post must be the torrent's size, not merely hold it
         big = [n for n in exact if not t.size or (n.size >= t.size * ENOUGH
                                                   and not (renamed and groupless and n.size > t.size * (1 + rule("groupless_max_pct") / 100)))]
@@ -602,6 +612,10 @@ def check_usenet(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids:
             out["verdict"] = "same release on Usenet, but smaller than the torrent - files would be missing"
         return out
     total = sum(n.size for n in eps)
+    if too_large(total, t.size):
+        out["verdict"] = (f"episode posts of that name are on Usenet, but {gb_text(total)} in all for a "
+                          f"{gb_text(t.size)} torrent - another release, not downloaded")
+        return out
     if not t.size or total >= t.size * ENOUGH:
         out.update(nzbs=[dataclasses.asdict(n) for n in eps], plausible=True,
                    verdict=f"season pack: {len(eps)} episode posts of the same release on Usenet"
@@ -610,6 +624,17 @@ def check_usenet(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids:
         out["verdict"] = (f"season pack: only {len(eps)} episode post{'s' if len(eps) != 1 else ''} "
                           "of the same release on Usenet - not the whole season")
     return out
+
+
+def too_large(post: int, torrent: int) -> bool:
+    """Is a post far larger than the torrent it would build - another release by that name?
+    The same rule a build holds every post to (pipeline.size_verdict)."""
+    from .pipeline import FAR_LARGER, FAR_LARGER_MIN
+    return bool(post and torrent) and post > torrent * FAR_LARGER and post - torrent > FAR_LARGER_MIN
+
+
+def gb_text(n: int) -> str:
+    return f"{n / 1024 ** 3:.2f} GB" if n >= 1024 ** 3 else f"{n / 1024 ** 2:.1f} MB"
 
 
 # ---------------------------------------------------------------- the queue

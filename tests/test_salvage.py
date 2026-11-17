@@ -231,3 +231,16 @@ def test_another_cut_of_the_same_name_is_left_as_it_is(tmp_path):
     far.mkdir()
     (far / ep_name(1, 3)).write_bytes(files[f"Season 1/{ep_name(1, 3)}"][: f.length // 2])
     assert pipeline.pad_cut_off(t, str(far), [f]) == []
+
+
+def test_a_pick_far_larger_than_the_torrent_is_never_downloaded(tmp_path):
+    """Handed a post of the same name that is the full game for a small fix: skipped,
+    never sent to SABnzbd to find out."""
+    t, cfg, files, size = world(tmp_path)
+    huge = rel(NAME, 27 * 1024 ** 3, "HUGE")
+    sab = HoledSAB(str(tmp_path / "dl"), t, files)
+    try:
+        plan_and_fetch(cfg, Options(), PR([]), sab, t, t.name, [huge], 2)
+    except Exception:                                  # noqa: BLE001 - nothing else to build from
+        pass
+    assert "HUGE" not in sab.added

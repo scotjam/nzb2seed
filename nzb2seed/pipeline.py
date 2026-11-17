@@ -1706,6 +1706,7 @@ def find_alternatives(cfg: Config, pr: Prowlarr, need: Need, tried: list[Release
 # a post of the same file(s) is about their size: par2 and packing add a fraction, never
 # this much. Far larger, it is a different encode (a disc or remux of the episode, say)
 FAR_LARGER = 2.5
+FAR_LARGER_MIN = 200 << 20   # ...and at least this much larger: a small file's post carries par2 and packing
 
 
 ROUNDED = 0.98      # an indexer's size this much of what a post must hold may just be rounded down
@@ -1726,7 +1727,7 @@ def size_verdict(need: Need, r: Release) -> tuple[str, bool]:
     n = matching.norm(r.title)
     same_unit = (bool(re.search(rf"(?<![a-z0-9]){need.ep}(?![0-9])", n)) if need.ep
                  else not _EP.search(n))
-    if same_unit and ratio > FAR_LARGER and r.size - need.min_size > 200 << 20:
+    if same_unit and ratio > FAR_LARGER and r.size - need.min_size > FAR_LARGER_MIN:
         return f"{ratio:.0f}× {what} - a different encode, cannot be it", False
     return f"{ratio:.2f}× {what}", True
 
@@ -2314,6 +2315,13 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
             for r in small:
                 info(f"{u.need.label}: skipping your pick {r.title} ({gb(r.size)}) - smaller than "
                      f"the {gb(u.need.min_size)} it has to hold")
+            # far larger than what it has to hold: another release by that name (the full
+            # game for a crack fix) - never downloaded whole to find out
+            for r in u.seeded:
+                say, holds = size_verdict(u.need, r)
+                if r not in small and not holds:
+                    small.append(r)
+                    info(f"{u.need.label}: skipping the pick {r.title} ({r.indexer}, {gb(r.size)}) - {say}")
             u.queue = [r for r in u.seeded if r not in small] + _rank(pr, t, u, found)
             if not u.queue:
                 info(f"{u.need.label}: none found")
@@ -2612,6 +2620,10 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     and peek_archive(cfg, pr, sab, rel, data, u.files, packed_inner(u)) is False:
                 verdicts.mark(t.infohash, u.need.label, rel, "its archive holds a different release")
                 _drop(pr, rel)
+                continue
+            say, holds = size_verdict(u.need, rel)
+            if not holds:                    # never a whole post out of all proportion to the need
+                info(f"{u.need.label}: not downloading {rel.title} ({rel.indexer}, {gb(rel.size)}) - {say}")
                 continue
             try:
                 nzo = sab_submit(cfg, pr, sab, rel, data, pp)
