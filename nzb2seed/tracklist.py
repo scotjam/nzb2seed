@@ -772,13 +772,16 @@ class Queue:
                 return lst, row
         return None, None
 
-    def _none_lately(self, lst: dict, name: str) -> tuple[int, float] | None:
+    def _none_lately(self, lst: dict, name: str, working: set[int] | None) -> tuple[int, dict] | None:
         """(the list, when) that searched Usenet for ``name`` in the last 5 days and found no
         post of it - under the same rules as ``lst`` (they decide what counts as a post of
         it). Only a list that builds from Usenet alone takes it: one that would download
         from the tracker instead still asks the tracker. A result taken this way keeps the
-        time of the search, so it is never carried on past 5 days."""
-        if (lst.get("mode") or "normal") != "normal":
+        time of the search, so it is never carried on past 5 days. ``working``: the Usenet
+        indexers that would be searched now - a search that went without one of them (it
+        was off, or Prowlarr had set it aside after failures) is not taken: it is searched
+        again, as is one that does not say which it went to."""
+        if (lst.get("mode") or "normal") != "normal" or not working:
             return None
         key, rules = job_key(name), self.rules.rules(lst["tracker"])
         now = time.time()
@@ -793,9 +796,11 @@ class Queue:
                     if res.get("on_usenet") is not False or res.get("torrent") or \
                             not str(res.get("verdict", "")).startswith("no Usenet post"):
                         continue
-                    when = res.get("searched") or other.get("added") or 0
+                    when = res.get("searched") or 0
+                    if not (working <= set(res.get("indexers") or ())):
+                        continue
                     if now - when < REUSE_NONE_FOR and self.rules.rules(other["tracker"]) == rules:
-                        return other["id"], when
+                        return other["id"], res
         return None
 
     def step(self) -> bool:
@@ -816,28 +821,38 @@ class Queue:
                                    "plausible": False, "verdict": "not searched"})
             self.save()
             return True
-        gone = None if row.pop("fresh", False) else self._none_lately(lst, row["name"])
+        fresh = row.pop("fresh", False)
+        cfg = self.app.cfg
+        pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
+        mode = lst.get("mode") or "normal"
+        working = None
+        if mode != "torrent":
+            try:                                 # what a search would go to now
+                working = set(usenet_indexers(cfg, pr)) - pr.paused_ids()
+            except Exception:                    # noqa: BLE001 - not known: nothing is taken as searched
+                working = None
+        gone = None if fresh else self._none_lately(lst, row["name"], working)
         if gone:                                 # another list found nothing on Usenet just now
-            prev, when = gone
+            prev, was = gone
+            when = was["searched"]
             with self.lock:
                 row.update(state="done", result={
                     "name": row["name"], "torrent": None, "others": [], "nzbs": [], "plausible": False,
-                    "on_usenet": False, "searched": when, "reused": prev,
+                    "on_usenet": False, "searched": when, "reused": prev, "indexers": was.get("indexers"),
                     "verdict": f"no Usenet post of this release - as list {prev} found "
                                f"{_age(time.time() - when)} ago, not searched again (Search again asks Usenet now)"
                                + (" - the tracker was not asked" if lst["tracker"] else "")})
             self.save()
             return True
         try:
-            cfg = self.app.cfg
-            pr = Prowlarr(cfg.prowlarr_url, cfg.prowlarr_key)
             with using(self.rules.rules(lst["tracker"])):
-                mode = lst.get("mode") or "normal"
                 ids = usenet_indexers(cfg, pr) if mode != "torrent" else []
                 result = check(cfg, pr, row["name"], lst["tracker"], ids, mode)
             listed = self.app.listed(result["torrent"]["title"]) if result.get("torrent") else None
             if mode != "torrent":
-                result["searched"] = time.time()  # when Usenet was searched for it
+                result["searched"] = time.time()  # when Usenet was searched for it, and where
+                if working is not None:
+                    result["indexers"] = sorted(working & set(ids))
             with self.lock:
                 row.update(state="done", result=result)
                 if listed:

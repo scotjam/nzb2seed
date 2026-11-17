@@ -107,6 +107,23 @@ class Prowlarr:
         Prowlarr._usenet_cache[self.url] = (time.time(), ids)
         return ids
 
+    def paused_ids(self) -> set[int]:
+        """Indexers Prowlarr has set aside after failures (disabledTill still to come): it
+        leaves them out of every search until then."""
+        from datetime import datetime, timezone
+        r = self.s.get(f"{self.url}/api/v1/indexerstatus", timeout=TIMEOUT)
+        if r.status_code != 200:
+            raise ApiError(f"Prowlarr indexer status: HTTP {r.status_code}")
+        now, out = datetime.now(timezone.utc), set()
+        for s in r.json():
+            till = s.get("disabledTill")
+            try:
+                if till and datetime.fromisoformat(till.replace("Z", "+00:00")) > now:
+                    out.add(s.get("indexerId"))
+            except ValueError:
+                continue
+        return out
+
     def indexers(self) -> list[tuple[int, str]]:
         """Prowlarr's torrent indexers: (id, name) - the Library tab's tracker choice."""
         r = self.s.get(f"{self.url}/api/v1/indexer", timeout=TIMEOUT)

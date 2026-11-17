@@ -542,7 +542,26 @@ def none_check(searched):
     return check
 
 
-def test_a_name_another_list_found_nothing_of_lately_is_not_searched_again(queue, monkeypatch):
+class StatusPR:
+    """Prowlarr with indexer status: ``paused`` - the ones it set aside after failures."""
+    paused: set = set()
+
+    def __init__(self, *a):
+        pass
+
+    def paused_ids(self):
+        return set(StatusPR.paused)
+
+
+@pytest.fixture
+def status_pr(monkeypatch):
+    StatusPR.paused = set()
+    monkeypatch.setattr(tracklist, "Prowlarr", StatusPR)
+    monkeypatch.setattr("nzb2seed.pipeline.usenet_indexers", lambda cfg, pr: [8, 9])
+    return StatusPR
+
+
+def test_a_name_another_list_found_nothing_of_lately_is_not_searched_again(queue, monkeypatch, status_pr):
     searched = []
     monkeypatch.setattr(tracklist, "check", none_check(searched))
     q = queue(FakeApp())
@@ -562,7 +581,27 @@ def test_a_name_another_list_found_nothing_of_lately_is_not_searched_again(queue
     assert "reused" not in {r["name"]: r for r in q._find(second)["rows"]}["Nothing 2015 1080p WEB-DL-GRP"]["result"]
 
 
-def test_an_old_search_or_a_list_that_downloads_asks_usenet_again(queue, monkeypatch):
+def test_a_search_that_went_without_an_indexer_working_now_is_made_again(queue, monkeypatch, status_pr):
+    searched = []
+    monkeypatch.setattr(tracklist, "check", none_check(searched))
+    q = queue(FakeApp())
+    status_pr.paused = {8}                                        # set aside by Prowlarr then
+    q.add(["Nothing.2015.1080p-GRP"], "TrackerNine", False, {})
+    while q.step():
+        pass
+    assert q.lists[0]["rows"][0]["result"]["indexers"] == [9]
+    q.add(["Nothing.2015.1080p-GRP"], "TrackerNine", False, {})
+    while q.step():
+        pass
+    assert len(searched) == 1                                     # still the same ones: taken
+    status_pr.paused = set()                                      # 8 works again
+    q.add(["Nothing.2015.1080p-GRP"], "TrackerNine", False, {})
+    while q.step():
+        pass
+    assert len(searched) == 2
+
+
+def test_an_old_search_or_a_list_that_downloads_asks_usenet_again(queue, monkeypatch, status_pr):
     searched = []
     monkeypatch.setattr(tracklist, "check", none_check(searched))
     q = queue(FakeApp())
