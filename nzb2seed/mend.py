@@ -272,6 +272,12 @@ class Mender:
         if self.flagged.pop("paused", None):
             self.state.note("resumed - mend looks at stopped torrents again")
         cfg = self.app.cfg
+        if getattr(cfg, "mend_disabled", False):
+            # Settings > Advanced: nothing is swapped, rechecked, started or downloaded
+            self.say("disabled", "disabled in Settings (Advanced) - mend leaves every torrent as it is")
+            return
+        if self.flagged.pop("disabled", None):
+            self.state.note("enabled again - mend looks at stopped torrents again")
         qb = self.app._qbit()
         if qb is None:
             return
@@ -464,6 +470,28 @@ class Mender:
                            if in_place else ""))
         return True
 
+    def file_pieces(self, qb, h: str) -> dict[str, set[int]]:
+        """{file name: the pieces it touches} - from qBittorrent's piece_range, else worked out
+        from the piece size; {} when neither is known."""
+        try:
+            files = sorted(qb.files(h), key=lambda f: f.get("index", 0))
+        except (ApiError, AttributeError):
+            return {}
+        if all(f.get("piece_range") for f in files):
+            return {f["name"]: set(range(f["piece_range"][0], f["piece_range"][1] + 1)) for f in files}
+        try:
+            plen = int((qb.properties(h) or {}).get("piece_size") or 0)
+        except (ApiError, AttributeError, ValueError):
+            return {}
+        if plen <= 0:
+            return {}
+        out, off = {}, 0
+        for f in files:
+            size = int(f.get("size") or 0)
+            out[f["name"]] = set(range(off // plen, (off + max(size, 1) - 1) // plen + 1))
+            off += size
+        return out
+
     def merge_back(self, qb, h: str, kept: list[tuple[str, str]], lost: set[int]) -> int:
         """Write the old file's bytes (``path + ORIG``) of each piece in ``lost`` back into the
         new file in ``kept`` [(name, path)] - into a copy of its own first, so the torrent it
@@ -567,37 +595,43 @@ class Mender:
                 self.state.tried.setdefault(h, []).append(mark)
             qb.recheck(h)
             info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
-            after = {f["name"]: f for f in qb.files(h)}
-            # no better: the old file goes back (it is the library's, or shared with a torrent)
-            worse = [(n, d) for n, d in done
-                     if after.get(n, {}).get("progress", 0) <= before[n].get("progress", 0)]
-            for n, d in worse:
-                put_back(d)
-            if worse:
+            worse = []
+            # a piece that passed with the old file and fails now: the old file's bytes of it
+            # are written back into the new one (its own copy first) - every file swapped in
+            # keeps both versions' good parts - and it is checked again
+            lost = had - good_pieces(qb.piece_states(h))
+            if lost and self.merge_back(qb, h, done, lost):
                 qb.recheck(h)
                 info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
-            kept = [x for x in done if x not in worse]
-            if kept:
-                # a piece that passed with the old file and fails now: the old file's bytes of
-                # it are written back into the new one (its own copy first) - both versions'
-                # good parts - and it is checked again
                 lost = had - good_pieces(qb.piece_states(h))
-                if lost and self.merge_back(qb, h, kept, lost):
-                    qb.recheck(h)
-                    info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
-                    lost = had - good_pieces(qb.piece_states(h))
-                if lost or info.get("progress", 0) < was:
-                    # still short of what it had: everything goes back as it was
-                    for n, d in kept:
+            if lost or info.get("progress", 0) < was:
+                # still short of what it had: everything goes back as it was
+                for n, d in done:
+                    put_back(d)
+                worse = list(done)
+                restored = (f" - {len(lost)} piece(s) that passed before failed with it, so "
+                            "the old file(s) were put back")
+                qb.recheck(h)
+                info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
+            else:
+                # every piece it had still passes. A file that gained none either goes back as
+                # it was (nothing better came of it; the library keeps sharing it); the rest
+                # keep the new version and the old name goes
+                now = good_pieces(qb.piece_states(h))
+                spans = self.file_pieces(qb, h)
+                after = {f["name"]: f for f in qb.files(h)}
+                for n, d in done:
+                    span = spans.get(n)
+                    gained = (now - had) & span if span is not None else \
+                        after.get(n, {}).get("progress", 0) > before[n].get("progress", 0)
+                    if gained:
+                        let_go(d)
+                    else:
                         put_back(d)
-                    worse += kept
-                    restored = (f" - {len(lost)} piece(s) that passed before failed with it, so "
-                                "the old file(s) were put back")
+                        worse.append((n, d))
+                if worse:
                     qb.recheck(h)
                     info = qb.wait_idle(h, timeout=12 * 3600, min_wait=10)
-                else:
-                    for n, d in kept:
-                        let_go(d)                   # every piece it had still passes: the old name goes
         except Exception:
             for _, d in done:
                 if os.path.lexists(d + ORIG):

@@ -30,6 +30,8 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # the differences made on purpose: the new page always names the tracker a nearly complete
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
+    # Settings: an Advanced section, with the tick that switches mend off
+    (re.compile(r"Advanced (?:\[[x ]\] )?Disable mend \(.*?ticked always add\) ?"), ""),
     # a Pause / Resume button above the jobs list
     # (everything nzb2seed does by itself holds: builds, the list queue, automatic builds,
     # the Library, mend and the clean-ups)

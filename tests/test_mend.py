@@ -481,3 +481,19 @@ def test_when_a_lost_piece_cannot_be_merged_back_the_old_file_returns(tmp_path):
     assert qb.states["short"] == [2, 2, 0, 0] and qb.started == []
     assert os.stat(mine).st_ino == os.stat(lib_file).st_ino       # the old file is back, whole
     assert "put back" in m.state.log[-1][1]
+
+
+def test_mend_disabled_in_settings_leaves_every_torrent_alone(tmp_path):
+    m, qb, lib_file, mine = _setup(tmp_path)
+    m.app.cfg.mend_disabled = True
+    m.round()
+    assert qb.prog["short"] == 0.5 and mine.read_bytes() == BAD and "disabled" in m.state.log[-1][1]
+
+
+def test_a_copy_no_better_overall_still_brings_in_the_pieces_it_has_right(tmp_path):
+    """The old file has pieces 0 and 1 right, the other copy 2 and 3: neither is better on
+    its own (50% each), but together they make the file whole."""
+    m, qb, lib_file, mine, theirs = _pieces_setup(tmp_path, {0, 1}, {2, 3})
+    m.round()
+    assert qb.states["short"] == [2, 2, 2, 2] and mine.read_bytes() == TRUE
+    assert lib_file.read_bytes() == _mixed({0, 1}) and theirs.read_bytes() == _mixed({2, 3})

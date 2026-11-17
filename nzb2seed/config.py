@@ -76,6 +76,7 @@ class Config:
     retention_enabled: bool = False   # remove builds again after retention_days (off by default)
     retention_days: int = 30          # how long a build stays in qBittorrent before it goes
     peek_archives: bool = True        # fetch a RAR post's first volume and read its headers
+    mend_disabled: bool = False       # Settings > Advanced: mend leaves every stopped torrent alone
                                       # before downloading the rest of it
     outbound_proxy: str = ""          # e.g. http://127.0.0.1:8888 (the VPN container's HTTP proxy): srrDB/predb/xrel/TVmaze lookups
     flaresolverr_url: str = ""        # e.g. http://nas:8191 - only used when a site answers with a Cloudflare challenge
@@ -154,6 +155,7 @@ LAYOUT = [
     ("behaviour", "retry_bad_pieces", "retry_bad_pieces"),
     ("behaviour", "prefer_tracker_small", "prefer_tracker_small"),
     ("behaviour", "peek_archives", "peek_archives"),
+    ("behaviour", "mend_disabled", "mend_disabled"),
     ("demand", "rules", "demand_rules"),
     ("demand", "block", "demand_block"),
     ("demand", "only_rules", "demand_only_rules"),

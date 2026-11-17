@@ -251,6 +251,10 @@ export function SettingsTab({ active }) {
           <small class="status">${status.ret || ""}</small></div>
         ${ret && (ret.removed.length || ret.kept.length) > 0 && html`<${Retention} r=${ret} remove=${removeNow} />`}
       </fieldset>
+      <fieldset>
+        <h2>Advanced</h2>
+        ${C("behaviour.mend_disabled", "Disable mend (it finishes stopped torrents from other copies of their files on disk, and can download the rest from a tracker ticked always add)")}
+      </fieldset>
       <div class="actions">
         <button class="btn primary">Save settings</button>
         <button type="button" class="btn" onClick=${test}>Test connections</button>
@@ -270,7 +274,7 @@ const FIELDS = [
   ["gui.username"], ["gui.password"],
   ["behaviour.post_processing"], ["behaviour.cleanup", "bool"], ["behaviour.local_verify", "bool"], ["behaviour.season_packing"],
   ["behaviour.episode_source"], ["behaviour.retry_bad_pieces", "bool"], ["behaviour.prefer_tracker_small", "bool"],
-  ["behaviour.peek_archives", "bool"],
+  ["behaviour.peek_archives", "bool"], ["behaviour.mend_disabled", "bool"],
   ["demand.min_sample", "int"], ["demand.age_days", "float"],
   ["behaviour.nearly_complete_percent", "float"], ["behaviour.nearly_complete_mb", "float"], ["behaviour.nearly_auto_trackers", "names"],
   ["behaviour.nearly_limits", "raw"],
