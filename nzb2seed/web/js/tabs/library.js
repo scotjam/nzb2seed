@@ -101,8 +101,9 @@ export function LibraryTab({ active }) {
   // the two automatic ticks take effect at once - no Save needed
   async function autoTick(k, on) {
     if (k === "auto_delete" && on && !confirm("Delete original library folders by themselves?\n\nWARNING - MAY CAUSE DATA LOSS.\n\n"
-        + "Once a season's torrent seeds at 100.0% from its new folder in the library, its original season folder is deleted without asking you - "
-        + "any torrent with files in it (and its cross-seeds) first queued for deletion in cross-eyed, once every one of them is safe from a hit-and-run. "
+        + "Once a season's torrent seeds at 100.0% from its new folder in the library, its original files are handed to cross-eyed for deletion without asking you: "
+        + "any torrent with files in the folder (and its cross-seeds) first - only once every one of them is safe from a hit-and-run - then the season's old episode files, by name, "
+        + "then the folder only if that leaves it empty. Anything else in it (subtitles, another season) is never deleted: cross-eyed keeps the folder and asks you to empty it. "
         + "A season downloaded again in place of another tracker's pack also has that pack (and its cross-seeds) queued for deletion in cross-eyed, with its files, once cross-eyed counts every one of them safe from a hit-and-run. This cannot be undone.")) return;
     try { const r = await api("/api/library/save", { [k]: on }); setState(r); setForm(f => ({ ...f, [k]: on })); }
     catch (err) { toast(err.message); }
@@ -163,7 +164,7 @@ export function LibraryTab({ active }) {
       <label class="check danger"><input type="checkbox" checked=${!!s.auto_delete} disabled=${!s.cross_eyed_url}
           onChange=${(e) => autoTick("auto_delete", e.target.checked)} />
         <span>Auto delete the existing library files once moved using <a href="https://codeberg.org/cross-eyed/cross-eyed" target="_blank" rel="noopener noreferrer">cross-eyed</a>: <b>WARNING - MAY CAUSE DATA LOSS</b>
-          <small class="status" style="display:block">The original season folder is deleted once the moved torrent seeds at 100.0% from the library. Torrents with files in it (and every torrent sharing their files) are first queued in cross-eyed for deletion - only once cross-eyed counts every one of them safe from a hit-and-run; the folder goes once they are gone. A season downloaded again in place of another tracker's pack ("redownload for this tracker", or Download again) then has that pack and its cross-seeds queued for deletion in cross-eyed, with their files - only once cross-eyed counts every one of them safe from a hit-and-run (looked at again every 6 hours until then). cross-eyed: <a href="https://codeberg.org/cross-eyed/cross-eyed" target="_blank" rel="noopener noreferrer">codeberg.org/cross-eyed/cross-eyed</a></small></span></label>
+          <small class="status" style="display:block">Once the moved torrent seeds at 100.0% from the library, the season's original files are handed to cross-eyed: torrents with files in the folder (and every torrent sharing their files) are deleted first - only once cross-eyed counts every one of them safe from a hit-and-run - then the old episode files, by name, then the folder only if that leaves it empty. Anything else in it (subtitles, another season) keeps the folder: cross-eyed asks you to empty it, then Check again. nzb2seed deletes nothing itself. A season downloaded again in place of another tracker's pack ("redownload for this tracker", or Download again) then has that pack and its cross-seeds queued for deletion in cross-eyed, with their files - only once cross-eyed counts every one of them safe from a hit-and-run (looked at again every 6 hours until then). cross-eyed: <a href="https://codeberg.org/cross-eyed/cross-eyed" target="_blank" rel="noopener noreferrer">codeberg.org/cross-eyed/cross-eyed</a></small></span></label>
     </div>
     <div class="autogrid">
       <div class="panel">

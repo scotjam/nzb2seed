@@ -436,7 +436,7 @@ class FakeCrossEyed:
         return p[len("/host"):]
 
     def batch(self, b):
-        return self.jobs, self.dry
+        return [j for j in self.jobs if j.get("batch_id", b) == b], self.dry
 
     def dry_run(self):
         return self.mode_dry
@@ -447,6 +447,14 @@ class FakeCrossEyed:
     def delete_content(self, content_id):
         self.calls.append(("delete", content_id))
         return f"del{content_id}"
+
+    @property
+    def handed(self):
+        return [c[1:] for c in self.calls if isinstance(c, tuple) and c[0] == "delete_folder"]
+
+    def delete_folder(self, folder, content_ids, files, keep_folder=False):
+        self.calls.append(("delete_folder", folder, list(content_ids), list(files), keep_folder))
+        return "fd1"
 
 
 def test_approve_with_cross_eyed_moves_the_torrent_in_and_lists_the_original(tmp_path, library, monkeypatch):
@@ -510,18 +518,56 @@ def test_approve_with_cross_eyed_moves_the_torrent_in_and_lists_the_original(tmp
     ce.g = [{"content_id": 4, "torrents": [old, xs]}]
     with pytest.raises(ValueError, match="TrackerA 3 day"):
         w.delete_original(s.key)
-    assert os.path.isdir(s.dir) and not any(c[0] == "delete" for c in ce.calls if isinstance(c, tuple))
+    assert os.path.isdir(s.dir) and not ce.handed
     old["hnr_risk"] = "safe"
-    with pytest.raises(ValueError, match="queued in cross-eyed"):
-        w.delete_original(s.key)
-    assert ("delete", 4) in ce.calls and os.path.isdir(s.dir)
-    with pytest.raises(ValueError):
-        w.delete_original(s.key)                    # still there: not queued twice
-    assert ce.calls.count(("delete", 4)) == 1
-    ce.g = []                                        # cross-eyed deleted them
-    w.in_client = lambda: {"/elsewhere"}
+    # all safe: handed to cross-eyed in one batch - those torrents, then the old episode
+    # files by name, then the folder only if that empties it; nzb2seed deletes nothing itself
+    ce.jobs += [{"batch_id": "fd1", "state": "pending", "job_type": "delete"},
+                {"batch_id": "fd1", "state": "pending", "job_type": "folder_delete"}]
     w.delete_original(s.key)
-    assert not os.path.exists(s.dir) and w.state.seasons[s.key]["status"] == lib.ORIGINAL_DELETED
+    (folder, ids, files, keep), = ce.handed
+    assert folder == s.dir and ids == [4] and not keep
+    assert sorted(os.path.basename(f) for f in files) == sorted(library.eps)
+    assert os.path.isdir(s.dir) and it["status"] == lib.MOVED and "dry-run" in it["why"]
+    w.delete_original(s.key)                         # handed over already: only followed
+    assert len(ce.handed) == 1
+    ce.jobs[-1] = {"batch_id": "fd1", "state": "awaiting_user", "job_type": "folder_delete",
+                   "error": "the folder is kept: it still holds 1 file(s)"}
+    w.auto_moves(w.app.cfg)
+    assert it["status"] == lib.MOVED and "still holds 1 file" in it["why"]
+    ce.jobs[-1] = {"batch_id": "fd1", "state": "done", "job_type": "folder_delete"}
+    w.auto_moves(w.app.cfg)
+    assert w.state.seasons[s.key]["status"] == lib.ORIGINAL_DELETED
+
+
+def test_without_cross_eyed_nothing_is_deleted_and_you_are_told(tmp_path, library, monkeypatch):
+    w, s = _client_worker(tmp_path, library, [], library_cross_eyed_url="", local_to_qbit=[])
+    w.seasons = {s.key: s}
+    moved_to = str(tmp_path / "tv" / "Alpha (2009)" / "Alpha.S04-NEW")
+    w.state.update(s.key, status=lib.MOVED, infohash="ih", moved_to=moved_to)
+    w.app._qbit = lambda: SimpleNamespace(info=lambda h: {"progress": 1.0, "content_path": moved_to, "state": "stalledUP"})
+    monkeypatch.setattr(w, "move_verified", lambda it: True)
+    with pytest.raises(ValueError, match="yourself"):
+        w.delete_original(s.key)
+    assert os.path.isdir(s.dir)
+
+
+def test_episodes_loose_in_a_show_folder_never_take_the_folder_with_them(tmp_path, library, monkeypatch):
+    w, s = _client_worker(tmp_path, library, [], library_cross_eyed_url="http://ce", library_cross_eyed_prefix="/host",
+                          local_to_qbit=[])
+    loose = next(x for x in lib.scan([library.root]) if "#" in x.key)
+    w.seasons = {loose.key: loose}
+    moved_to = os.path.join(loose.dir, "Loose.Show.S02-NEW")
+    w.state.update(loose.key, status=lib.MOVED, infohash="ih", moved_to=moved_to)
+    w.app._qbit = lambda: SimpleNamespace(info=lambda h: {"progress": 1.0, "content_path": moved_to, "state": "stalledUP"})
+    monkeypatch.setattr(w, "move_verified", lambda it: True)
+    w.in_client = lambda: {os.path.normcase(moved_to)}       # the new torrent sits in the show folder
+    ce = FakeCrossEyed(loose.dir, moved_to, "ih")
+    ce.jobs = [{"batch_id": "fd1", "state": "pending", "job_type": "folder_delete"}]
+    monkeypatch.setattr(lib, "CrossEyed", lambda *a: ce)
+    w.delete_original(loose.key)
+    (folder, ids, files, keep), = ce.handed
+    assert keep and ids == [] and [os.path.basename(f) for f in files] == ["Loose.Show.S02E01.720p.WEB.h264-GRP.mkv"]
 
 
 def test_cross_eyed_in_dry_run_mode_moves_nothing_and_says_so(tmp_path, library, monkeypatch):

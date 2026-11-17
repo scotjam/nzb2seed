@@ -1433,13 +1433,18 @@ class Library:
 
     def auto_moves(self, cfg):
         """The Library tab's two ticks (cross-eyed only): seasons ready to swap are moved into
-        the library one at a time, and moved seasons' original folders are deleted - each
-        with the same checks as the buttons."""
+        the library one at a time, and moved seasons' original folders are handed to cross-eyed
+        for deletion - each with the same checks as the buttons. A folder already handed over
+        is followed on every pass, ticked or not."""
         if not getattr(cfg, "library_cross_eyed_url", ""):
             return
+        for key, it in list(self.state.seasons.items()):
+            if it.get("status") == MOVED and it.get("original_batch"):
+                self._follow_original(cfg, key)
         if getattr(cfg, "library_auto_delete", False):
             for key, it in list(self.state.seasons.items()):
-                if it.get("status") != MOVED or time.time() - (it.get("delete_checked") or 0) < DELETE_RECHECK:
+                if it.get("status") != MOVED or it.get("original_batch") \
+                        or time.time() - (it.get("delete_checked") or 0) < DELETE_RECHECK:
                     continue
                 it["delete_checked"] = time.time()
                 try:
@@ -1480,23 +1485,28 @@ class Library:
         return rows
 
     def delete_original(self, key: str) -> dict:
-        """A moved season: your original season folder goes, once its torrent is seen
-        seeding at 100.0% from the library and nothing in qBittorrent has files in it.
+        """A moved season's original files: handed to cross-eyed for deletion, once its
+        torrent is seen seeding at 100.0% from the library. nzb2seed itself deletes nothing.
 
-        Before that, cross-eyed is asked about every torrent with files in the folder, and
-        every torrent sharing their files (cross-seeds on other trackers): only when it counts
-        each of them safe from a hit-and-run are they queued in cross-eyed for deletion, with
-        their files - the folder itself goes on a later pass, once none of them is left in
-        qBittorrent. Not safe yet, cross-eyed not reachable, or a torrent it does not know:
-        nothing is deleted."""
+        What cross-eyed is given, in one batch: every torrent with files in the folder (for
+        episodes loose in a show folder: every torrent holding one of the season's episode
+        files), each with every torrent sharing its files - only when cross-eyed counts every
+        one of them safe from a hit-and-run; then the season's old episode files, by name.
+        It deletes those torrents first, then the named files, then the folder - only if that
+        leaves it empty; anything else in it (subtitles, another season) keeps it, and
+        cross-eyed asks for it to be emptied. A show folder holding loose episodes is never
+        removed. Without cross-eyed: nothing is deleted, and you are told to do it yourself."""
         from .pathmap import map_path
         it, s = self.state.seasons.get(key), self.seasons.get(key)
         if not it or it.get("status") != MOVED:
             raise ValueError("that season has not been moved into the library")
+        cfg = self.app.cfg
+        if it.get("original_batch") and getattr(cfg, "library_cross_eyed_url", ""):
+            self._follow_original(cfg, key)
+            return self.state.seasons[key]
         folder = (s.dir if s else it.get("dir") or "").rstrip("/")
         if not folder or not os.path.isdir(folder):
             raise ValueError("the original folder is gone already")
-        cfg = self.app.cfg
         back = [(b, a) for a, b in (cfg.local_to_qbit or [])]
         try:
             info_ = self.app._qbit().info(it.get("infohash") or "") or {}
@@ -1509,45 +1519,85 @@ class Library:
         if not self.move_verified(it):
             raise ValueError("cross-eyed has not finished the move (qBittorrent's recheck in the new folder) - "
                              "nothing deleted")
+        if not getattr(cfg, "library_cross_eyed_url", ""):
+            raise ValueError(f"nzb2seed deletes nothing itself without cross-eyed - the season seeds from "
+                             f"{it.get('moved_to')}, so you can delete its old files in {folder} yourself")
+        if s is None:
+            raise ValueError("the season is not in the library's last scan - nothing deleted")
         paths = self.in_client()
-        f = os.path.normcase(os.path.abspath(folder))
-        busy = [p for p in paths if p == f or p.startswith(f + os.sep)]
         if not paths:
             raise ValueError("qBittorrent cannot be reached - nothing deleted")
-        self._hand_over_folder(cfg, it, s, f, bool(busy))
-        size = sum(os.path.getsize(os.path.join(dp, n)) for dp, _, ns in os.walk(folder) for n in ns)
-        shutil.rmtree(folder)
-        self.state.update(key, status=ORIGINAL_DELETED,
-                          why=f"original folder deleted ({size / 1024 ** 3:.1f} GB freed) - the torrent seeds "
-                              f"from {it.get('moved_to')}")
-        self.state.scanned_at = 0
-        self.wake.set()
+        loose = "#" in key                       # episodes loose in the show folder: never the folder itself
+        named = [os.path.abspath(f.path) for f in s.files if os.path.isfile(f.path)]
+        f = os.path.normcase(os.path.abspath(folder))
+        mine = {os.path.normcase(p) for p in named}
+        if loose:
+            busy = any(p in mine or any(m.startswith(p + os.sep) for m in mine) for p in paths)
+        else:
+            busy = any(p == f or p.startswith(f + os.sep) for p in paths)
+        ce = CrossEyed(cfg.library_cross_eyed_url, getattr(cfg, "library_cross_eyed_prefix", "/host"))
+        ids = self._folder_groups(cfg, ce, it, s, f, mine if loose else None, busy)
+        try:
+            batch = ce.delete_folder(folder, ids, named, keep_folder=loose)
+        except (ApiError, ValueError) as e:
+            raise ValueError(f"cross-eyed would not take it ({e}) - nothing deleted") from None
+        it["original_batch"] = batch
+        it["why"] = (f"handed to cross-eyed: {len(ids)} torrent group(s) with files in it, then its "
+                     f"{len(named)} old episode file(s)" + ("" if loose else ", then the folder if that empties it"))
+        self.state.save()
+        self._follow_original(cfg, key)
         return self.state.seasons[key]
 
-    def _hand_over_folder(self, cfg, it: dict, s, folder: str, busy: bool):
-        """The torrents with files in ``folder`` (the season's original one), as cross-eyed
-        groups them with every torrent sharing their files: queued in cross-eyed for deletion
-        when every one is safe from a hit-and-run - and ValueError, so the folder stays until
-        they are gone. ValueError too while any is not safe, or cross-eyed cannot tell."""
-        from .pathmap import map_path
-        if not getattr(cfg, "library_cross_eyed_url", ""):
-            if busy:
-                raise ValueError("a torrent in qBittorrent has files in it - nothing deleted")
-            return
+    def _follow_original(self, cfg, key: str):
+        """Where cross-eyed is with a season's original files: done - the season's original
+        is deleted; parked - what it said (a folder with other files in it waits for you to
+        empty it and press Check again in cross-eyed); still to run - said, with dry-run."""
+        it = self.state.seasons[key]
         ce = CrossEyed(cfg.library_cross_eyed_url, getattr(cfg, "library_cross_eyed_prefix", "/host"))
+        try:
+            jobs, dry = ce.batch(it["original_batch"])
+        except ApiError:
+            return                              # not reachable: asked again next time
+        job = next((j for j in jobs if j.get("job_type") == "folder_delete"), None)
+        if job is None:
+            want = "cross-eyed has no record of the hand-over any more (cleared from its Jobs page?) - nothing more happens"
+        elif job.get("state") == "done":
+            self.state.update(key, status=ORIGINAL_DELETED,
+                              why=("old episode files deleted by cross-eyed" if "#" in key else
+                                   "original folder deleted by cross-eyed")
+                                  + f" - the torrent seeds from {it.get('moved_to')}")
+            self.state.scanned_at = 0
+            self.wake.set()
+            return
+        elif job.get("state") in ("pending", "planning"):
+            want = ("waiting for cross-eyed to delete the old files"
+                    + (" - it is in dry-run: switch it to live" if dry else ""))
+        else:
+            want = (f"cross-eyed kept the folder: {job.get('error') or job.get('state')} - see its Jobs page")
+        if it.get("why") != want:
+            it["why"] = want
+            self.state.save()
+
+    def _folder_groups(self, cfg, ce, it: dict, s, folder: str, files: set | None, busy: bool) -> list:
+        """The cross-eyed groups (torrents sharing the same files) of every torrent with files
+        in ``folder`` - or, for ``files`` (episodes loose in a show folder), of every torrent
+        holding one of them: their ids, once each torrent in them is safe from a hit-and-run.
+        ValueError (nothing deleted) while any is not, or cross-eyed cannot tell."""
+        from .pathmap import map_path
         back = [(b, a) for a, b in (getattr(cfg, "local_to_qbit", None) or [])]
-        inside = lambda p: p == folder or p.startswith(folder + os.sep)
         where = lambda x: os.path.normcase(os.path.abspath(map_path(x.get("content_path") or "", back)))
+        if files is None:
+            uses = lambda p: p == folder or p.startswith(folder + os.sep)
+        else:
+            uses = lambda p: p in files or any(m.startswith(p + os.sep) for m in files)
         query = s.show if s is not None else (it.get("show") or "")
         try:
-            groups = [g for g in ce.groups(query) if any(inside(where(x)) for x in g.get("torrents") or [])]
+            groups = [g for g in ce.groups(query) if any(uses(where(x)) for x in g.get("torrents") or [])]
         except (ApiError, ValueError) as e:
             raise ValueError(f"cross-eyed cannot say whether that is safe ({e}) - nothing deleted") from None
         if busy and not groups:
             raise ValueError("a torrent in qBittorrent has files in it that cross-eyed does not know yet - "
                              "nothing deleted")
-        if not groups:
-            return
         mine = (it.get("infohash") or "").lower()
         moved = os.path.normcase(os.path.abspath(it.get("moved_to") or "")) if it.get("moved_to") else ""
         ts = [x for g in groups for x in g.get("torrents") or []]
@@ -1564,19 +1614,7 @@ class Library:
                 + (f"{max(1, round((x.get('hnr_remaining_seconds') or 0) / 86400))} day(s) to go"
                    if x.get("hnr_risk") == "danger" else "no hit-and-run rule in cross-eyed")
                 for x in risky) + " - nothing deleted")
-        queued = set(it.get("original_batches") or [])
-        for g in groups:
-            if str(g["content_id"]) in (it.get("original_groups") or []):
-                continue
-            try:
-                queued.add(ce.delete_content(g["content_id"]))
-            except (ApiError, ValueError) as e:
-                raise ValueError(f"cross-eyed would not queue its torrents for deletion ({e}) - nothing deleted") from None
-            it.setdefault("original_groups", []).append(str(g["content_id"]))
-        it["original_batches"] = sorted(queued)
-        self.state.save()
-        raise ValueError(f"{len(ts)} torrent(s) with files in it - every one safe from a hit-and-run - queued in "
-                         "cross-eyed for deletion; the folder goes once they are gone")
+        return [g["content_id"] for g in groups]
 
     def queue_replaced(self, cfg, key: str) -> list[str]:
         """A season downloaded again for the ticked trackers in place of another tracker's
@@ -1841,6 +1879,26 @@ class CrossEyed:
         if q.get("highlight"):
             return q["highlight"][0]
         raise ValueError("cross-eyed did not queue the deletion" + (f": {q['notice'][0]}" if q.get("notice") else ""))
+
+    def delete_folder(self, folder: str, content_ids: list, files: list[str], keep_folder: bool = False) -> str:
+        """Hand a folder over for deletion (cross-eyed's folder_delete): the torrent groups
+        first, then the named files, then the folder only if that leaves it empty (never with
+        ``keep_folder``). Paths are this machine's. The batch id; ValueError with cross-eyed's
+        reason when it will not."""
+        import requests
+        try:
+            r = self.s.post(f"{self.url}/api/delete-folder", timeout=120, data={
+                "folder": self.host(folder), "content_ids": ",".join(str(i) for i in content_ids),
+                "files": "\n".join(self.host(f) for f in files), "keep_folder": "1" if keep_folder else ""})
+        except requests.RequestException as e:
+            raise ApiError(f"cross-eyed cannot be reached: {e}") from None
+        try:
+            d = r.json()
+        except ValueError:
+            d = {}
+        if r.status_code >= 400 or not d.get("ok"):
+            raise ValueError(d.get("error") or f"cross-eyed answered {r.status_code}")
+        return d["batch_id"]
 
     def dry_run(self) -> bool:
         """Is cross-eyed in dry-run mode (moves queued, run only by hand)?"""

@@ -183,9 +183,11 @@ const IDEAS = [
    README's "Moving seasons into your library with cross-eyed" walks through it, with a ready docker-compose
    file), open it on port 8765, then put its address in
    Library, under "cross-eyed address", and save. cross-eyed starts in dry-run each time: while it is, the Library tab says so
-   and nothing is moved (auto move waits too) until you switch it to live in its header. "Auto delete the existing library files" then removes your old
-   season folder once the moved torrent seeds at 100.0% - torrents with files in it, and their cross-seeds, are first queued for
-   deletion in cross-eyed, only once each is safe from a hit-and-run - it may cause data loss, so watch a few moves first. A season downloaded
+   and nothing is moved (auto move waits too) until you switch it to live in its header. "Auto delete the existing library files" then hands
+   the old season to cross-eyed once the moved torrent seeds at 100.0%: torrents with files in its folder, and their cross-seeds, are
+   deleted first, only once each is safe from a hit-and-run; then the old episode files, by name; then the folder, only if that leaves it
+   empty - subtitles or another season in it keep it, and cross-eyed asks you to empty it. Without cross-eyed nzb2seed deletes nothing
+   and tells you the old files can go. It may cause data loss, so watch a few moves first. A season downloaded
    again in place of another tracker's pack then has that pack, and every cross-seed of its files, queued for deletion in
    cross-eyed - only once cross-eyed counts each of them safe from a hit-and-run; until then the season says which tracker
    still has days to go.`],
