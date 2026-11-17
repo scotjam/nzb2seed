@@ -3722,7 +3722,7 @@ def _execute_run(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, qb, tor
     _building.add(t.infohash)
     _this_build.tracker = tor_rel.indexer or ""
     _this_build.settled = []
-    if tor_rel.guid.startswith("file:"):
+    if tor_rel.guid.startswith(("file:", "upload:")):
         # a .torrent that did not come from a Prowlarr search (automatic builds, uploads):
         # its "indexer" is only the file's name - the tracker is the one it announces to
         _this_build.tracker = tracker_name(t.trackers, getattr(pr, "pr", pr)) or _this_build.tracker

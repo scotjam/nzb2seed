@@ -159,6 +159,8 @@ def tracker_tag(tracker: str, torrent_bytes: bytes = b"") -> str:
     tracker as Prowlarr names it, without "(API)" ("ExampleTracker.nzb2seed"), else the site the
     torrent announces to ("tracker.example.org.nzb2seed")."""
     name = re.sub(r"\s*\(API\)\s*$", "", (tracker or "").strip(), flags=re.I)
+    if name.lower().endswith(".torrent"):        # a file's name (an uploaded .torrent), not a tracker
+        name = ""
     if not name and torrent_bytes:
         try:
             from .torrent import parse

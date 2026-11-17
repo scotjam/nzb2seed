@@ -37,6 +37,7 @@ def test_every_torrent_added_is_tagged_tracker_dot_nzb2seed():
     from tests.helpers import make_torrent
     data = make_torrent("Film", {"a.mkv": b"x" * 10})
     assert tracker_tag("ExampleTracker (API)") == "ExampleTracker.nzb2seed"
+    assert tracker_tag("[site] Film 2020 1080p-Rel.torrent") == "unknown.nzb2seed"   # a file name is no tracker
     assert tracker_tag("", data) == "tracker.example.nzb2seed"          # the site it announces to
     assert tracker_tag("") == "unknown.nzb2seed"
     sent = {}
