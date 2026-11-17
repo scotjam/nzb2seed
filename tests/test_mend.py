@@ -214,12 +214,12 @@ def test_old_downloads_nothing_uses_are_removed(tmp_path, monkeypatch):
     for i, t in enumerate(("Dropped.Post", "Fresh.Post", "Still.Queued", "Seeded.Here", "Another.Dropped")):
         pipeline.ledger_for(cfg).record(f"nzo{i + 2}", t)
     monkeypatch.setattr(pipeline, "_building", {"abc"})
-    n, freed = pipeline.remove_old_downloads(cfg, sab, qb, 3, now=1_000_000, log=lambda t: None)
+    n, freed = pipeline.remove_old_downloads(cfg, sab, qb, 72, now=1_000_000, log=lambda t: None)
     assert (n, freed) == (2, 20)
     assert not old.exists() and not again.exists() and by_hand.exists()
     assert new.exists() and queued.exists() and seeded.exists() and building.exists()
     folder("Another.Dropped", 5)            # qBittorrent not answering: nothing is removed
-    assert pipeline.remove_old_downloads(cfg, sab, None, 3, now=1_000_000) == (0, 0)
+    assert pipeline.remove_old_downloads(cfg, sab, None, 72, now=1_000_000) == (0, 0)
 
 
 def test_a_whole_file_sharing_a_missing_piece_gets_its_own_copy_too(tmp_path, monkeypatch):
@@ -497,3 +497,20 @@ def test_a_copy_no_better_overall_still_brings_in_the_pieces_it_has_right(tmp_pa
     m.round()
     assert qb.states["short"] == [2, 2, 2, 2] and mine.read_bytes() == TRUE
     assert lib_file.read_bytes() == _mixed({0, 1}) and theirs.read_bytes() == _mixed({2, 3})
+
+
+def test_failed_downloads_past_the_keep_time_go_with_their_files(tmp_path, monkeypatch):
+    from nzb2seed import pipeline
+    deleted = []
+    slots = [{"nzo_id": "old", "name": "Old.Post", "category": "nzb2seed", "completed": 1_000_000 - 80 * 3600},
+             {"nzo_id": "new", "name": "New.Post", "category": "nzb2seed", "completed": 1_000_000 - 3600},
+             {"nzo_id": "mine", "name": "By.Hand", "category": "nzb2seed", "completed": 0},     # not in the ledger
+             {"nzo_id": "busy", "name": "Busy", "category": "nzb2seed", "completed": 0}]
+    sab = SimpleNamespace(_call=lambda *a, **k: {"history": {"slots": slots}},
+                          delete_history=lambda nzo, files=False: deleted.append((nzo, files)))
+    cfg = SimpleNamespace(sab_category="nzb2seed", sab_to_local=[], path=str(tmp_path / "nzb2seed.toml"))
+    for nzo, t in (("old", "Old.Post"), ("new", "New.Post"), ("busy", "Busy")):
+        pipeline.ledger_for(cfg).record(nzo, t, torrent="b" if nzo == "busy" else "")
+    monkeypatch.setattr(pipeline, "_building", {"b"})
+    assert pipeline.remove_old_failed(cfg, sab, 72, now=1_000_000, log=lambda t: None)[0] == 1
+    assert deleted == [("old", True)]

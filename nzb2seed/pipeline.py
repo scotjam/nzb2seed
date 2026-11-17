@@ -795,15 +795,51 @@ def category_dir(cfg: Config, sab: SABnzbd) -> str:
     return ""
 
 
+def remove_old_failed(cfg: Config, sab: SABnzbd, hours: float, now: float | None = None,
+                      log=print) -> tuple[int, int]:
+    """nzb2seed's own failed SABnzbd jobs that ended more than ``hours`` ago: deleted from
+    SABnzbd's history with their files - the partial download SABnzbd leaves in its incomplete
+    folder until then. A build keeps a failed post while it runs (to salvage it, or download
+    the rest); afterwards nothing does. Only jobs in nzb2seed's category that its ledger
+    recorded submitting, never one of a build running now. (jobs, bytes freed)"""
+    if hours <= 0:
+        return 0, 0
+    now = now or time.time()
+    try:
+        slots = sab._call("history", limit="5000", failed_only="1",
+                          category=cfg.sab_category).get("history", {}).get("slots", [])
+    except (ApiError, OSError, ValueError):
+        return 0, 0
+    jobs = {j.get("nzo"): j for j in ledger_for(cfg).all() if j.get("nzo")}
+    gone, freed = 0, 0
+    for s in slots:
+        nzo, j = s.get("nzo_id"), jobs.get(s.get("nzo_id"))
+        if j is None or s.get("category") != cfg.sab_category or j.get("torrent") in _building:
+            continue
+        if now - float(s.get("completed") or 0) < hours * 3600:
+            continue
+        where = map_path(s.get("storage") or s.get("path") or "", cfg.sab_to_local)
+        size = 0
+        if where and os.path.isdir(where):
+            size = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(where) for f in fs)
+        try:
+            sab.delete_history(nzo, files=True)
+        except ApiError:
+            continue
+        log(f"removing a failed download nothing uses: {s.get('name') or nzo} ({gb(size)})")
+        gone, freed = gone + 1, freed + size
+    return gone, freed
+
+
 def _job_key(name: str) -> str:
     """A SABnzbd job's name as its folder is named: letters and digits only, as SABnzbd may
     replace characters a filesystem does not take (and add ".1" for a second job of a name)."""
     return re.sub(r"[^a-z0-9]", "", (name or "").casefold())
 
 
-def remove_old_downloads(cfg: Config, sab: SABnzbd, qb, days: float, now: float | None = None,
+def remove_old_downloads(cfg: Config, sab: SABnzbd, qb, hours: float, now: float | None = None,
                          log=print) -> tuple[int, int]:
-    """Delete nzb2seed's own SABnzbd downloads nothing has touched for ``days``: (folders,
+    """Delete nzb2seed's own SABnzbd downloads nothing has touched for ``hours``: (folders,
     bytes freed). A build removes what it used, but posts tried and dropped, and downloads
     of builds that failed and were never retried, used to stay for good. Only a folder of a
     job nzb2seed recorded submitting (its ledger) - anything else in the category folder (a
@@ -811,7 +847,7 @@ def remove_old_downloads(cfg: Config, sab: SABnzbd, qb, days: float, now: float 
     anything changed within ``days``, anything still in SABnzbd's queue, the downloads of a
     build running now, and any folder a qBittorrent torrent has its files in. Nothing at
     all when qBittorrent or SABnzbd cannot be asked."""
-    if days <= 0 or qb is None:
+    if hours <= 0 or qb is None:
         return 0, 0
     now = now or time.time()
     back = [(b, a) for a, b in (cfg.local_to_qbit or [])]
@@ -845,7 +881,7 @@ def remove_old_downloads(cfg: Config, sab: SABnzbd, qb, days: float, now: float 
                     newest, size = max(newest, st.st_mtime), size + st.st_size
         except OSError:
             continue
-        if now - newest < days * 86400:
+        if now - newest < hours * 3600:
             continue
         log(f"removing an old download nothing uses: {n} ({gb(size)})")
         if os.path.isdir(p):
@@ -1387,6 +1423,47 @@ _FILE_EXT = re.compile(r"\.(mkv|mp4|m4v|avi|m2ts|ts|wmv|mov|iso|mpg|mpeg|webm)$"
 
 
 GAP_MIN = 256 << 10      # zero bytes in a row this long are a missing article, not data
+
+
+_ARCHIVE = re.compile(r"\.(rar|r\d{2,3}|s\d{2}|\d{3}|7z|zip|z\d{2})$", re.I)
+_KEEP_EXT = (".par2", ".nzb", ".nfo", ".sfv", ".txt", ".srr", ".jpg", ".png")
+
+
+def unpacked(slot: dict | None) -> bool:
+    """Did SABnzbd unpack this download, and say it went well?"""
+    for stage in (slot or {}).get("stage_log") or []:
+        if (stage.get("name") or "").lower() == "unpack":
+            text = " ".join(str(a) for a in stage.get("actions") or []).lower()
+            return "unpacked" in text and not any(w in text for w in ("fail", "error", "corrupt", "password"))
+    return False
+
+
+def drop_archives(d: str, t: Torrent, slot: dict | None) -> int:
+    """For a torrent that holds unpacked files: once SABnzbd has unpacked a download, its
+    archives are only a second copy of what came out of them - deleted, so a download takes
+    its size once, not twice. Never an archive the torrent itself holds, never when the unpack
+    did not go well or left nothing of video size beside them. Bytes freed."""
+    if not d or not os.path.isdir(d) or not unpacked(slot):
+        return 0
+    names = {os.path.basename(f.name).lower() for f in t.real_files}
+    files = [os.path.join(r, n) for r, _, ns in os.walk(d) for n in ns]
+    arch = [p for p in files if _ARCHIVE.search(p) and os.path.basename(p).lower() not in names]
+    biggest = max((f.length for f in t.real_files), default=0)
+    out = [p for p in files if p not in arch and not p.lower().endswith(_KEEP_EXT)
+           and os.path.getsize(p) >= biggest * MAIN_FILE_SHARE]
+    if not arch or not out:
+        return 0
+    freed = 0
+    for p in arch:
+        try:
+            size = os.path.getsize(p)
+            os.remove(p)
+            freed += size
+        except OSError:
+            pass
+    if freed:
+        info(f"{os.path.basename(d)}: unpacked by SABnzbd - its archives deleted ({gb(freed)} freed)")
+    return freed
 
 
 def repaired(slot: dict | None) -> bool:
@@ -2667,9 +2744,12 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 # "Completed" without repair data can still be missing articles: SABnzbd
                 # writes zeros where they were. Such a post is the last resort, not the first
                 try:
-                    checked = repaired(sab.history_slot(nzo)) if hasattr(sab, "history_slot") else True
+                    hist = sab.history_slot(nzo) if hasattr(sab, "history_slot") else None
+                    checked = repaired(hist) if hist is not None else True
                 except ApiError:
-                    checked = False
+                    hist, checked = None, False
+                if pp == PP_UNPACK and cfg.cleanup and not opts.no_cleanup and not opts.dry_run:
+                    drop_archives(d, t, hist)
                 gaps = (0, 0) if checked else article_gaps(d, GAP_FILE_MIN)
                 if gaps[0]:
                     warn(f"{rel.title} ({rel.indexer}) is incomplete on your Usenet provider: about "

@@ -237,6 +237,8 @@ export function SettingsTab({ active }) {
                N("space.output_min_gb", "Output disk: below (GB free)", { min: "0", step: "1", placeholder: "0 = use the general limit" }),
                N("space.min_percent", "Any other disk: below (% free)", { min: "0", max: "99", step: "0.5", placeholder: "0 = off" }),
                N("space.min_gb", "Any other disk: below (GB free)", { min: "0", step: "1", placeholder: "0 = off" }))}
+        ${N("behaviour.download_keep_hours", "Delete downloads of failed or dropped builds after (hours)", { min: "0", step: "1", placeholder: "0 = keep them",
+            title: "nzb2seed's own SABnzbd downloads that nothing has touched for this long: posts tried and dropped, builds that failed (kept this long so a retry can reuse them), and the partial files of downloads SABnzbd failed, left in its incomplete folder. Only downloads nzb2seed recorded submitting; never one in SABnzbd's queue, a running build's, or one a torrent uses. Changing it clears anything already older straight away." })}
         <label class="check"><input type="checkbox" ...${tick("space.pause_torrents")} /> Also stop torrents that are still downloading <small class="status">— pausing a torrent mid-download can cost you a private tracker's hit-and-run grace, so this is off by default. Finished torrents keep seeding either way.</small></label>
         <div class="actions"><button type="button" class="btn" onClick=${checkSpace}>Check free space now</button>
           <small class="status">${status.space || ""}</small></div>
@@ -279,7 +281,7 @@ const FIELDS = [
   ["behaviour.nearly_complete_percent", "float"], ["behaviour.nearly_complete_mb", "float"], ["behaviour.nearly_auto_trackers", "names"],
   ["behaviour.nearly_limits", "raw"],
   ["space.downloads_min_percent", "float"], ["space.downloads_min_gb", "float"], ["space.output_min_percent", "float"],
-  ["space.output_min_gb", "float"], ["space.min_percent", "float"], ["space.min_gb", "float"], ["space.pause_torrents", "bool"],
+  ["space.output_min_gb", "float"], ["behaviour.download_keep_hours", "float"], ["space.min_percent", "float"], ["space.min_gb", "float"], ["space.pause_torrents", "bool"],
   ["retention.enabled", "bool"], ["retention.days", "int"],
 ];
 

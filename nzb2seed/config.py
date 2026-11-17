@@ -47,7 +47,7 @@ class Config:
     local_verify: bool = False
     build_parallel: int = 2           # builds running at once (the rest wait their turn)
     nearly_complete_mb: float = 200.0     # with less than this missing (and the % below)
-    download_keep_days: float = 3.0       # nzb2seed's own SABnzbd downloads untouched this long are removed (0 = never)
+    download_keep_hours: float = 72.0     # nzb2seed's own SABnzbd downloads untouched this long are removed (0 = never)
     nearly_complete_percent: float = 5.0  # a build stops looking for more whole posts
     # how much each tracker lets you download without it counting against you:
     # [{tracker, percent, mb}] - a tracker not listed (or left blank) allows nothing, so
@@ -148,7 +148,7 @@ LAYOUT = [
     ("behaviour", "local_verify", "local_verify"),
     ("behaviour", "build_parallel", "build_parallel"),
     ("behaviour", "nearly_complete_percent", "nearly_complete_percent"),
-    ("behaviour", "download_keep_days", "download_keep_days"),
+    ("behaviour", "download_keep_hours", "download_keep_hours"),
     ("behaviour", "nearly_complete_mb", "nearly_complete_mb"),
     ("behaviour", "nearly_auto_trackers", "nearly_auto_trackers"),
     ("behaviour", "nearly_limits", "nearly_limits"),
@@ -229,6 +229,9 @@ def from_sections(d: dict, path: Path) -> Config:
     for section, key, attr in LAYOUT:
         if key in d.get(section, {}):
             setattr(cfg, attr, d[section][key])
+    b = d.get("behaviour", {})
+    if "download_keep_hours" not in b and "download_keep_days" in b:     # set in days before
+        cfg.download_keep_hours = float(b["download_keep_days"] or 0) * 24
     return finalize(cfg)
 
 

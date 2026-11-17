@@ -60,3 +60,19 @@ def test_empty_password_switches_login_off_for_local_clients(server):
     app, url = server
     app.cfg.gui_password = ""
     assert call(url + "/api/settings")[0] == 200     # 127.0.0.1 is a local client
+
+
+def test_a_new_download_keep_time_clears_older_downloads_at_once(server, monkeypatch):
+    app, url = server
+    swept = threading.Event()
+    seen = []
+    monkeypatch.setattr(app, "sweep_downloads", lambda cfg: (seen.append(cfg.download_keep_hours), swept.set()))
+    _, body = call(url + "/api/settings", "admin", "nzb2seed")
+    s = body["settings"]
+    assert s["behaviour"]["download_keep_hours"] == 72
+    s["behaviour"]["download_keep_hours"] = 24
+    assert call(url + "/api/settings", "admin", "nzb2seed", {"settings": s})[0] == 200
+    assert swept.wait(5) and seen == [24]
+    swept.clear()
+    assert call(url + "/api/settings", "admin", "nzb2seed", {"settings": s})[0] == 200
+    assert not swept.wait(0.5)                   # saved again unchanged: no extra sweep

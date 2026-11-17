@@ -403,8 +403,9 @@ class SABnzbd:
         return str(data.get("nzo_id") or nzo_id)
 
     def delete_history(self, nzo_id: str, files: bool = False):
-        """Forget a finished job. Its files are kept unless ``files`` - which is only ever
-        asked for about nzb2seed's own peek jobs, whose files are nobody else's."""
+        """Forget a finished job. Its files are kept unless ``files`` - only ever asked for
+        about nzb2seed's own jobs (peeks, and failed downloads past the keep time), whose
+        files are nobody else's."""
         self._call("history", name="delete", value=nzo_id, del_files="1" if files else "0")
 
 

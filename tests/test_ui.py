@@ -30,6 +30,8 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 # the differences made on purpose: the new page always names the tracker a nearly complete
 # build would download the rest from (so you can tell whether it risks a hit-and-run)
 INTENDED = [
+    # Settings: how long downloads of failed builds are kept, in hours
+    (re.compile(r"Delete downloads of failed or dropped builds after \(hours\) (?:\[[^\]]*\] )?"), ""),
     # Settings: an Advanced section, with the tick that switches mend off
     (re.compile(r"Advanced (?:\[[x ]\] )?Disable mend \(.*?ticked always add\) ?"), ""),
     # a Pause / Resume button above the jobs list

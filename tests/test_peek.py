@@ -358,3 +358,41 @@ def test_an_nzb_carries_its_archive_password():
             '<meta type="title">x</meta><meta type="password">s3cret</meta></head></nzb>').encode()
     assert nzbinfo.password(head) == "s3cret"
     assert nzbinfo.password(nzb("a.rar")) is None and nzbinfo.password(b"not xml") is None
+
+
+# ---------------------------------------------------------------- drop_archives
+
+UNPACK_OK = {"stage_log": [{"name": "Unpack", "actions": ["[x] Unpacked 1 files/folders in 2 mins"]}]}
+
+
+def _download(tmp_path, video=26_000):
+    d = tmp_path / "job"
+    d.mkdir()
+    for n in ("x.part01.rar", "x.part02.rar", "x.r00", "x.7z.001"):
+        (d / n).write_bytes(b"a" * 1000)
+    (d / "x.par2").write_bytes(b"p")
+    (d / "The.Film.2019.mkv").write_bytes(b"v" * video)
+    return d
+
+
+def test_archives_go_once_sabnzbd_has_unpacked_them(tmp_path):
+    from nzb2seed.torrent import parse
+    from helpers import make_torrent
+    t = parse(make_torrent("The.Film.2019", {"The.Film.2019.mkv": b"v" * 26_000, "x.part02.rar": b"a" * 1000}))
+    d = _download(tmp_path)
+    assert pipeline.drop_archives(str(d), t, UNPACK_OK) == 3000
+    left = sorted(p.name for p in d.iterdir())
+    assert left == ["The.Film.2019.mkv", "x.par2", "x.part02.rar"]   # the torrent's own .rar stays
+
+
+def test_archives_stay_when_the_unpack_failed_or_left_nothing(tmp_path):
+    from nzb2seed.torrent import parse
+    from helpers import make_torrent
+    t = parse(make_torrent("The.Film.2019", {"The.Film.2019.mkv": b"v" * 26_000}))
+    d = _download(tmp_path)
+    failed = {"stage_log": [{"name": "Unpack", "actions": ["Unpacking failed, archive requires a password"]}]}
+    assert pipeline.drop_archives(str(d), t, failed) == 0
+    assert pipeline.drop_archives(str(d), t, None) == 0
+    (d / "The.Film.2019.mkv").unlink()                                 # nothing of video size came out
+    assert pipeline.drop_archives(str(d), t, UNPACK_OK) == 0
+    assert len(list(d.iterdir())) == 5

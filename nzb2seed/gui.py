@@ -1327,18 +1327,27 @@ class App:
     def sweep_downloads(self, cfg):
         """nzb2seed's own SABnzbd downloads nothing has touched for a few days go (posts
         tried and dropped, builds that failed): they would otherwise fill the drive."""
-        if not cfg.cleanup or not cfg.sab_url or not cfg.download_keep_days:
+        if not cfg.cleanup or not cfg.sab_url or not cfg.download_keep_hours:
             return
         from . import pipeline
         try:
             n, freed = pipeline.remove_old_downloads(cfg, SABnzbd(cfg.sab_url, cfg.sab_key), self._qbit(),
-                                                     float(cfg.download_keep_days),
+                                                     float(cfg.download_keep_hours),
                                                      log=lambda t: print(f"[downloads] {t}", flush=True))
         except Exception as e:                       # never let the sweep kill its thread
             print(f"[downloads] sweep failed: {e}", flush=True)
             return
         if n:
             print(f"[downloads] removed {n} old download(s), freeing {pipeline.gb(freed)}", flush=True)
+        try:
+            n, freed = pipeline.remove_old_failed(cfg, SABnzbd(cfg.sab_url, cfg.sab_key),
+                                                  float(cfg.download_keep_hours),
+                                                  log=lambda t: print(f"[downloads] {t}", flush=True))
+        except Exception as e:                       # never let the sweep kill its thread
+            print(f"[downloads] failed-download sweep failed: {e}", flush=True)
+            return
+        if n:
+            print(f"[downloads] removed {n} failed download(s), freeing {pipeline.gb(freed)}", flush=True)
 
     def _retention_log(self, text: str):
         print(f"[retention] {text}", flush=True)
@@ -2266,8 +2275,12 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             except (ValueError, TypeError) as e:
                 return self._err(str(e))
             config_mod.save(cfg)
+            was = app.cfg.download_keep_hours
             app.cfg = cfg
             metadata.configure(cfg.flaresolverr_url, cfg.outbound_proxy)
+            if cfg.download_keep_hours != was:
+                # a new keep time: downloads already older than it go now, not at the next hourly sweep
+                threading.Thread(target=app.sweep_downloads, args=(cfg,), name="sweep-now", daemon=True).start()
             return self._json(self.settings_payload())
 
         def _source(self, body) -> str:
