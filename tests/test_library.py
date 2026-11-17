@@ -176,7 +176,7 @@ def test_a_season_linked_from_the_library_needs_no_swap(library, tmp_path):
     assert lib.swap_plan(t, str(out), s) == []
 
 
-def test_set_aside_files_are_deleted_after_the_kept_days(tmp_path):
+def test_set_aside_files_are_listed_after_the_kept_days_and_never_deleted(tmp_path):
     root = tmp_path / "tv"
     root.mkdir()
     old = tmp_path / lib.REPLACED_DIR / "20200101" / "tv" / "Show" / "a.mkv"
@@ -184,9 +184,10 @@ def test_set_aside_files_are_deleted_after_the_kept_days(tmp_path):
     fresh = tmp_path / lib.REPLACED_DIR / time.strftime("%Y%m%d") / "b.mkv"
     write(str(fresh), b"x")
     cfg = SimpleNamespace(library_roots=[str(root)], library_keep_replaced_days=14)
-    assert lib.purge_replaced(cfg) == 1
-    assert not old.exists() and fresh.exists()
-    assert lib.purge_replaced(SimpleNamespace(library_roots=[str(root)], library_keep_replaced_days=0)) == 0
+    ready = lib.replaced_ready(cfg)
+    assert [r["day"] for r in ready] == ["2020-01-01"] and ready[0]["bytes"] == 1
+    assert old.exists() and fresh.exists()                  # listed for you, never deleted
+    assert len(lib.replaced_ready(SimpleNamespace(library_roots=[str(root)], library_keep_replaced_days=0))) == 2
 
 
 # ---------------------------------------------------------------- the library's files are never written to

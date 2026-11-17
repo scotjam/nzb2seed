@@ -104,7 +104,7 @@ class Config:
     library_roots: list = field(default_factory=list)   # TV folders (Show/Season N/...) as this machine sees them
     library_output_dir: str = ""       # where the torrents go - on the same disk as the library
     library_daily_gb: float = 200.0    # Usenet downloads a day for seasons rebuilt from scratch
-    library_keep_replaced_days: float = 14.0  # replaced library files are kept this long, then deleted
+    library_keep_replaced_days: float = 14.0  # replaced library files: said to be deletable (by you) after this long
     library_cross_eyed_url: str = ""   # cross-eyed's address: "Approve" moves the torrent into the show's folder with it
     library_cross_eyed_prefix: str = "/host"  # where cross-eyed sees this machine's / (its HOST_MOUNT_PREFIX)
     library_hold_hook: bool = True     # while on: qBittorrent's on-finished program (cross-seed) held while busy

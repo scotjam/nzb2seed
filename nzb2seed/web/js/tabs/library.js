@@ -120,7 +120,7 @@ export function LibraryTab({ active }) {
       if (!confirm(`Move ${it.torrent} into the library?\n\ncross-eyed moves the torrent's folder, and every cross-seed copy linked to it, into\n${(it.dir || "").replace(/\/[^/]*\/?$/, "")}\nunder its own name, next to your season folder, and rechecks each torrent.\n\nYour season folder stays as it is; it is then listed as one you can delete.`)) return;
       return act("approve", it.key, { status: "moving", move_started: false, why: "approved - handing it to cross-eyed" });
     }
-    if (!confirm(`Swap ${it.show}, season ${it.season}?\n\nThe library's files for the episodes in\n${it.torrent}\nare moved aside and replaced by hard links to the torrent's files.\n\nThe old files are kept for ${s.keep_replaced_days} days in the ".nzb2seed-replaced" folder next to the library, then deleted.`)) return;
+    if (!confirm(`Swap ${it.show}, season ${it.season}?\n\nThe library's files for the episodes in\n${it.torrent}\nare moved aside and replaced by hard links to the torrent's files.\n\nThe old files are kept in the ".nzb2seed-replaced" folder next to the library - nzb2seed never deletes them; after ${s.keep_replaced_days} days this tab says they can go, for you to delete.`)) return;
     act("approve", it.key, { running: true, why: "swapping…" });
   }
 
@@ -203,9 +203,9 @@ export function LibraryTab({ active }) {
           <label class="field"><span>Usenet downloads a day (GB)</span>
             <input type="number" min="0" step="10" value=${form.daily_gb} onInput=${set("daily_gb")}
               title="For seasons the tracker only has as another release: each is built from Usenet in full. Seasons that link to your own files do not count." /></label>
-          <label class="field"><span>Keep replaced files (days)</span>
+          <label class="field"><span>Say replaced files can go after (days)</span>
             <input type="number" min="0" step="1" value=${form.keep_replaced_days} onInput=${set("keep_replaced_days")}
-              title="After a swap your old files wait in .nzb2seed-replaced next to the library this long, then are deleted. 0 keeps them until you delete them." /></label>
+              title="After a swap without cross-eyed your old files wait in .nzb2seed-replaced next to the library. nzb2seed never deletes them: after this many days the tab lists them for you to delete (0: straight away)." /></label>
         </div>
         <label class="field" style="margin-top:8px"><span>cross-eyed address (blank = swap by hard links)</span>
           <input type="text" placeholder="http://127.0.0.1:8765" value=${form.cross_eyed_url} onInput=${set("cross_eyed_url")}
@@ -231,6 +231,9 @@ export function LibraryTab({ active }) {
         ${moved > 0 && html`<p class="status" style="margin-top:10px"><b>${plural(moved, "season")} seed from the library</b> - ${autoDelete
           ? html`their original folders (${gb(state.deletable_bytes)}) are deleted by themselves once checked (auto delete is on).`
           : html`their original folders (${gb(state.deletable_bytes)}) can be deleted: filter "Original can be deleted".`}</p>`}
+        ${(state?.replaced_ready || []).length > 0 && html`<p class="status" style="margin-top:10px"><b>Replaced files you can delete</b>
+          (${gb(state.replaced_ready.reduce((n, r) => n + r.bytes, 0))}) - set aside by swaps, over ${s.keep_replaced_days} days ago. nzb2seed never deletes them; delete these folders yourself once you are happy:
+          ${state.replaced_ready.map(r => html`<br /><code>${r.path}</code> <small>(${r.day}, ${gb(r.bytes)})</small>`)}</p>`}
         ${swaps > 0 && html`<p class="status" style="margin-top:10px"><b>${plural(swaps, "season")} ready to swap</b> - they seed at 100.0% now; ${ceDry
           ? "they wait until cross-eyed is live (above)."
           : autoMove

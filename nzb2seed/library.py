@@ -20,7 +20,8 @@ pack - see ``order``:
   within a daily download budget. Once it seeds at 100.0%, the season is offered as a
   **swap** on the tab: the library's old files make way for hard links to the torrent's.
   A swap only ever happens when you approve it, and the old files are kept aside for
-  ``library_keep_replaced_days`` before they are deleted.
+  ``library_keep_replaced_days`` before the tab says they can be deleted - by you; nzb2seed
+  never deletes the library's own files.
 
 Only single-season packs are used (an episode on its own earns next to nothing), and only
 packs with every episode the library has of that season, so a swap never loses one.
@@ -565,24 +566,25 @@ def do_swap(cfg, t: torrent_mod.Torrent, torrent_root: str, s: Season) -> tuple[
     return len(plan), moved
 
 
-def purge_replaced(cfg, now: float | None = None) -> int:
-    """Delete what was set aside longer ago than library_keep_replaced_days."""
+def replaced_ready(cfg, now: float | None = None) -> list[dict]:
+    """What a swap without cross-eyed set aside longer ago than library_keep_replaced_days
+    (0: straight away): [{"path", "bytes", "day"}] - for you to delete when you are happy.
+    nzb2seed never deletes it: the library's own files are yours."""
     days = float(cfg.library_keep_replaced_days or 0)
-    if days <= 0:
-        return 0
     cutoff = time.strftime("%Y%m%d", time.localtime((now or time.time()) - days * 86400))
-    gone = 0
-    for root in cfg.library_roots:
+    out = []
+    for root in cfg.library_roots or []:
         base = os.path.join(os.path.dirname(os.path.abspath(root)), REPLACED_DIR)
         try:
-            dated = os.listdir(base)
+            dated = sorted(os.listdir(base))
         except OSError:
             continue
         for d in dated:
-            if re.fullmatch(r"\d{8}", d) and d < cutoff:
-                shutil.rmtree(os.path.join(base, d), ignore_errors=True)
-                gone += 1
-    return gone
+            if re.fullmatch(r"\d{8}", d) and (days <= 0 or d < cutoff):
+                p = os.path.join(base, d)
+                size = sum(os.path.getsize(os.path.join(dp, n)) for dp, _, ns in os.walk(p) for n in ns)
+                out.append({"path": p, "bytes": size, "day": f"{d[:4]}-{d[4:6]}-{d[6:]}"})
+    return out
 
 
 # ---------------------------------------------------------------- state
@@ -879,7 +881,6 @@ class Library:
             return
         if not self.seasons or time.time() - self.state.scanned_at > RESCAN_HOURS * 3600:
             self.rescan()
-        purge_replaced(cfg)
         self.check_dry_run(cfg)
         self.follow_moves(cfg)
         self.auto_moves(cfg)
@@ -1236,7 +1237,7 @@ class Library:
                              f"{f' (and {len(busy) - 1} more)' if len(busy) > 1 else ''} - moving it would break that torrent")
         n, moved = do_swap(self.app.cfg, t, it["root"], s)
         self.state.update(key, status=SWAPPED, why=f"{n} episode(s) now the torrent's files; {moved} old "
-                          f"file(s) set aside for {self.app.cfg.library_keep_replaced_days:g} days")
+                          f"file(s) set aside in {REPLACED_DIR} - yours to delete once you are happy")
         self.rescan()
         return self.state.seasons[key]
 
@@ -1771,6 +1772,7 @@ class Library:
         return {"seasons": sorted(out, key=lambda x: ((x.get("show") or "").lower(), x.get("season") or 0)),
                 "counts": dict(counts),
                 "deletable_bytes": sum(x.get("size") or 0 for x in out if x.get("status") == MOVED), "spent_today": self.state.spent_today(),
+                "replaced_ready": replaced_ready(cfg) if cfg is not None and getattr(cfg, "library_roots", None) else [],
                 "scanned_at": self.state.scanned_at, "current": self.current,
                 "cross_eyed_dry_run": bool(getattr(self, "ce_dry", None)) if getattr(cfg, "library_cross_eyed_url", "") else False}
 
