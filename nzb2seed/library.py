@@ -1554,6 +1554,9 @@ class Library:
         if any((x.get("hash") or "").lower() == mine for x in ts) or \
                 (moved and any(where(x) == moved or where(x).startswith(moved + os.sep) for x in ts)):
             raise ValueError("a torrent with files in it shares them with the season's own torrent - nothing deleted")
+        if not all(one_copy(g.get("torrents") or []) for g in groups):
+            raise ValueError("cross-eyed groups a torrent with files in it with a separate copy elsewhere, which "
+                             "deleting the group would delete too - nothing deleted (delete it in cross-eyed if you mean to)")
         risky = [x for x in ts if x.get("hnr_risk") != "safe"]
         if risky:
             raise ValueError("torrents with files in it are not safe to delete yet: " + "; ".join(
@@ -1619,6 +1622,11 @@ class Library:
             if any((x.get("hash") or "").lower() == mine for x in ts) or \
                     any(p == r or p.startswith(r + os.sep) for p in local for r in roots):
                 waits.append(f"{n}: shares files with the library - never deleted")
+                done.add(h)
+                continue
+            if not one_copy(ts):
+                waits.append(f"{n}: cross-eyed groups it with a separate copy elsewhere - not deleted "
+                             "(delete it in cross-eyed if you mean to)")
                 done.add(h)
                 continue
             risky = [x for x in ts if x.get("hnr_risk") != "safe"]
@@ -1843,6 +1851,14 @@ class CrossEyed:
         jobs = [j for j in (d.get("file_jobs") or []) + (d.get("rolledback_jobs") or [])
                 if j.get("batch_id") == batch_id]
         return jobs, bool(d.get("dry_run"))
+
+
+def one_copy(ts: list[dict]) -> bool:
+    """Do these torrents (a cross-eyed group) all share one set of files on disk? A group
+    can also hold a separate copy (cross-seed's link to another drive): deleting the group
+    would delete that copy too, which nothing asked for."""
+    sigs = {x.get("inode_signature") for x in ts}
+    return len(sigs) == 1 and None not in sigs and "" not in sigs
 
 
 def same_drive(a: str, b: str) -> bool:

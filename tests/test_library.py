@@ -500,8 +500,13 @@ def test_approve_with_cross_eyed_moves_the_torrent_in_and_lists_the_original(tmp
     # a torrent with files in the original: deleted only through cross-eyed, once it is safe
     w.in_client = lambda: {os.path.normcase(os.path.abspath(os.path.join(s.dir, "x.mkv")))}
     old = {"hash": "o1", "content_path": os.path.join(s.dir, "x.mkv"), "hnr_risk": "danger",
-           "hnr_remaining_seconds": 3 * 86400, "hnr_rule_name": "TrackerA"}
-    xs = {"hash": "x1", "content_path": "/elsewhere/x.mkv", "hnr_risk": "safe", "hnr_rule_name": "TrackerB"}
+           "hnr_remaining_seconds": 3 * 86400, "hnr_rule_name": "TrackerA", "inode_signature": "f:1:1"}
+    xs = {"hash": "x1", "content_path": "/elsewhere/x.mkv", "hnr_risk": "safe", "hnr_rule_name": "TrackerB",
+          "inode_signature": "f:1:1"}
+    copy = dict(xs, hash="c1", inode_signature="f:2:2")      # a separate copy cross-eyed groups with it
+    ce.g = [{"content_id": 4, "torrents": [old, xs, copy]}]
+    with pytest.raises(ValueError, match="separate copy"):
+        w.delete_original(s.key)
     ce.g = [{"content_id": 4, "torrents": [old, xs]}]
     with pytest.raises(ValueError, match="TrackerA 3 day"):
         w.delete_original(s.key)
@@ -997,9 +1002,9 @@ def _replacing(tmp_path, library, monkeypatch, groups):
     return w, s, ce
 
 
-def _t(h, risk, days=0, path="/data2/torcomplete/Alpha.S04", rule="TrackerA"):
+def _t(h, risk, days=0, path="/data2/torcomplete/Alpha.S04", rule="TrackerA", sig="f:1:2"):
     return {"hash": h, "hnr_risk": risk, "hnr_remaining_seconds": days * 86400, "hnr_rule_name": rule,
-            "content_path": path}
+            "content_path": path, "inode_signature": sig}
 
 
 def test_the_other_trackers_pack_is_queued_for_deletion_once_cross_eyed_says_it_is_safe(tmp_path, library, monkeypatch):
@@ -1028,6 +1033,10 @@ def test_a_pack_sharing_files_with_the_library_or_without_a_rule_is_never_queued
     w.state.seasons[s.key]["replaced"] = []
     w.queue_replaced(w.app.cfg, s.key)
     assert ce.deleted == []
+    groups[:] = [{"content_id": 11, "torrents": [_t("old1", "safe"), _t("cp1", "safe", sig="f:9:9")]}]
+    w.state.seasons[s.key]["replaced"] = []
+    w.queue_replaced(w.app.cfg, s.key)
+    assert ce.deleted == [] and "separate copy" in w.state.seasons[s.key]["why"]
     groups[:] = [{"content_id": 10, "torrents": [_t("old1", "no_rule")]}]
     w.state.seasons[s.key]["replaced"] = []
     w.queue_replaced(w.app.cfg, s.key)
