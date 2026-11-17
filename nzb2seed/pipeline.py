@@ -611,8 +611,9 @@ def archive_holds(files: list, entries: list[tuple[str, int]], inner=()) -> bool
     True when it holds a file of exactly the right size - one of the torrent's, or one of
     ``inner``: the sizes of what the torrent's own scene RARs hold (from srrDB), since a
     re-pack of that video is what the scene RARs are rebuilt from. False when it holds the
-    right name at a different size or a file as large as the one wanted that is not it (a
-    different encode of the same title), None when the listing cannot say."""
+    right name at a different size, or a file of video size (at least half the one wanted)
+    that is not exactly it - a different encode, or the same one remuxed - None when the
+    listing cannot say."""
     if not entries or not files:
         return None
     want_names = {os.path.basename(f.name).lower() for f in files}
@@ -621,9 +622,14 @@ def archive_holds(files: list, entries: list[tuple[str, int]], inner=()) -> bool
         return True
     if any(os.path.basename(n).lower() in want_names for n, _ in entries):
         return False
-    if max(size for _, size in entries) >= max(want_sizes):
+    # a file this large is the main video, and it is not the size wanted: another version of
+    # the release (a tracker's remux of it is a few KB larger or smaller), whichever way off
+    if max(size for _, size in entries) >= max(want_sizes) * MAIN_FILE_SHARE:
         return False
     return None            # only small files listed so far: the rest is in later volumes
+
+
+MAIN_FILE_SHARE = 0.5      # a file in an archive at least this share of the largest one wanted is the video
 
 
 def worth_peeking(nzb: bytes, files: list) -> bool:

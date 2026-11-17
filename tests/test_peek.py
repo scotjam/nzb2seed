@@ -69,6 +69,17 @@ def test_a_file_as_big_as_the_one_wanted_that_is_not_it():
     assert pipeline.archive_holds(WANT, entries) is False
 
 
+def test_the_video_a_few_kb_short_is_another_version_not_downloaded():
+    """A tracker's remux of the release (its tags rewritten) is ~100 KB larger than every
+    Usenet post of it: the post's video, a little smaller, is not it."""
+    entries = [("ea56f35ec45344c093a5527a7f1cc39a.mkv", 26_540_000_000 - 102_600)]
+    assert pipeline.archive_holds(WANT, entries) is False
+
+
+def test_a_sample_of_the_video_says_nothing():
+    assert pipeline.archive_holds(WANT, [("the.film.sample.mkv", 90_000_000)]) is None
+
+
 def test_only_small_files_listed_says_nothing():
     # the rest of the set's headers live in volumes that were not fetched
     assert pipeline.archive_holds(WANT, [("readme.txt", 900)]) is None
