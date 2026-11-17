@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import glob
+import hashlib
 import itertools
 import json
 import math
@@ -1443,6 +1444,61 @@ def holed_damage(t: Torrent, placed: dict[str, str], rels) -> tuple[list[tuple],
     return damaged, pieces
 
 
+NEAR_SHORT = 0.03   # a file at most this much smaller than the torrent's may be the same one cut off
+NEAR_PROBE = 4      # pieces at its start hashed before it is taken as that
+
+
+def pad_cut_off(t: Torrent, d: str, files) -> list[tuple]:
+    """Files in download folder ``d`` with the name of one of ``files`` but a little short
+    of its size - a post uploaded from a broken copy, which its own repair data passes (it
+    was made from that copy). When the first pieces lying wholly in what it has match the
+    torrent's, it is the torrent's file cut off: it is padded with zeros to its size, the
+    tail read as a gap, and goes on like a download with missing articles (the piece check
+    decides the rest). [(file, bytes it lacked)]. A different cut of the same name fails
+    the first pieces and is left as it is - one file read a few pieces, not in full."""
+    want = {}
+    for f in files:
+        want.setdefault(f.name.casefold(), []).append(f)
+    padded = []
+    for root, _, names in os.walk(d):
+        for n in names:
+            for f in want.get(n.casefold(), ()):
+                path = os.path.join(root, n)
+                try:
+                    size = os.path.getsize(path)
+                except OSError:
+                    continue
+                if not f.length * (1 - NEAR_SHORT) <= size < f.length or not _starts_as(t, f, path, size):
+                    continue
+                with open(path, "r+b") as fh:
+                    fh.truncate(f.length)
+                padded.append((f, f.length - size))
+                break
+    return padded
+
+
+def _starts_as(t: Torrent, f, path: str, size: int) -> bool:
+    """Do the first pieces wholly inside the ``size`` bytes of ``path`` match ``f``'s in the
+    torrent? Pieces touching a run of zeros (missing articles) are skipped; at least one
+    must match and none of the others may fail."""
+    gap = bytes(1) * GAP_MIN
+    first = -(-f.offset // t.piece_length)            # the first piece starting inside f
+    ok = 0
+    with open(path, "rb") as fh:
+        for i in range(first, len(t.pieces)):
+            start, end = t.piece_span(i)
+            if end > f.offset + size or ok + 1 > NEAR_PROBE:
+                break
+            fh.seek(start - f.offset)
+            data = fh.read(end - start)
+            if gap in data:
+                continue
+            if hashlib.sha1(data).digest() != t.pieces[i]:
+                return False
+            ok += 1
+    return ok > 0
+
+
 def _under(path: str, d: str) -> bool:
     d = os.path.normpath(d)
     return os.path.normpath(path) == d or os.path.normpath(path).startswith(d + os.sep)
@@ -2596,6 +2652,21 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                     continue
                 if satisfied(u, d):
                     resolve(u, d, nzo)
+                    continue
+                cut = pad_cut_off(t, d, [f for f in still_missing(u) if f.length >= GAP_FILE_MIN]) \
+                    if os.path.isdir(d) else []
+                if cut:
+                    lost = sum(n for _, n in cut)
+                    short = shortfall(u, d)
+                    warn(f"{rel.title} ({rel.indexer}) was posted from a broken copy: "
+                         + ", ".join(f"{f.name} cut off {gb(n)} short" for f, n in cut[:3])
+                         + f", about {gb(short)} of it missing or zeros in all - its repair data was made "
+                         "from that copy, so SABnzbd passed it. Trying other posts first; what it has is "
+                         "used if none is better")
+                    verdicts.mark(t.infohash, u.need.label, rel,
+                                  f"it was posted cut off ({gb(lost)} short) and with gaps ({gb(short)} missing)")
+                    u.holed.append((d, nzo, short))
+                    advance(u)
                     continue
                 warn(f"{rel.title} finished but does not hold all of {u.need.label}; "
                      "what it does hold is used if needed")

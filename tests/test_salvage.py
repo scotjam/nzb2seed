@@ -179,3 +179,55 @@ def test_a_cut_off_file_from_a_broken_rar_set_is_padded_to_its_size(tmp_path, mo
     out = d / archives.UNPACK_DIR / "Show" / "ep.mkv"
     assert out.stat().st_size == 50_000
     assert pipeline.zero_runs(str(out), 1024) == [(30_000, 50_000)]
+
+
+class CutSAB(HoledSAB):
+    """``cut``: {guid: {file name: bytes}} - that post was uploaded from a copy cut off this
+    many bytes short; its repair data was made from that copy, so SABnzbd passes it."""
+
+    def __init__(self, *a, cut=None, **k):
+        super().__init__(*a, **k)
+        self.cut = cut or {}
+
+    def add_nzb(self, nzb, name, cat, pp, prio):
+        nzo = super().add_nzb(nzb, name, cat, pp, prio)
+        for base, n in self.cut.get(self.jobs[nzo], {}).items():
+            p = os.path.join(self.root, nzo, base)
+            with open(p, "r+b") as fh:
+                fh.truncate(os.path.getsize(p) - n)
+        return nzo
+
+    def history_slot(self, nzo):
+        return {"stage_log": [{"name": "Repair", "actions": ["[x] Quick Check OK"]}]}
+
+
+def test_a_post_cut_off_and_passed_by_its_own_repair_data_is_built_from(tmp_path):
+    """The only post with episode 3 was uploaded from a broken copy - zeros where articles
+    were, the end cut off - and SABnzbd passed it. It is not thrown away as another cut: the
+    file is padded to its size and goes on like a download with missing articles."""
+    t, cfg, files, size = world(tmp_path)
+    a, c = rel(NAME, size, "A"), rel(NAME + "-xpost", size, "C")
+    sab = CutSAB(str(tmp_path / "dl"), t, files, lacks={"A": {ep_name(1, 3)}},
+                 holes={"C": {ep_name(1, 3): (2000, 6000)}}, cut={"C": {ep_name(1, 3): 1000}})
+    dirs, _, _, rejected = plan_and_fetch(cfg, Options(), PR([a, c]), sab, t, t.name, [], 2)
+    dc = os.path.join(str(tmp_path / "dl"), "nzo2")
+    assert dc in dirs and all(d != dc for d, _ in rejected)
+    p = asm.find_sources(t, dirs)[next(f.relpath for f in t.real_files if f.name == ep_name(1, 3))]
+    assert p.startswith(dc) and os.path.getsize(p) == len(files[f"Season 1/{ep_name(1, 3)}"])
+    assert pipeline.zero_runs(p, 512) == [(2000, 6000), (42_000, 43_000)]
+
+
+def test_another_cut_of_the_same_name_is_left_as_it_is(tmp_path):
+    files = season()
+    t = parse(make_torrent(NAME, files))
+    f = next(x for x in t.real_files if x.name == ep_name(1, 3))
+    d = tmp_path / "job"
+    d.mkdir()
+    other = d / ep_name(1, 3)
+    other.write_bytes(rnd(f.length - 500, 99))         # nearly the size, other bytes
+    assert pipeline.pad_cut_off(t, str(d), [f]) == []
+    assert other.stat().st_size == f.length - 500
+    far = d / "x"                                      # far smaller than the torrent's: never read
+    far.mkdir()
+    (far / ep_name(1, 3)).write_bytes(files[f"Season 1/{ep_name(1, 3)}"][: f.length // 2])
+    assert pipeline.pad_cut_off(t, str(far), [f]) == []
