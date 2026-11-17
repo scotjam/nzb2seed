@@ -184,7 +184,10 @@ const IDEAS = [
    file), open it on port 8765, then put its address in
    Library, under "cross-eyed address", and save. cross-eyed starts in dry-run each time: while it is, the Library tab says so
    and nothing is moved (auto move waits too) until you switch it to live in its header. "Auto delete the existing library files" then removes your old
-   season folder once the moved torrent seeds at 100.0% - it may cause data loss, so watch a few moves first.`],
+   season folder once the moved torrent seeds at 100.0% - it may cause data loss, so watch a few moves first. A season downloaded
+   again in place of another tracker's pack then has that pack, and every cross-seed of its files, queued for deletion in
+   cross-eyed - only once cross-eyed counts each of them safe from a hit-and-run; until then the season says which tracker
+   still has days to go.`],
   ["Only its own files",
    "nzb2seed is designed to only remove what it created itself, keep a record of it, and never delete from your " +
    "library without asking. Removing nzb2seed? See the README's last section first."],

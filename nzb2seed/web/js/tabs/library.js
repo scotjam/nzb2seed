@@ -101,7 +101,8 @@ export function LibraryTab({ active }) {
   // the two automatic ticks take effect at once - no Save needed
   async function autoTick(k, on) {
     if (k === "auto_delete" && on && !confirm("Delete original library folders by themselves?\n\nWARNING - MAY CAUSE DATA LOSS.\n\n"
-        + "Once a season's torrent seeds at 100.0% from its new folder in the library, its original season folder is deleted without asking you. This cannot be undone.")) return;
+        + "Once a season's torrent seeds at 100.0% from its new folder in the library, its original season folder is deleted without asking you. "
+        + "A season downloaded again in place of another tracker's pack also has that pack (and its cross-seeds) queued for deletion in cross-eyed, with its files, once cross-eyed counts every one of them safe from a hit-and-run. This cannot be undone.")) return;
     try { const r = await api("/api/library/save", { [k]: on }); setState(r); setForm(f => ({ ...f, [k]: on })); }
     catch (err) { toast(err.message); }
   }
@@ -161,7 +162,7 @@ export function LibraryTab({ active }) {
       <label class="check danger"><input type="checkbox" checked=${!!s.auto_delete} disabled=${!s.cross_eyed_url}
           onChange=${(e) => autoTick("auto_delete", e.target.checked)} />
         <span>Auto delete the existing library files once moved using <a href="https://codeberg.org/cross-eyed/cross-eyed" target="_blank" rel="noopener noreferrer">cross-eyed</a>: <b>WARNING - MAY CAUSE DATA LOSS</b>
-          <small class="status" style="display:block">The original season folder is deleted once the moved torrent seeds at 100.0% from the library and nothing in qBittorrent uses the old folder. cross-eyed: <a href="https://codeberg.org/cross-eyed/cross-eyed" target="_blank" rel="noopener noreferrer">codeberg.org/cross-eyed/cross-eyed</a></small></span></label>
+          <small class="status" style="display:block">The original season folder is deleted once the moved torrent seeds at 100.0% from the library and nothing in qBittorrent uses the old folder. A season downloaded again in place of another tracker's pack ("redownload for this tracker", or Download again) then has that pack and its cross-seeds queued for deletion in cross-eyed, with their files - only once cross-eyed counts every one of them safe from a hit-and-run (looked at again every 6 hours until then). cross-eyed: <a href="https://codeberg.org/cross-eyed/cross-eyed" target="_blank" rel="noopener noreferrer">codeberg.org/cross-eyed/cross-eyed</a></small></span></label>
     </div>
     <div class="autogrid">
       <div class="panel">

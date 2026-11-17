@@ -62,6 +62,7 @@ def unreachable(e: BaseException) -> bool:
 
 
 CHECKING_RETRY = 5 * 60
+REPLACE_RECHECK = 6 * 3600           # another tracker's pack not yet safe to delete: looked at again after
 
 
 def still_checking(e: BaseException) -> bool:
@@ -694,15 +695,18 @@ class Library:
                          if done(r) and r.get("state") not in STOPPED_STATES}
         packs = [(r.get("name") or "", tracker_name([r.get("tracker")], pr) if r.get("tracker") else "")
                  for r in rows]
+        self._packs_h = [(n, t, (r.get("hash") or "").lower()) for (n, t), r in zip(packs, rows)]
         return paths, packs
 
     def in_client(self) -> set[str]:
         c = self.client()
         return c[0] if c else set()
 
-    def client_status(self, s: Season, held, cfg) -> tuple[str, str]:
+    def client_status(self, s: Season, held, cfg, it: dict | None = None) -> tuple[str, str]:
         """WAITING, SEEDED (the library's own files are in a torrent) or IN_CLIENT (a pack
-        of it is, another copy) - and why."""
+        of it is, another copy) - and why. ``it``: the season's entry, marked "replaces"
+        when it is downloaded again for the ticked trackers in place of another tracker's
+        pack (see queue_replaced)."""
         paths, packs = held
         complete = getattr(self, "_complete", None)
         if complete is None:                    # not known: any torrent's folder counts
@@ -718,6 +722,8 @@ class Library:
         froms = sorted({t or "an unknown tracker" for _, t in have}, key=str.lower)
         mine = any(is_ours(cfg, t) for _, t in have)
         if cfg.library_redownload and not mine:
+            if it is not None:
+                it["replaces"] = True
             return WAITING, (f"in qBittorrent from {', '.join(froms)} - downloaded again for "
                              f"{trackers_text(cfg)}, as ticked")
         names = sorted({n for n, _ in have})
@@ -748,7 +754,7 @@ class Library:
                         continue                # its own torrent: settled, or built again
                     if asked is None:
                         continue                # qBittorrent did not answer: left as it was
-                    it["status"], it["why"] = self.client_status(s, held, cfg)
+                    it["status"], it["why"] = self.client_status(s, held, cfg, it)
             for it in self.state.seasons.values():
                 if _SEASON_DIR.match(it.get("show") or "") and it.get("dir"):
                     it["show"] = os.path.basename(os.path.dirname(it["dir"].rstrip("/"))) or it["show"]
@@ -908,7 +914,7 @@ class Library:
                     held = held or self.client()
                     if held is None:
                         return                  # qBittorrent cannot be reached: try later
-                    status, why = self.client_status(self.seasons[key], held, cfg)
+                    status, why = self.client_status(self.seasons[key], held, cfg, it)
                     if status != WAITING:
                         self.state.update(key, status=status, why=why)
                         continue
@@ -1438,6 +1444,10 @@ class Library:
                     self.delete_original(key)
                 except (ValueError, OSError):
                     pass                        # not yet (still checking, ...) - tried again next time
+            for key, it in list(self.state.seasons.items()):
+                if it.get("status") == ORIGINAL_DELETED and it.get("replaces") \
+                        and time.time() - (it.get("replace_checked") or 0) > REPLACE_RECHECK:
+                    self.queue_replaced(cfg, key)
         if getattr(cfg, "library_auto_move", False) and not getattr(self, "ce_dry", None):
             if any(it.get("status") == MOVING for it in self.state.seasons.values()):
                 return                          # one move at a time
@@ -1503,6 +1513,79 @@ class Library:
         self.wake.set()
         return self.state.seasons[key]
 
+    def queue_replaced(self, cfg, key: str) -> list[str]:
+        """A season downloaded again for the ticked trackers in place of another tracker's
+        pack, now seeding from the library with its original folder deleted: that pack - and
+        every torrent sharing its files (its cross-seeds) - is queued in cross-eyed for
+        deletion with its files, once cross-eyed counts every one of them safe from a
+        hit-and-run. Not yet: said on the season, and looked at again later. A group that
+        holds the season's own torrent, or any file in a library folder, is never queued.
+        The cross-eyed batches queued."""
+        it = self.state.seasons.get(key) or {}
+        s = self.seasons.get(key)
+        it["replace_checked"] = time.time()
+        if s is None or self.client() is None:
+            return []
+        mine = (it.get("infohash") or "").lower()
+        names = s.names()
+        olds = [(n, t, h) for n, t, h in getattr(self, "_packs_h", [])
+                if h and h != mine and not is_ours(cfg, t) and s.season in held_seasons(n, names)]
+        if not olds:
+            it.pop("replaces", None)
+            self.state.save()
+            return []
+        ce = CrossEyed(cfg.library_cross_eyed_url, getattr(cfg, "library_cross_eyed_prefix", "/host"))
+        roots = [os.path.normcase(os.path.abspath(r)) for r in (cfg.library_roots or [])]
+        from .pathmap import map_path
+        back = [(b, a) for a, b in (getattr(cfg, "local_to_qbit", None) or [])]
+        queued, waits, done = [], [], set(it.get("replaced") or [])
+        for n, t, h in olds:
+            if h in done:
+                continue
+            try:
+                g = next((g for g in ce.groups(n)
+                          if any((x.get("hash") or "").lower() == h for x in g.get("torrents") or [])), None)
+            except (ApiError, ValueError) as e:
+                waits.append(f"{n}: {e}")
+                continue
+            if g is None:
+                waits.append(f"{n}: cross-eyed does not know it yet")
+                continue
+            ts = g.get("torrents") or []
+            # cross-eyed gives qBittorrent's paths: as this machine sees them
+            local = [os.path.normcase(os.path.abspath(map_path(x.get("content_path") or "", back))) for x in ts]
+            if any((x.get("hash") or "").lower() == mine for x in ts) or \
+                    any(p == r or p.startswith(r + os.sep) for p in local for r in roots):
+                waits.append(f"{n}: shares files with the library - never deleted")
+                done.add(h)
+                continue
+            risky = [x for x in ts if x.get("hnr_risk") != "safe"]
+            if risky:
+                waits.append(f"{n}: " + "; ".join(
+                    f"{x.get('hnr_rule_name') or x.get('tracker_domain') or '?'} "
+                    + (f"{max(1, round((x.get('hnr_remaining_seconds') or 0) / 86400))} day(s) to go"
+                       if x.get("hnr_risk") == "danger" else "no hit-and-run rule in cross-eyed")
+                    for x in risky))
+                continue
+            try:
+                queued.append(ce.delete_content(g["content_id"]))
+            except (ApiError, ValueError) as e:
+                waits.append(f"{n}: {e}")
+                continue
+            done.add(h)
+        it["replaced"] = sorted(done)
+        why = (it.get("why") or "").split(" | ")[0]
+        if queued:
+            it.setdefault("replaced_batches", []).extend(queued)
+        if waits:
+            why += " | other tracker's pack not deleted yet: " + "; ".join(waits)
+        elif done:
+            why += " | other tracker's pack queued in cross-eyed for deletion (safe from hit-and-run)"
+            it.pop("replaces", None)
+        it["why"] = why
+        self.state.save()
+        return queued
+
     def keep(self, key: str):
         it = self.state.seasons.get(key)
         if not it or it.get("status") != SWAP:
@@ -1534,6 +1617,8 @@ class Library:
         """A season already in the client: get it for the ticked trackers all the same."""
         if key not in self.state.seasons or key == self.current:
             raise ValueError("nothing to download again")
+        if self.state.seasons[key].get("status") == IN_CLIENT:
+            self.state.seasons[key]["replaces"] = True     # another tracker's pack: see queue_replaced
         self.state.update(key, status=WAITING, again=True,
                           why=f"downloading again for {trackers_text(self.app.cfg)}, as you asked")
         self.wake.set()
@@ -1671,6 +1756,21 @@ class CrossEyed:
         if r.status_code >= 400:
             raise ApiError(d.get("error") or f"cross-eyed answered {r.status_code}")
         return d
+
+    def groups(self, name: str) -> list[dict]:
+        """cross-eyed's content groups (torrents sharing the same files, each with its
+        hit-and-run standing) whose name matches ``name``."""
+        return self._req("GET", "/api/files", timeout=600, params={"q": name}).json().get("groups") or []
+
+    def delete_content(self, content_id) -> str:
+        """Queue every torrent of a content group for deletion with its files (cross-eyed
+        runs it, or holds it in dry-run). The batch id."""
+        from urllib.parse import parse_qs, urlsplit
+        r = self._req("POST", "/delete-content", timeout=120, data={"content_id": str(content_id)})
+        q = parse_qs(urlsplit(r.headers.get("Location", "")).query)
+        if q.get("highlight"):
+            return q["highlight"][0]
+        raise ValueError("cross-eyed did not queue the deletion" + (f": {q['notice'][0]}" if q.get("notice") else ""))
 
     def dry_run(self) -> bool:
         """Is cross-eyed in dry-run mode (moves queued, run only by hand)?"""

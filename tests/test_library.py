@@ -939,3 +939,79 @@ def test_copies_of_one_outcome_leave_the_job_list(tmp_path):
     assert sorted(jobs) == [3, 5, 6]
     assert jobs[5].status == "done" and "original deleted" in jobs[5].result
     assert jobs[6].status == "interrupted"                   # its season is not finished
+
+
+class DeletingCrossEyed:
+    """cross-eyed's content groups (with hit-and-run standing) and its delete queue."""
+
+    def __init__(self, groups):
+        self.g, self.deleted = groups, []
+
+    def groups(self, name):
+        return self.g
+
+    def delete_content(self, content_id):
+        self.deleted.append(content_id)
+        return f"batch{content_id}"
+
+    def local(self, p):
+        return p[len("/host"):] if p.startswith("/host") else p   # /host + this machine's path
+
+
+def _replacing(tmp_path, library, monkeypatch, groups):
+    old = ("Alpha.2009.S04.720p.WEB-DL-ZQo", "TrackerA", "old1")
+    w, s = _client_worker(tmp_path, library, [old[:2]], library_redownload=True, library_roots=[library.root],
+                          library_cross_eyed_url="http://ce", library_cross_eyed_prefix="/host",
+                          library_auto_delete=True, library_auto_move=False)
+    w._packs_h = [old, ("Alpha.2009.S04.1080p.BluRay-NEW", "TX (API)", "ih")]
+    w.seasons = {s.key: s}
+    ce = DeletingCrossEyed(groups)
+    monkeypatch.setattr(lib, "CrossEyed", lambda *a: ce)
+    it = w.client_status(s, w.client(), w.app.cfg, w.state.seasons.setdefault(s.key, {}))
+    assert it[0] == lib.WAITING and w.state.seasons[s.key]["replaces"]
+    w.state.update(s.key, status=lib.ORIGINAL_DELETED, infohash="ih", why="original folder deleted")
+    return w, s, ce
+
+
+def _t(h, risk, days=0, path="/data2/torcomplete/Alpha.S04", rule="TrackerA"):
+    return {"hash": h, "hnr_risk": risk, "hnr_remaining_seconds": days * 86400, "hnr_rule_name": rule,
+            "content_path": path}
+
+
+def test_the_other_trackers_pack_is_queued_for_deletion_once_cross_eyed_says_it_is_safe(tmp_path, library, monkeypatch):
+    groups = [{"content_id": 7, "torrents": [_t("old1", "danger", 6), _t("xs1", "safe", rule="TrackerB")]}]
+    w, s, ce = _replacing(tmp_path, library, monkeypatch, groups)
+    w.auto_moves(w.app.cfg)
+    it = w.state.seasons[s.key]
+    assert ce.deleted == [] and "TrackerA 6 day(s) to go" in it["why"] and it["replaces"]
+    w.auto_moves(w.app.cfg)                                     # looked at again only later
+    assert ce.deleted == []
+    groups[0]["torrents"][0] = _t("old1", "safe")
+    it["replace_checked"] = 0
+    w.auto_moves(w.app.cfg)
+    assert ce.deleted == [7] and "queued in cross-eyed for deletion" in it["why"] and "replaces" not in it
+    assert it["replaced_batches"] == ["batch7"]
+
+
+def test_a_pack_sharing_files_with_the_library_or_without_a_rule_is_never_queued(tmp_path, library, monkeypatch):
+    groups = [{"content_id": 8, "torrents": [_t("old1", "safe"), _t("ih", "safe")]}]
+    w, s, ce = _replacing(tmp_path, library, monkeypatch, groups)
+    w.queue_replaced(w.app.cfg, s.key)
+    assert ce.deleted == [] and "shares files with the library" in w.state.seasons[s.key]["why"]
+    # cross-eyed names qBittorrent's paths: mapped back to this machine's
+    w.app.cfg.local_to_qbit = [[os.path.dirname(library.root), "/data2"]]
+    groups[:] = [{"content_id": 9, "torrents": [_t("old1", "safe", path="/data2/tv/Alpha (2009)/Season 4")]}]
+    w.state.seasons[s.key]["replaced"] = []
+    w.queue_replaced(w.app.cfg, s.key)
+    assert ce.deleted == []
+    groups[:] = [{"content_id": 10, "torrents": [_t("old1", "no_rule")]}]
+    w.state.seasons[s.key]["replaced"] = []
+    w.queue_replaced(w.app.cfg, s.key)
+    assert ce.deleted == [] and "no hit-and-run rule" in w.state.seasons[s.key]["why"]
+
+
+def test_without_auto_delete_nothing_is_queued(tmp_path, library, monkeypatch):
+    w, s, ce = _replacing(tmp_path, library, monkeypatch, [{"content_id": 7, "torrents": [_t("old1", "safe")]}])
+    w.app.cfg.library_auto_delete = False
+    w.auto_moves(w.app.cfg)
+    assert ce.deleted == []
