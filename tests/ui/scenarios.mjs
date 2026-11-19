@@ -461,6 +461,18 @@ export const SCENARIOS = {
     return { sorted, filtered, sent: calls.slice(n).filter(c => /answer/.test(c.path)) };
   },
 
+  /* the new page only: a question opens with the best match picked, so the button works
+     without a tap - and tapping the row already ticked still counts */
+  async askdefault({ act, doc, calls }) {
+    await act.go("jobs");
+    await act.click("Show.S03.1080p.WEB-GRPC", ".jmain");
+    const ticked = [...doc.querySelectorAll(".ask .row input")].map(i => i.checked);
+    const off = doc.querySelector(".ask .actions .btn.primary").disabled;
+    const n = calls.length;
+    await act.click("Download this NZB", "button");
+    return { ticked, off, sent: calls.slice(n).filter(c => /answer/.test(c.path)) };
+  },
+
   /* the new page only: running builds are cancelled from the bar, and the greyed-out
      buttons say why they are greyed out */
   async cancel({ act, doc, calls }) {

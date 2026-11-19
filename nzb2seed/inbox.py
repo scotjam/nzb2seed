@@ -322,6 +322,16 @@ class Inbox:
         _auto.on = True
         try:
             return self._run(h)
+        except Cancelled:
+            # cancelled on the Jobs tab while it waited (for its post, or a build slot): it
+            # stops for good - listed as cancelled, and Try again can start it - or the next
+            # pass would see a waiting torrent without a job and start it all over again
+            it = self.state.items.get(h)
+            if it and it.get("status") in ("queued", "waiting", "building"):
+                self.state.update(h, status="failed", why="cancelled", next_try=0, stopped=True)
+                if it.get("file") and os.path.exists(it["file"]):
+                    self._move(it["file"], FAILED)      # where Try again looks for it
+            raise
         finally:
             _auto.on = False
             self.running.pop(h, None)

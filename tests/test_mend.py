@@ -505,12 +505,13 @@ def test_failed_downloads_past_the_keep_time_go_with_their_files(tmp_path, monke
     slots = [{"nzo_id": "old", "name": "Old.Post", "category": "nzb2seed", "completed": 1_000_000 - 80 * 3600},
              {"nzo_id": "new", "name": "New.Post", "category": "nzb2seed", "completed": 1_000_000 - 3600},
              {"nzo_id": "mine", "name": "By.Hand", "category": "nzb2seed", "completed": 0},     # not in the ledger
-             {"nzo_id": "busy", "name": "Busy", "category": "nzb2seed", "completed": 0}]
+             {"nzo_id": "busy", "name": "Busy", "category": "nzb2seed", "completed": 0},
+             {"nzo_id": "chk", "name": "nzb2seed-check-ab12cd34", "category": "nzb2seed", "completed": 0}]
     sab = SimpleNamespace(_call=lambda *a, **k: {"history": {"slots": slots}},
                           delete_history=lambda nzo, files=False: deleted.append((nzo, files)))
     cfg = SimpleNamespace(sab_category="nzb2seed", sab_to_local=[], path=str(tmp_path / "nzb2seed.toml"))
     for nzo, t in (("old", "Old.Post"), ("new", "New.Post"), ("busy", "Busy")):
         pipeline.ledger_for(cfg).record(nzo, t, torrent="b" if nzo == "busy" else "")
     monkeypatch.setattr(pipeline, "_building", {"b"})
-    assert pipeline.remove_old_failed(cfg, sab, 72, now=1_000_000, log=lambda t: None)[0] == 1
-    assert deleted == [("old", True)]
+    assert pipeline.remove_old_failed(cfg, sab, 72, now=1_000_000, log=lambda t: None)[0] == 2
+    assert deleted == [("old", True), ("chk", True)]       # its own check job, known by its name

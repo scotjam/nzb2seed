@@ -276,6 +276,16 @@ def test_the_nzb_pick_list_can_be_filtered_and_sorted(settings_file):
 
 
 @pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
+def test_a_question_opens_with_the_best_match_picked(settings_file):
+    """What looks ticked is what the button downloads: the best match, without a tap."""
+    seen = run("new", "askdefault", settings_file)["seen"]
+    assert seen["ticked"][0] and not any(seen["ticked"][1:])
+    assert seen["off"] is False
+    (sent,) = seen["sent"]
+    assert sent["body"] == {"choice": 0}
+
+
+@pytest.mark.skipif(not READY, reason="node and jsdom (npm install in tests/ui) are needed")
 def test_settings_save_whatever_numbers_are_typed(settings_file):
     """A browser silently refuses to submit a form holding a number off its field's step -
     so the Settings form checks numbers itself and never lets the browser block saving."""

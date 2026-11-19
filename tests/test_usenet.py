@@ -227,6 +227,55 @@ def test_sab_wait_waits_for_the_storage_path(monkeypatch):
     assert out["nzo1"] == ("Completed", {"storage": "/downloads/Rel"})
 
 
+def test_sab_wait_gives_up_on_a_post_paused_for_a_password(monkeypatch):
+    """SABnzbd pauses a post whose archives need a password it lacks; that would hold the
+    build (and its slot) for good, so it counts as failed and is taken out of the queue."""
+    deleted = []
+
+    class Sab:
+        def status(self, nzo):
+            return "Queued:Paused", {"labels": ["ENCRYPTED"], "percentage": "87"}
+
+        def queue_do(self, action, nzo):
+            deleted.append((action, nzo))
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    status, slot = pipeline.sab_wait(Sab(), {"nzo1": "Rel"})["nzo1"]
+    assert status == "Failed" and "password" in slot["fail_message"]
+    assert deleted == [("delete", "nzo1")]
+
+
+def test_sab_wait_leaves_a_post_paused_by_hand_waiting(monkeypatch):
+    """A job paused for any other reason (by hand) is waited for, as before."""
+    answers = iter([("Queued:Paused", {"labels": []}), ("Completed", {"storage": "/d/Rel"})])
+
+    class Sab:
+        def status(self, nzo):
+            return next(answers)
+
+        def queue_do(self, *a):
+            raise AssertionError("must not be deleted")
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline, "queue_paused_by_other", lambda sab: "")
+    assert pipeline.sab_wait(Sab(), {"nzo1": "Rel"})["nzo1"][0] == "Completed"
+
+
+def test_sab_wait_gives_up_on_a_job_gone_from_sabnzbd(monkeypatch):
+    """A job deleted in SABnzbd (in neither queue nor history) fails after a while
+    instead of being waited for forever; a brief absence does not."""
+    clock = [0.0]
+
+    class Sab:
+        def status(self, nzo):
+            clock[0] += 60
+            return "Unknown", {}
+    monkeypatch.setattr(pipeline.time, "sleep", lambda s: None)
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(pipeline, "queue_paused_by_other", lambda sab: "")
+    status, slot = pipeline.sab_wait(Sab(), {"nzo1": "Rel"})["nzo1"]
+    assert status == "Failed" and "no longer in SABnzbd" in slot["fail_message"]
+    assert clock[0] >= pipeline.GONE_AFTER
+
+
 def test_post_ids_tell_the_same_post_from_a_reupload():
     """Two indexers listing one post (one leaving the .nfo out) are the same post; a
     re-upload with identical names and sizes is not."""

@@ -56,6 +56,12 @@ def rel(title, size, guid=None, grabs=0, indexer="idx"):
     ("Show.S03E03.Title.1080p.Blu-ray", None),                              # no group named
     ("Show.S03E03.Title.1080p.AMZN.WEB-DL.DDP5.1.x265", None),              # ends in a tag
     ("Show.S03E03.The.Long.Road.Home", None),                               # a title, not a group
+    # anime and fansub names: the group first, in square brackets (a CRC last is not a group)
+    ("[Fansuba] Glow Party - S01E02 (WEB 1080p AAC) [2AC53A9D]", "fansuba"),
+    ("[Fansubb].Glow.Party.-.S01E02.[English.Dub].[CR.WEB-DL.1080p.H264.AAC].[43E7AB48]", "fansubb"),
+    ("[Fansubc] Glow Party S01E02 1080p CR WEB-DL AAC 2.0 H.264 Other title Here", "fansubc"),
+    ("[Grp] Show - S01E02 [CR WEB-DL 1080p] [ABCDEF12]", "grp"),
+    ("[1 10] 'Show.2020.720p.MAX.WEB-DL.DDP2.0.H.264-GRPN.mkv'", "grpn"),   # a part count, not a group
 ])
 def test_group_of(name, group):
     assert group_of(name) == group
@@ -894,3 +900,14 @@ def test_empty_nzbs_from_several_indexers_point_at_sabnzbd():
     many = pipeline.fetch_failure_text("X", [fail("IndexerA"), fail("IndexerB"),
                                              ("IndexerC", "IndexerC refused the NZB - usually its limit")])
     assert "SABnzbd itself is the likely cause" in many and "3 posts" in many
+
+
+def test_a_group_in_front_is_another_groups_post_not_an_obfuscated_one():
+    """A XiQMA torrent is not offered '[Fansuba] Show - S01E02 ...': its group is plain,
+    only in front - and the bracket in front does not make it another title."""
+    from nzb2seed import matching
+    from nzb2seed.pipeline import same_show
+    assert same_show(matching.norm("[Fansuba] Glow Party - S01E02 (WEB 1080p AAC)"), "glow.party")
+    assert same_show(matching.norm("[1 10] 'Oldfilm.1992.720p.MAX.WEB-DL-QzW.mkv'"), "oldfilm.1992")
+    assert group_of("[Fansuba] Glow Party - S01E02 (WEB 1080p AAC) [2AC53A9D]") != "xiqma"
+

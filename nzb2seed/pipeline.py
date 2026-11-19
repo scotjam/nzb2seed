@@ -811,9 +811,12 @@ def remove_old_failed(cfg: Config, sab: SABnzbd, hours: float, now: float | None
     except (ApiError, OSError, ValueError):
         return 0, 0
     jobs = {j.get("nzo"): j for j in ledger_for(cfg).all() if j.get("nzo")}
+    from .grab import CHECK_PREFIX
     gone, freed = 0, 0
     for s in slots:
         nzo, j = s.get("nzo_id"), jobs.get(s.get("nzo_id"))
+        if j is None and str(s.get("name") or "").startswith((PEEK_PREFIX, CHECK_PREFIX)):
+            j = {}                          # this instance's own peek or check job, by its name
         if j is None or s.get("category") != cfg.sab_category or j.get("torrent") in _building:
             continue
         if now - float(s.get("completed") or 0) < hours * 3600:
@@ -1148,10 +1151,37 @@ def clean_seeded_downloads(cfg: Config, sab: SABnzbd, qb, log=print, dry_run: bo
     return n, freed
 
 
+_paused_seen: dict[int, tuple[float, bool]] = {}     # id(sab) -> (when asked, paused?)
+
+
+def queue_paused_by_other(sab) -> str:
+    """Why SABnzbd's whole queue is paused when this nzb2seed did not pause it ("" when it
+    is running, or cannot be asked). Asked at most once a minute."""
+    if not hasattr(sab, "queue_paused"):
+        return ""
+    at, paused = _paused_seen.get(id(sab), (0.0, False))
+    if time.monotonic() - at > 60:
+        try:
+            paused = bool(sab.queue_paused())
+        except (ApiError, OSError, ValueError):
+            paused = False
+        _paused_seen[id(sab)] = (time.monotonic(), paused)
+    if not paused:
+        return ""
+    return ("SABnzbd's whole queue is paused, and not by this nzb2seed: by another nzb2seed "
+            "instance's space guard (one SABnzbd serves both), or by hand in SABnzbd - it "
+            "carries on when the queue is resumed")
+
+
+GONE_AFTER = 600     # seconds a job may be missing from SABnzbd before it counts as failed
+LOCKED = "its archives need a password the post does not give"
+
+
 def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
     """Wait until every job has finished; return {nzo: (status, slot)}."""
     out: dict[str, tuple[str, dict]] = {}
     no_path_since: dict[str, float] = {}
+    gone_since: dict[str, float] = {}   # when a job was first missing from SABnzbd
     said = ""                     # the disk-space reason this job has already been told
     sizes: dict[str, float] = {}  # MB each download holds, once SABnzbd says
     last = None                   # (time, MB downloaded) at the previous look, for the speed
@@ -1164,6 +1194,24 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
             if nzo in out:
                 continue
             status, slot = sab.status(nzo)
+            why = ""
+            if status == "Queued:Paused" and "ENCRYPTED" in (slot.get("labels") or []):
+                # SABnzbd stops a post whose archives need a password it was not given, and
+                # it would sit there for good: the post is no use, so it counts as failed -
+                # this build's own job, taken out with its files - and the next one is tried
+                why = LOCKED
+                try:
+                    sab.queue_do("delete", nzo)
+                except (ApiError, AttributeError):
+                    pass
+            elif status == "Unknown":
+                # gone from SABnzbd's queue and history (deleted there): nothing will come
+                if time.monotonic() - gone_since.setdefault(nzo, time.monotonic()) >= GONE_AFTER:
+                    why = "it is no longer in SABnzbd"
+            else:
+                gone_since.pop(nzo, None)
+            if why:
+                status, slot = "Failed", dict(slot, fail_message=why)
             if status in SAB_DONE and not slot.get("storage") \
                     and time.monotonic() - no_path_since.setdefault(nzo, time.monotonic()) < 120:
                 # SABnzbd can mark a job Completed a moment before it records where the files went
@@ -1203,14 +1251,20 @@ def sab_wait(sab: SABnzbd, nzos: dict[str, str]) -> dict[str, tuple[str, dict]]:
                     held = space.GATE("downloads") or ""     # it is waiting on a download
                 except Exception:
                     held = ""
+            if not held:
+                # not moving, and not held by this nzb2seed: SABnzbd's queue may be paused by
+                # someone else - another nzb2seed instance's space guard (one SABnzbd serves
+                # both), or by hand - which would otherwise look like a stalled download
+                held = queue_paused_by_other(sab)
             if held and held != said:
-                warn(f"waiting for disk space - {held}")
+                warn(f"waiting for disk space - {held}" if not held.startswith("SABnzbd's whole queue")
+                     else f"waiting - {held}")
                 said = held
             elif said and not held:
                 info("there is room again - the queue is running")
                 said = ""
             progress(f"{len(out)}/{len(nzos)} done  " + "  ".join(parts)
-                     + (f"  [waiting for disk space: {held}]" if held else ""))
+                     + (f"  [waiting: {held}]" if held else ""))
         if len(out) < len(nzos):
             time.sleep(5)
     end_progress()
@@ -1346,6 +1400,7 @@ def _group_of(name: str) -> str | None:
     # the group is the last bracketed word, after the quality bracket
     m = re.search(r"\[[^\]]+\]\s*\[([A-Za-z][A-Za-z0-9]{1,19})\]\s*(?:\.[A-Za-z0-9]{2,4})?\s*$", s)
     if m and m.group(1).lower() not in _NOT_GROUP and not _RES.search(m.group(1).lower()) \
+            and not re.fullmatch(r"[0-9A-Fa-f]{8}", m.group(1)) \
             and not re.fullmatch(r"(?i)[xh]\.?26[45]|hevc|avc|av1|eng(lish)?|multi|proper|repack|"
                                  r"remux|hdr(10)?|dv|atmos|truehd|dts|aac|eac3|ddp?\d?", m.group(1)):
         return m.group(1).lower()
@@ -1364,7 +1419,23 @@ def _group_of(name: str) -> str | None:
         tok = re.split(r"[-.\s\[\]()]", s[i + 1:].lower())[0]
         if tok and tok not in _NOT_GROUP:
             return tok
+    lead = _leading_group(s)
+    if lead:
+        return lead
     return _group_without_dash(s) if (m_res or m_ep) else None
+
+
+def _leading_group(s: str) -> str | None:
+    """'[Group] Show - S01E02 (WEB 1080p AAC) [2AC53A9D]': the group first, in square
+    brackets, as anime and fansub releases are named. Only a name - '[1 10]' (a poster's
+    part count) or '[1080p]' is not one."""
+    m = re.match(r"\s*\[([A-Za-z][A-Za-z0-9_&.-]{1,24})\]", s)
+    if not m:
+        return None
+    g = m.group(1)
+    if _TECH.match(g) or g.lower() in _NOT_GROUP or _RES.search(g.lower()):
+        return None
+    return g.lower()
 
 
 # tags a release name is made of - never a group's name
@@ -2008,7 +2079,10 @@ def drop_year(show: str) -> str:
 
 def same_show(name: str, show: str) -> bool:
     """Is normalised ``name`` of this show? Its own spelling, or without the year the
-    tracker added - but not with another year: that can be another show (a remake)."""
+    tracker added - but not with another year: that can be another show (a remake). A
+    group or a poster's part count in front ('[grp].show...', "[1.10].'show...") is not
+    part of the title."""
+    name = re.sub(r"^(?:\[[^\]]*\][.\s]*|['\"])+", "", name)
     if name.startswith(show):
         return True
     bare = drop_year(show)
@@ -2786,6 +2860,13 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
                 if settle_small(u, d, nzo):
                     continue
             else:
+                if status in SAB_FAILED and (slot_info or {}).get("fail_message") == LOCKED:
+                    # it never opens: kept as a verdict, so a retry or a restart goes straight
+                    # to the other posts instead of downloading this one again
+                    warn(f"{rel.title} ({rel.indexer}): {LOCKED} - trying the other posts")
+                    verdicts.mark(t.infohash, u.need.label, rel, LOCKED)
+                    advance(u)
+                    continue
                 if status in SAB_FAILED and refetch(u, rel, nzo, slot_info):
                     continue
                 if status in SAB_FAILED:

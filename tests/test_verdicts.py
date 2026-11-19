@@ -128,3 +128,59 @@ def test_a_retry_skips_a_post_the_first_run_found_short(tmp_path):
     second = one_run(2)
     assert "pick2" not in second.fetched                        # not asked for again
     assert "pick1" in second.fetched                            # the good ones still are
+
+
+def test_a_post_locked_with_a_password_is_never_downloaded_again(tmp_path):
+    """SABnzbd pauses E02's picked post: its archives need a password nobody gave. The build
+    takes it out, uses the other post for E02, and remembers - a retry (or a restart) does
+    not ask the indexer for the locked post again."""
+    sys.path.insert(0, os.path.dirname(__file__))
+    import test_retry as tr
+    from nzb2seed.config import Config
+
+    class LockedSAB(tr.SAB):
+        deleted = []
+
+        def status(self, nzo):
+            if nzo not in self.jobs:                                # the earlier run's job
+                return "Unknown", {}
+            if self.jobs[nzo][1] == "pick2":
+                return "Queued:Paused", {"labels": ["ENCRYPTED"], "percentage": "40"}
+            return super().status(nzo)
+
+        def queue_do(self, action, nzo, value2=None):
+            LockedSAB.deleted.append(nzo)
+
+    class CountingPR(tr.PR):
+        def __init__(self, results):
+            super().__init__(results)
+            self.fetched = []
+
+        def fetch(self, r):
+            self.fetched.append(r.guid)
+            return super().fetch(r)
+
+    t, raw, files = tr.pack()
+    size = {i: len(next(v for k, v in files.items() if f"s03e0{i}" in k)) for i in range(1, 5)}
+    grp = {i: "GRPB" if i == 4 else "GRPA" for i in range(1, 5)}
+    picks = [[tr.rel(f"Show.2016.S03E0{i}.720p.HDTV.x264-{grp[i]}", size[i] + 100, f"pick{i}")]
+             for i in range(1, 5)]
+    others = [tr.rel("Show.2016.S03E02.720p.HDTV.x264-GRPA", size[2] + 300, "alt2")]
+    cfg = Config(path=str(tmp_path / "c.toml"), sab_to_local=[["/dl", str(tmp_path / "dl")]],
+                 torrent_dir=str(tmp_path / "torrents"))
+
+    def one_run(n):
+        pr = CountingPR(others)
+        sab = LockedSAB(str(tmp_path / f"dl{n}"), files, set())
+        run_cfg = Config(path=cfg.path, sab_to_local=[["/dl", str(tmp_path / f"dl{n}")]],
+                         torrent_dir=cfg.torrent_dir)
+        pipeline.usenet_multi(run_cfg, pr, sab, t, [list(p) for p in picks], 2, [])
+        return pr
+
+    first = one_run(1)
+    assert "pick2" in first.fetched and "alt2" in first.fetched    # the way forward was taken
+    assert LockedSAB.deleted                                        # the locked job taken out
+    assert pipeline.verdicts_for(cfg).seen(t.infohash, "S03E02", picks[1][0]) == pipeline.LOCKED
+
+    second = one_run(2)
+    assert "pick2" not in second.fetched                            # not downloaded again

@@ -395,11 +395,14 @@ function AutoRemove({ id, on }) {
 
 /* a build waiting for the person to pick an NZB */
 function Question({ id, q }) {
-  const [pick, setPick] = useState(null);
+  // the best match (the question lists them best first) is picked to start with - one press of
+  // the button takes it - so what looks ticked is always what would be downloaded
+  const best = () => { const i = q.choices.findIndex(c => !c.go_on); return i < 0 ? null : i; };
+  const [pick, setPick] = useState(best);
   const [busy, setBusy] = useState(false);
   const [filter, setFilter] = useState("");
   const [how, setHow] = useState(() => remember("asksort", "best"));
-  useEffect(() => { setPick(null); setFilter(""); }, [id, q.prompt]);     // a new question: nothing picked yet
+  useEffect(() => { setPick(best()); setFilter(""); }, [id, q.prompt]);     // a new question
   // filtered and sorted - each keeps its place in the question, which is what the answer names
   // "go on without it" is a choice of its own, not one of the NZBs
   const all = q.choices.map((c, i) => ({ ...c, i }));
@@ -425,7 +428,8 @@ function Question({ id, q }) {
         ${!shown.length && html`<div class="empty">Nothing matches the filter.</div>`}
         ${shown.map(({ i, ...c }) => html`
           <label key=${i} class=${"row" + (pick === i ? " on" : "")}>
-            <input type="radio" name="askpick" aria-label=${c.title} checked=${pick === i} onChange=${() => setPick(i)} />
+            <input type="radio" name=${"askpick-" + id} autocomplete="off" aria-label=${c.title} checked=${pick === i}
+              onChange=${() => setPick(i)} onClick=${() => setPick(i)} />
             <div><div class="title">${c.title}</div>
               <div class="meta"><span>${c.indexer}</span><span>${c.size_text}</span>
                 ${c.publish_date && html`<span>${age(c.publish_date)}</span>`}

@@ -1027,6 +1027,8 @@ class FileFetcher:
                     self.pr.drop(r)
                 job = f"{release}.whole-{len(self.whole_tried)}"
                 nzo = self.sab.add_nzb(data, job, self.cfg.sab_category, PP_REPAIR, self.cfg.sab_priority)
+                # recorded as nzb2seed's own, so the clean-up sweep knows it (never the release's post)
+                ledger_for(self.cfg).record(nzo, job, r.guid, r.indexer, None, part=True)
                 status, slot = sab_wait(self.sab, {nzo: r.title})[nzo]
                 if status not in SAB_DONE:
                     warn(f"SABnzbd could not complete {r.title}")
@@ -1056,7 +1058,7 @@ class FileFetcher:
 
     def __call__(self, release: str, relpath: str, size: int, crc: str, dest: str) -> bool:
         from . import nzbinfo
-        from .pipeline import small_priority, verdicts_for
+        from .pipeline import ledger_for, small_priority, verdicts_for
         self.last_why = None
         name = os.path.basename(relpath)
         tried = (release, relpath.lower())
@@ -1105,6 +1107,7 @@ class FileFetcher:
             info(f"{release}: {name} is in {r.title} ({r.indexer}) - downloading just that file")
             try:
                 nzo = self.sab.add_nzb(trimmed, job, self.cfg.sab_category, PP_REPAIR, small_priority(self.cfg))
+                ledger_for(self.cfg).record(nzo, job, r.guid, r.indexer, None, part=True)   # nzb2seed's own
                 status, slot = sab_wait(self.sab, {nzo: name})[nzo]
                 if status not in SAB_DONE:
                     continue

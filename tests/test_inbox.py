@@ -724,3 +724,23 @@ def test_the_retry_minutes_are_read_leniently():
     from nzb2seed.config import minutes_list
     assert minutes_list("20, 0; 2 2 -5 x 10") == [0, 2, 10, 20]
     assert minutes_list([60, "1.5"]) == [1.5, 60]
+
+
+def test_a_job_cancelled_while_it_waits_stays_stopped(tmp_path, monkeypatch):
+    """Cancelled on the Jobs tab while it waits for its post: the torrent stops for good -
+    the next pass does not start it again - and Try again still can."""
+    app, box, hold = waiting_inbox(tmp_path, monkeypatch)
+    try:
+        h = app.inbox.items()[0]["infohash"]
+        job = app.jobs[app.inbox.running[h]]
+        job.cancel.set()
+        wait(lambda: h not in app.inbox.running)
+        app.inbox.poll()
+        it = app.inbox.state.items[h]
+        assert h not in app.inbox.running and it["status"] == "failed" and it["why"] == "cancelled"
+        assert os.listdir(box / ".failed")                                # where Try again looks
+        app.inbox.retry(h)
+        assert app.inbox.state.items[h]["status"] in ("queued", "waiting", "building")
+    finally:
+        hold.set()
+        clients.SEARCH_GATE = None

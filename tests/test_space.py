@@ -403,3 +403,13 @@ def test_a_download_still_waits_on_staging(monkeypatch):
     slept = []
     space.wait_for_room(step=lambda *_: None, sleep=lambda _: slept.append(1), role="downloads")
     assert len(slept) == 2                             # waited, then went on by itself
+
+
+def test_a_queue_paused_by_someone_else_is_said_on_the_build(monkeypatch):
+    from types import SimpleNamespace
+    from nzb2seed import pipeline
+    pipeline._paused_seen.clear()
+    sab = SimpleNamespace(queue_paused=lambda: True)
+    assert "not by this nzb2seed" in pipeline.queue_paused_by_other(sab)
+    pipeline._paused_seen.clear()
+    assert pipeline.queue_paused_by_other(SimpleNamespace(queue_paused=lambda: False)) == ""
