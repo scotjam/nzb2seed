@@ -424,12 +424,19 @@ def facets(name: str) -> dict:
 def alike(post: str, name: str, episode_of_pack: bool = False) -> bool:
     """Is ``post`` the release ``name`` is, written another way - as a tracker that renames
     releases in its own style ("DD+ 5.1", "iT", spaces) shows it? The same title, year or
-    season, resolution, source, codec and group (a name with no group is never matched
-    this way). ``episode_of_pack``: ``post`` may be one episode of the season ``name`` is."""
+    season, resolution, source, codec and group (pipeline.group_match: a group clear in one
+    name is looked for in the other; with no group to go by on either, the source, codec
+    and audio must be named alike). ``episode_of_pack``: ``post`` may be one episode of the
+    season ``name`` is."""
+    from .pipeline import group_match, group_of
     a, b = facets(post), facets(name)
-    if a["group"] != b["group"] or not b["res"] or a["res"] != b["res"]:
+    no_group = {w.lower() for w in rule("no_group_words")}
+    same_group = group_match(bare(name), post, ignore=no_group)
+    if same_group is False or not b["res"] or a["res"] != b["res"]:
         return False
-    if not b["group"]:
+    if same_group is None and (group_of(post) or "") not in ("", *no_group):
+        return False            # a release with no group is never a post that names one
+    if same_group is None:
         # a release with no group to go by: the source and codec must be named alike on
         # both, and the service of a web release ("Show 1080p" alone says too little)
         if not (a["kind"] and a["kind"] == b["kind"] and a["codec"] and a["codec"] == b["codec"]):

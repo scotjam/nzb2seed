@@ -955,3 +955,47 @@ def test_the_broader_searches_run_only_while_nothing_fits(tmp_path):
     pr = PR()
     assert pipeline.usenet_results(Config(path=str(tmp_path / "c.toml")), pr, need, []) == [post]
     assert pr.asked == ["Some Film 2002 1080p BluRay DTS 5 1 x264 GrE", "some film 2002 1080p gre"]
+
+
+@pytest.mark.parametrize("source,post,same", [
+    ("Film.2002.1080p.BluRay.x264-GrpA", "Film.2002.1080p.BluRay.x264-GrpA", True),
+    ("Film.2002.1080p.BluRay.x264-GrpA", "Film.2002.1080p.BluRay.x264-GrpB", False),
+    # clear on one side only: looked for, as a word of its own, in the other
+    ("Film.2002.1080p.BluRay.x264-GrpA", "Film.2002.1080p.BluRay.DD5.1.x264.GrpA.Repost", True),
+    ("Film 2002 1080p GrpA BluRay x264", "Film.2002.1080p.BluRay.x264-GrpA", True),
+    ("Film 2002 1080p GrpC BluRay x264", "Film.2002.1080p.BluRay.x264-GrpA", False),   # another word there
+    ("Film.2002.1080p.BluRay.x264-GrpA", "Film.2002.1080p.GrpC.BluRay.x264", False),
+    # no dash, after '2.0': not read as a group on its own, but a word where the group stands
+    ("Show.S03E09.1080p.CR.WEB-DL.AAC2.0.H.264.DUAL-GrpA", "Show.2015.S03E09.REPACK.1080p.CR.WEB-DL.H.264.AAC.2.0.GrpF",
+     False),
+    # bare in front of the title, with a CRC where the group usually is: found either way
+    ("Show Name 2026 S01E18 1080p CR WEB-DL AAC2.0 H.264-GrpA",
+     "GrpA Show Name 2026 - S01E18 English Dub CR WEB-DL 1080p H264 AAC 0A1B2C3D", True),
+    ("GrpA Show Name 2026 - S01E18 English Dub CR WEB-DL 1080p H264 AAC 0A1B2C3D",
+     "Show Name 2026 S01E18 1080p CR WEB-DL AAC2.0 H.264-GrpA", True),
+    # a group that is also a word of the title: the title does not count as naming it
+    ("Show Game 2026 S01E18 1080p WEB-DL H.264-Game", "Show Game 2026 S01E18 1080p WEB-DL H.264-GrpB", False),
+    # nothing but tags on one side, or an obfuscated post: cannot tell
+    ("Film.2002.1080p.BluRay.x264", "Film.2002.1080p.BluRay.x264-GrpA", None),
+    ("Film.2002.1080p.BluRay.x264-GrpA", "a8f7d6e5c4b3a2f1", None),
+    ("Film.2002.1080p.BluRay.x264-GrpA", "Film.2002.1080p.BluRay.x264.FRENCH", None),  # a language, not a group
+])
+def test_a_group_clear_on_one_side_is_looked_for_on_the_other(source, post, same):
+    assert pipeline.group_match([source], post) is same
+
+
+def test_a_build_with_an_unclear_group_skips_another_groups_post():
+    t = parse(make_torrent("Film 2002 1080p GrpA BluRay x264",
+                           {"Film 2002 1080p GrpA BluRay x264.mkv": b"x" * 1000}))
+    need = need_for(t, t.name, whole_torrent=True)
+    assert need.group is None                                    # nothing marks it as the group
+    post = lambda title: Release(title, "usenet", "IndexerA", 1, 1100, title, "", "", "", 5, None, None)
+    assert pipeline._fits(need, post("Film.2002.1080p.BluRay.x264-GrpA")) is None
+    assert pipeline._fits(need, post("Film.2002.1080p.BluRay.x264-GrpB")) == "other release group"
+
+
+def test_a_tracker_list_name_and_a_post_are_matched_by_a_group_clear_in_either():
+    from nzb2seed import tracklist
+    assert tracklist.alike("Film.2002.1080p.BluRay.x264-GrpA", "Film 2002 1080p BluRay x264 GrpA")
+    assert not tracklist.alike("Film.2002.1080p.BluRay.x264-GrpB", "Film 2002 1080p BluRay x264 GrpA")
+

@@ -396,8 +396,10 @@ def candidates(s: Season, results: list[clients.Release]) -> list[Pick]:
     """The tracker's single-season packs of this season, best first: the library's own
     release (to link rather than download), then the library's resolution, then the size
     nearest the library's (a remux is not a stand-in for an encode), then most seeders."""
+    from .pipeline import group_match
     shows = s.names()
     grp, res = s.release()
+    names = [os.path.basename(f.path) for f in s.files]
     remux = any(_REMUX.search(os.path.basename(f.path)) for f in s.files)
     out = []
     for r in results:
@@ -406,7 +408,7 @@ def candidates(s: Season, results: list[clients.Release]) -> list[Pick]:
         unsure = pack_season(r.title, shows) != s.season
         if bool(_REMUX.search(r.title)) != remux:
             continue
-        same = bool(grp) and group(r.title) == grp and resolution(r.title) == res
+        same = group_match(names, r.title, grp or None) is True and resolution(r.title) == res
         if unsure and not same:
             continue                    # can only ever be used as the library's own release
         out.append(Pick(r, same, unsure))

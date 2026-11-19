@@ -1404,6 +1404,89 @@ def of_group(name: str, group: str) -> bool:
                           name.strip(), re.I))
 
 
+# words of a release name after its title that are never its group: year, season/episode,
+# numbers, a CRC, and the words an edition, a language or a part is named with
+_NOT_GROUP_WORD = re.compile(
+    r"(?i)^(?:(?:19|20)\d\d|s\d{1,4}(?:e\d{1,4})?|e\d{1,4}|\d+|[0-9a-f]{8}|v\d|sample|proof|extras?|"
+    r"complete|season|series|part|disc|cd\d?|uhd|hdr|sdr|ws|fs|extended|uncut|unrated|directors?|cut|"
+    r"theatrical|remastered|restored|criterion|imax|limited|festival|dubbed|subbed|dual|dub|sub|subs|"
+    r"english|french|truefrench|german|italian|spanish|castellano|latino|nordic|swedish|danish|norwegian|finnish|"
+    r"dutch|polish|russian|japanese|korean|chinese|hindi|portuguese|brazilian|eng|ita|spa|jpn|kor|"
+    r"cr|amzn|nf|dsnp|hmax|max|atvp|pcok|pmtp|hulu|stan|it|ma|bd|bdremux|web|webdl|webrip|nzb|mkv|mp4|avi)$")
+
+
+def _after_title(text: str) -> str:
+    """A release name without its title (and file extension): where its group can be."""
+    text = release_title(text or "")
+    title = name_parts(text)[0]
+    if title:
+        text = re.sub(r"[\s._-]+".join(map(re.escape, title.split())), " ", text, count=1, flags=re.I)
+    return text
+
+
+def names_group(text: str, group: str, of: str = "") -> bool:
+    """Does ``text`` name ``group`` as a word of its own, wherever group_of could not place
+    it: 'Film.2002.1080p.GRP.BluRay.x264', 'Film 2002 1080p GRP BluRay', or bare in front
+    ('GRP Show 2026 - S01E18 ...'). ``of``: the name the group was read from - when the
+    group is also a word of that release's title, only what follows the title counts."""
+    if not group:
+        return False
+    in_title = group.lower() in name_parts(of or text)[0].split()
+    where = _after_title(text) if in_title else release_title(text)
+    return bool(re.search(rf"(?<![A-Za-z0-9]){re.escape(group)}(?![A-Za-z0-9])", where, re.I))
+
+
+def group_words(text: str) -> list[str]:
+    """The words of a release name after its title that none of its tags is: where a group
+    it names unclearly can be. None for a name that only has tags after its title."""
+    return [w for w in re.split(r"[\s._()\[\]{}'\"+,&-]+", _after_title(text))
+            if len(w) > 1 and not _TECH.match(w) and not _RES.search(w.lower())
+            and w.lower() not in _NOT_GROUP and not _NOT_GROUP_WORD.match(w)]
+
+
+def group_match(sources, post: str, known: str | None = None, ignore=()) -> bool | None:
+    """Are ``sources`` (a torrent's names - its own, its files', a search's) and ``post`` (a
+    Usenet post's or another tracker's name) of the same release group? The one place that
+    is decided. Each side's group is read where it is clear (group_of; ``known``: the
+    torrent's, read already) and looked for in the other name as a word of its own, wherever
+    it stands ('...H.264-GRP' and 'GRP Show 2026 - S01E18 ... 0A1B2C3D'): found either way,
+    it is the same group.
+
+    True: the same group. False: another group - neither found in the other, with a group
+    read on both, or read on one and other words on the other where its group would be.
+    None: cannot tell - neither side names a group, or one does and the other has nothing
+    but tags (obfuscated, or no group at all). ``ignore``: words that say there is no group."""
+    sources = [sources] if isinstance(sources, str) else [s for s in sources or [] if s]
+    skip = {w.lower() for w in ignore or ()}
+    read = lambda n: (lambda g: g if g and g not in skip else None)(group_of(n))
+    mine = (known or "").lower() or next((g for g in map(read, sources) if g), None)
+    mine_from = next((s for s in sources if read(s) == mine), sources[0] if sources else "")
+    theirs = read(post)
+    # each side's group, wherever it is clear, looked for in the other - either found is a match
+    if mine and (mine == theirs or of_group(post, mine) or names_group(post, mine, of=mine_from)):
+        return True
+    if theirs and any(names_group(s, theirs, of=post) for s in sources):
+        return True
+    if mine and theirs:
+        return False
+    if mine:
+        return False if [w for w in group_words(post) if w.lower() not in skip] else None
+    if theirs:
+        return False if any(w.lower() not in skip for s in sources for w in group_words(s)) else None
+    return None
+
+
+def group_reason(need: "Need", title: str) -> str | None:
+    """Why ``title``'s group rules it out for ``need`` (None: it does not). A build that
+    knows its torrent's group never takes a post that does not show it."""
+    v = group_match(need.source, title, need.group)
+    if v is False:
+        return "other release group"
+    if v is None and need.group:
+        return "no release group in its name"
+    return None
+
+
 def _group_of(name: str) -> str | None:
     """Release group: the first real dash-token after the episode/resolution part, where a
     scene dash has no spaces around it and tech tags like WEB-DL are skipped.
@@ -1446,7 +1529,7 @@ def _group_of(name: str) -> str | None:
                 (s[i - 1] in "._" and s[i + 1] in "._"):
             continue                                     # ' - Heat B' (or '.-.'): a description, not a group
         tok = re.split(r"[-.\s\[\]()]", s[i + 1:].lower())[0]
-        if tok and tok not in _NOT_GROUP:
+        if tok and tok not in _NOT_GROUP and not _TECH.match(tok):     # '-AAC2.0.x264': a tag, not a group
             return tok
     lead = _leading_group(s)
     if lead:
@@ -1485,7 +1568,8 @@ def _group_without_dash(s: str) -> str | None:
     s = re.sub(r"(?i)(?:\.(?:mkv|mp4|m4v|avi|nzb))?(?:-x?(?:post|repo))?\s*$", "", s.strip())
 
     def ok(g):
-        return g and not _TECH.match(g) and g.lower() not in _NOT_GROUP and not _RES.search(g.lower())
+        return g and not _TECH.match(g) and g.lower() not in _NOT_GROUP and not _RES.search(g.lower()) \
+            and not _NOT_GROUP_WORD.match(g)            # 'FRENCH', 'EXTENDED': not a group either
 
     m = re.search(r"\)\s*\[" + _GROUPWORD + r"\]$", s)                    # (...)[Grpc]
     if m and ok(m.group(1)):
@@ -1521,6 +1605,7 @@ class Need:
     seasons: list = dataclasses.field(default_factory=list)   # for a multi-season whole
     more: list = dataclasses.field(default_factory=list)      # searched with ``query``, always
     broad: list = dataclasses.field(default_factory=list)     # searched in turn while nothing fits
+    source: list = dataclasses.field(default_factory=list)    # the torrent's names (see group_match)
 
 
 _FILE_EXT = re.compile(r"\.(mkv|mp4|m4v|avi|m2ts|ts|wmv|mov|iso|mpg|mpeg|webm)$", re.I)
@@ -1851,7 +1936,8 @@ def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
         always, broad = usenet_queries(title, group, res.group(0) if res else None)
     return Need(label=ep_tok.upper() if ep_tok else release_title(t.name), query=always[0],
                 group=group, res=res.group(0) if res else None, ep=ep_tok,
-                min_size=min_size, target=target, more=always[1:], broad=broad)
+                min_size=min_size, target=target, more=always[1:], broad=broad,
+                source=list(dict.fromkeys([t.name, title, target])))
 
 
 def _fits(need: Need, r: Release) -> str | None:
@@ -1872,8 +1958,9 @@ def _fits(need: Need, r: Release) -> str | None:
             return "single season"
     if need.res and need.res not in _RES.findall(n):
         return "other resolution" if _RES.findall(n) else "no resolution in its name"
-    if need.group and not of_group(r.title, need.group):
-        return "other release group" if group_of(r.title) else "no release group in its name"
+    why = group_reason(need, r.title)
+    if why:
+        return why
     if other_codec(need.target, r.title):
         return "other codec"
     if r.size < need.min_size:
@@ -2004,8 +2091,8 @@ def size_verdict(need: Need, r: Release) -> tuple[str, bool]:
 def could_be(need: Need, r: Release) -> bool:
     """Could ``r`` be the post by its name: not another release group, resolution or codec
     than the torrent's file (a name that shows none of these - obfuscated - may be it)."""
-    group, res = group_of(r.title), _RES.findall(matching.norm(r.title))
-    return (not need.group or not group or of_group(r.title, need.group)) and \
+    res = _RES.findall(matching.norm(r.title))
+    return group_reason(need, r.title) != "other release group" and \
         (not need.res or not res or need.res in res) and not other_codec(need.target, r.title)
 
 
@@ -2069,7 +2156,7 @@ def used_before(cfg: Config, need: "Need") -> list[Release]:
         n = matching.norm(title)
         if need.ep and not re.search(rf"(?<![a-z0-9]){need.ep}(?![0-9])", n):
             continue
-        if need.group and not of_group(title, need.group):
+        if group_reason(need, title):
             continue
         out.append(Release(title, "usenet", j.get("indexer", ""), 0, j.get("size") or 0,
                            j.get("guid") or j.get("nzo", ""), "", "", "", 0, None, None))
@@ -2126,7 +2213,9 @@ class Unit:
         self.need = Need(label=label, query=always[0], group=group,
                          res=r, ep=ep, min_size=sum(f.length for f in files),
                          target=main.name, level=level, season=season, show=show,
-                         seasons=seasons or [], more=always[1:], broad=broad)
+                         seasons=seasons or [], more=always[1:], broad=broad,
+                         # a pack of several groups' episodes: no one group to look for
+                         source=[] if self.mixed else list(dict.fromkeys([t.name, title, main.name])))
 
     # the interface bad-piece repair and next_post() rely on
     @property
@@ -2358,7 +2447,8 @@ def plan_and_fetch(cfg: Config, opts: Options, pr: Prowlarr, sab: SABnzbd, t: To
     # the person's picks go to the unit whose kind they are
     for p in picks:
         target = next((u for u in sorted(units, key=lambda u: {"episode": 0, "season": 1, "whole": 2}[u.level])
-                       if _fits(dataclasses.replace(u.need, min_size=0, group=None), p) is None), root)
+                       if _fits(dataclasses.replace(u.need, min_size=0, group=None, source=[]), p) is None),
+                      root)                     # a pick is taken whatever its group
         target.seeded.append(p)
 
     dirs: list[str] = []
