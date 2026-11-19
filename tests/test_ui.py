@@ -32,6 +32,8 @@ SCENARIOS = ["jobs", "job", "build", "auto", "demand", "settings", "seasons", "a
 INTENDED = [
     # Settings: how long downloads of failed builds are kept, in hours
     (re.compile(r"Delete downloads of failed or dropped builds after \(hours\) (?:\[[^\]]*\] )?"), ""),
+    # Settings: cross-seed's address, for cross-seeding a release built for one tracker on another
+    (re.compile(r"cross-seed Optional\. With it, a release nzb2seed built.*?cross-seed prints it with: cross-seed api-key ?"), ""),
     # Settings: an Advanced section, with the tick that switches mend off
     (re.compile(r"Advanced (?:\[[x ]\] )?Disable mend \(.*?ticked always add\) ?"), ""),
     # a Pause / Resume button above the jobs list
@@ -158,7 +160,7 @@ INTENDED = [
 ]
 
 
-NEW_SETTINGS = {"skip_unposted", "max_age_days", "nearly_limits", "retry_at"}
+NEW_SETTINGS = {"skip_unposted", "max_age_days", "nearly_limits", "retry_at", "cross_seed"}
 OLD_SETTINGS = {"wait_hours", "retry_minutes", "retry_first_minutes"}     # replaced by retry_at          # settings the new page sends that the classic one had not
 
 

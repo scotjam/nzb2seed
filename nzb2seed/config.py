@@ -97,6 +97,8 @@ class Config:
     auto_searches_per_hour: int = 40   # Prowlarr searches automatic builds may make per hour
     autobrr_url: str = ""
     autobrr_key: str = ""
+    cross_seed_url: str = ""      # cross-seed's daemon: a release built for one tracker cross-seeded on another
+    cross_seed_key: str = ""
     # the Library tab: seed the TV library from one tracker, or several in order (see library.py)
     library_enabled: bool = False
     library_indexer: str = ""          # one tracker: the Prowlarr torrent indexer every season pack comes from
@@ -204,6 +206,8 @@ LAYOUT = [
     ("library", "hook_url", "library_hook_url"),
     ("autobrr", "url", "autobrr_url"),
     ("autobrr", "api_key", "autobrr_key"),
+    ("cross_seed", "url", "cross_seed_url"),
+    ("cross_seed", "api_key", "cross_seed_key"),
     ("gui", "username", "gui_username"),
     ("gui", "password", "gui_password"),
 ]

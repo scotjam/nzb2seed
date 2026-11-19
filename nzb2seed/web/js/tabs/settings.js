@@ -170,6 +170,11 @@ export function SettingsTab({ active }) {
         ${C("qbittorrent.start_when_complete", "Start seeding automatically after a 100% recheck")}
       </fieldset>
       <hr />
+      <fieldset><legend>cross-seed</legend>
+        <p class="status" style="margin:0">Optional. With it, a release nzb2seed built for one tracker can be cross-seeded on another from the Build tab: cross-seed adds that tracker's torrent onto the files already seeding, and nothing is downloaded.</p>
+        ${two(T("cross_seed.url", "URL", { placeholder: "http://nas.local:2468" }), P("cross_seed.api_key", "API key", {}, "cross-seed prints it with: cross-seed api-key"))}
+      </fieldset>
+      <hr />
       <fieldset><legend>Folders</legend>
         <p class="status" style="margin:0">SABnzbd, this machine and qBittorrent can see the same folder under different names (Docker, network shares). Translate the start of each path; the longest match wins.</p>
         <${Maps} label="SABnzbd path → path on this machine" rows=${maps.sab} set=${(sab) => setMaps({ ...maps, sab })} />
@@ -272,6 +277,7 @@ const FIELDS = [
   ["sabnzbd.url"], ["sabnzbd.api_key"], ["sabnzbd.category"], ["sabnzbd.priority", "int"], ["sabnzbd.delete_history", "bool"],
   ["qbittorrent.url"], ["qbittorrent.category"], ["qbittorrent.username"], ["qbittorrent.password"],
   ["qbittorrent.tags", "strs"], ["qbittorrent.file_owner"], ["qbittorrent.start_when_complete", "bool"],
+  ["cross_seed.url"], ["cross_seed.api_key"],
   ["paths.output_dir"], ["paths.torrent_dir"], ["flaresolverr.url"], ["network.proxy"],
   ["gui.username"], ["gui.password"],
   ["behaviour.post_processing"], ["behaviour.cleanup", "bool"], ["behaviour.local_verify", "bool"], ["behaviour.season_packing"],

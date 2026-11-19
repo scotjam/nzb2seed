@@ -54,7 +54,7 @@ function blockedFor(t, all) {
 
 const fresh = () => ({
   torrents: [], usenet: [], chosen: new Map(), editing: null, pairing: false, starting: false,
-  searched: false, autoFilter: "", tfilter: "", tgroup: "", ufilter: "", earlier: [],
+  searched: false, autoFilter: "", tfilter: "", tgroup: "", ufilter: "", earlier: [], offer: null,
   tview: "digest", dsort: remember("dsort", "auto"),
   // what the torrent results show: by default only whole seasons or films, and only those
   // Usenet has the same release group, resolution and season of - untick for everything
@@ -98,7 +98,10 @@ export function BuildTab({ active }) {
     s.ufilter = want; s.autoFilter = want;
   };
   const loadEarlier = async (t) => {
-    s.earlier = []; redraw();
+    s.earlier = []; s.offer = null; redraw();
+    api("/api/cross_seed/offer", { torrent: t })          // built for another tracker already?
+      .then(r => { if (s.editing === t) { s.offer = r.offer && { ...r.offer, torrent: t }; redraw(); } })
+      .catch(() => {});                                    // a convenience: never blocks building
     try {
       const r = await api("/api/previous", { title: t.title });
       if (s.editing !== t) return;
@@ -163,12 +166,18 @@ export function BuildTab({ active }) {
     s.upload = "Reading…"; redraw();
     try {
       const { torrent } = await api("/api/upload_torrent", { torrent_b64: await fileB64(f), torrent_name: f.name });
-      s.upload = "Searching Usenet…"; redraw();
+      // built already for another tracker and seeding: cross-seed it instead - Usenet is
+      // searched only if you ask, or cross-seed finds the files are not this release
+      let offer = null;
+      try { offer = (await api("/api/cross_seed/offer", { torrent })).offer; } catch { /* searched as usual */ }
       let usenet = [];
-      try { usenet = (await api("/api/search", { query: torrent.title, protocol: "usenet" })).usenet; }
-      catch (err) { toast("Usenet search failed: " + err.message + ". The build can still find NZBs itself."); }
+      if (!offer?.job) {
+        s.upload = "Searching Usenet…"; redraw();
+        try { usenet = (await api("/api/search", { query: torrent.title, protocol: "usenet" })).usenet; }
+        catch (err) { toast("Usenet search failed: " + err.message + ". The build can still find NZBs itself."); }
+      }
       Object.assign(s, { torrents: [torrent], usenet, chosen: new Map(), editing: null, tfilter: "", tgroup: "", ufilter: "",
-                         autoFilter: "", earlier: [], searched: true });
+                         autoFilter: "", earlier: [], searched: true, held: offer?.job ? torrent.guid : "" });
       queryRef.current.value = torrent.title;
       selectTorrent(torrent);
     } catch (err) { toast("Could not use that file: " + err.message); }
@@ -178,6 +187,7 @@ export function BuildTab({ active }) {
     e.preventDefault();
     const query = s.ufilter.trim();
     if (!query) return;
+    s.held = "";                               // searched now: no longer held for cross-seed
     s.finding = true; redraw();
     try {
       const r = await api("/api/search", { query, protocol: "usenet" });
@@ -328,6 +338,8 @@ export function BuildTab({ active }) {
         <div class="side usenet">
           <div class="head"><h2>Usenet</h2><span class="right"><small>${s.usenet.length} found</small>
             <${SortSelect} label="Sort NZBs" value=${s.usort} onChange=${sortChange("usort")} /></span></div>
+          ${s.offer && s.offer.torrent === s.editing && html`<${CrossSeedOffer} offer=${s.offer} redraw=${redraw} held=${!!s.held && s.held === s.editing?.guid}
+            searchUsenet=${() => { s.ufilter = s.ufilter.trim() || s.editing.title; findMore({ preventDefault() {} }); }} />`}
           ${how && html`<div class="hint">${how}</div>`}
           <form class="filter findrow" onSubmit=${findMore}>
             <input type="text" placeholder="Filter, or search Usenet for other NZBs" aria-label="Filter NZBs, or search Usenet"
@@ -363,6 +375,33 @@ function ReleaseRow({ r, kind, on, extra, onPick, onRowClick }) {
       <div><div class="title">${kind === "torrent" ? pageLink(r, r.title) : r.title}</div>
         <div class="meta">${meta.map(m => html`<span>${m}</span>`)}${extra}</div></div>
     </label>`;
+}
+
+function CrossSeedOffer({ offer, redraw, held, searchUsenet }) {
+  // a release already built for another tracker: cross-seed adds this tracker's torrent onto
+  // those files instead of building it again from Usenet
+  if (offer.why) return html`<div class="hint">Built for another tracker already, but it cannot be cross-seeded: ${offer.why}.</div>`;
+  const said = { added: "cross-seed added it onto the files already seeding - it starts or not as cross-seed is set up to.",
+    incomplete: "cross-seed saved it, but the files here are not complete, so it was not added.",
+    "no match": "cross-seed found the files here are not this release - build it from Usenet instead." };
+  async function go() {
+    offer.busy = true; offer.done = ""; redraw();
+    try {
+      const r = await api("/api/cross_seed/add", { torrent: offer.torrent });
+      offer.done = said[r.result] || r.result;
+      if (held && r.result !== "added") searchUsenet();     // not cross-seeded after all: find its NZBs
+    } catch (err) {
+      offer.done = "cross-seed could not do it: " + err.message;
+      if (held) searchUsenet();
+    } finally { offer.busy = false; redraw(); }
+  }
+  return html`<div class="hint">Already built for <b>${offer.tracker || "another tracker"}</b> (job ${offer.job}) and seeding at 100%.
+    cross-seed can add this ${offer.for_tracker || offer.torrent.indexer} torrent onto those files - nothing is downloaded.
+    <div style="margin-top:6px"><button type="button" class="btn" disabled=${offer.busy || !!offer.done} onClick=${go}>
+      ${offer.busy ? "Asking cross-seed…" : "Cross-seed it"}</button>
+      ${offer.done && html` <span class="status">${offer.done}</span>`}</div>
+    ${held && !offer.done && html`<div style="margin-top:6px"><small>Usenet was not searched for it, to save API calls -
+      “Search Usenet” below does, and it is searched by itself if cross-seed cannot add it.</small></div>`}</div>`;
 }
 
 function Earlier({ list }) {

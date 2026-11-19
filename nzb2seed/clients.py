@@ -171,6 +171,33 @@ class Prowlarr:
         raise ApiError("too many redirects while downloading release")
 
 
+class CrossSeed:
+    """cross-seed's daemon: its announce API, the one autobrr uses - given one torrent's name
+    and download link, it checks whether that release's data is here already and, if so,
+    adds the torrent onto it (as cross-seed is set up to: linked, injected, started or not)."""
+
+    def __init__(self, url: str, key: str):
+        self.url, self.key = (url or "").rstrip("/"), key or ""
+
+    def announce(self, name: str, link: str, tracker: str) -> str:
+        """Announce one torrent: cross-seed fetches its .torrent from ``link`` (Prowlarr's,
+        or nzb2seed's own for an uploaded one - nothing from the tracker by nzb2seed). What
+        cross-seed did: "added" (injected, or saved for its client), "incomplete" (saved,
+        but the data here is not complete), or "no match" (the files here are not that release)."""
+        try:
+            r = requests.post(f"{self.url}/api/announce", timeout=600, headers={"X-Api-Key": self.key},
+                              json={"name": name, "guid": link, "link": link, "tracker": tracker})
+        except requests.RequestException as e:
+            raise ApiError(f"cross-seed cannot be reached: {e}") from None
+        if r.status_code == 200:
+            return "added"
+        if r.status_code == 202:
+            return "incomplete"
+        if r.status_code == 204:
+            return "no match"
+        raise ApiError(f"cross-seed answered {r.status_code}: {(r.text or '').strip()[:300]}")
+
+
 def tracker_tag(tracker: str, torrent_bytes: bytes = b"") -> str:
     """The tag on every torrent nzb2seed adds to qBittorrent: "<tracker>.nzb2seed" - the
     tracker as Prowlarr names it, without "(API)" ("ExampleTracker.nzb2seed"), else the site the

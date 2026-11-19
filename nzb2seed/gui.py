@@ -747,6 +747,77 @@ class App:
         return bool(want) and any(self.tracker_key(t) == want
                                   for t in (self.cfg.nearly_auto_trackers or []))
 
+    def cross_seed_offer(self, torrent: Release) -> dict | None:
+        """The release this tracker's torrent is, built already for another tracker and
+        seeding at 100% - which cross-seed can add this torrent onto, nothing downloaded:
+        {"job", "tracker", "infohash"}, {"why"} when it was built but cannot be offered, or
+        None (never built, built for this tracker, or cross-seed not set up in Settings)."""
+        from . import matching
+        from .config import tracker_key
+        from .pipeline import release_title
+        uploaded = str(torrent.guid).startswith(UPLOAD_PREFIX)
+        if not self.cfg.cross_seed_url or str(torrent.guid).startswith("file:") \
+                or not (uploaded or (torrent.indexer and torrent.download_url)):
+            return None
+        want = matching.norm(release_title(torrent.title))
+        built = [j for j in sorted(self.jobs.values(), key=lambda j: -j.id)
+                 if j.kind == "build" and j.status == "done" and j.infohash
+                 and matching.norm(release_title(j.title)) == want]
+        if not built:
+            return None                                 # never built
+        tracker = self.torrent_tracker(torrent)
+        if not tracker:
+            return {"why": f"built already (job {built[0].id}), but which tracker this .torrent "
+                           "is from cannot be told from its announce address"}
+        if any(tracker_key(j.tracker_name()) == tracker_key(tracker) for j in built):
+            return None                                 # built for this tracker
+        try:
+            qb = self._qbit()
+            seeding = next((j for j in built if qb and (qb.info(j.infohash) or {}).get("progress", 0) >= 1), None)
+        except (ApiError, OSError):
+            return {"why": "qBittorrent cannot be reached to see whether the earlier build is seeding"}
+        if seeding is None:
+            return {"why": f"built already (job {built[0].id}), but that torrent is not in qBittorrent at 100%"}
+        return {"job": seeding.id, "tracker": seeding.tracker_name(), "infohash": seeding.infohash,
+                "for_tracker": tracker}
+
+    def torrent_tracker(self, torrent: Release) -> str:
+        """The tracker a torrent picked on the Build tab is from: Prowlarr's indexer for a
+        search result; for an uploaded .torrent, the one it announces to ("" unknown)."""
+        if not str(torrent.guid).startswith(UPLOAD_PREFIX):
+            return torrent.indexer or ""
+        try:
+            t = parse_torrent(uploaded_data(self.cfg, torrent))
+        except (ValueError, TorrentError):
+            return ""
+        return pipeline_mod.tracker_name(t.trackers, self.prowlarr())
+
+    def cross_seed_link(self, torrent: Release, base: str) -> str:
+        """Where cross-seed can fetch the torrent from: Prowlarr's link, or - for an uploaded
+        .torrent - a one-off address of nzb2seed's own (no login: cross-seed has none to
+        give; a random token, from the LAN only, for ten minutes)."""
+        if not str(torrent.guid).startswith(UPLOAD_PREFIX):
+            return torrent.download_url
+        import secrets
+        links = self.__dict__.setdefault("_cross_seed_links", {})
+        now = time.time()
+        for k in [k for k, (_, until) in links.items() if until < now]:
+            del links[k]
+        token = secrets.token_urlsafe(24)
+        links[token] = (torrent.guid[len(UPLOAD_PREFIX):], now + 600)
+        return f"{base.rstrip('/')}/api/cross_seed/torrent/{token}.torrent"
+
+    def cross_seed_torrent(self, token: str) -> bytes | None:
+        """The uploaded .torrent a cross_seed_link names, while it is still good."""
+        h, until = self.__dict__.get("_cross_seed_links", {}).get(token, ("", 0))
+        if not h or until < time.time():
+            return None
+        try:
+            with open(_upload_path(self.cfg, h), "rb") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
     def find_other_trackers(self, job: "Job") -> tuple[str, int | None, list[dict]]:
         """The same release on your other trackers, best first (pre-approved, same files,
         seeders). Prowlarr is asked; no tracker is contacted by nzb2seed. Kept on the job:
@@ -1883,6 +1954,11 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
         def do_GET(self):
             if urlsplit(self.path).path == "/api/hook/finished":
                 return self.hook_call()
+            m = re.fullmatch(r"/api/cross_seed/torrent/([\w-]+)\.torrent", urlsplit(self.path).path)
+            if m:       # cross-seed fetching an uploaded .torrent: no login, a one-off token
+                data = app.cross_seed_torrent(m.group(1)) if _is_local_client(self.client_address[0]) else None
+                return self._send(200, data, "application/x-bittorrent") if data \
+                    else self._send(404, b"not found", "text/plain")
             if not self._guard():
                 return
             path = urlsplit(self.path).path
@@ -2210,6 +2286,10 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
                 if path == "/api/previous":
                     sab = SABnzbd(app.cfg.sab_url, app.cfg.sab_key)
                     return self._json({"previous": previous_downloads(app.cfg, sab, body.get("title") or "")})
+                if path == "/api/cross_seed/offer":
+                    return self._json({"offer": app.cross_seed_offer(_rel(body["torrent"]))})
+                if path == "/api/cross_seed/add":
+                    return self.cross_seed_add(body)
                 if path == "/api/build":
                     return self.build(body)
                 if path == "/api/upload_torrent":
@@ -2864,6 +2944,22 @@ def make_handler(app: App, login_override: tuple[str, str] | None, allowed_hosts
             groups, nzbs, how = pair(app.cfg, pr, torrent, nzbs)
             return self._json({"groups": [[n.guid for n in g] for g in groups],
                                "usenet": [dataclasses.asdict(n) for n in nzbs], "how": how})
+
+        def cross_seed_add(self, body):
+            """The Build tab's "Cross-seed it": this tracker's torrent announced to cross-seed,
+            which fetches its .torrent from Prowlarr and adds it onto the earlier build's files."""
+            from .clients import CrossSeed
+            torrent = _rel(body["torrent"])
+            offer = app.cross_seed_offer(torrent)
+            if not offer or "job" not in offer:
+                return self._err((offer or {}).get("why") or "there is no earlier build of it to cross-seed", 409)
+            base = "http://" + (self.headers.get("Host") or f"127.0.0.1:{self.server.server_address[1]}")
+            try:
+                done = CrossSeed(app.cfg.cross_seed_url, app.cfg.cross_seed_key).announce(
+                    torrent.title, app.cross_seed_link(torrent, base), offer["for_tracker"])
+            except ApiError as e:
+                return self._err(str(e), 502)
+            return self._json({"result": done, "from_job": offer["job"]})
 
         def build(self, body):
             torrent = _rel(body["torrent"])
