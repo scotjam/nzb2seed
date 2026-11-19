@@ -72,7 +72,9 @@ def test_need_for_an_episode_of_a_pack():
     need = need_for(t, "Show.2016.S03E02.720p.HDTV.x264-GRPA-xRePo", whole_torrent=False)
     assert need.ep == "s03e02" and need.group == "grpa" and need.res == "720p"
     assert need.min_size == len(files["show.2016.s03e02.720p.hdtv.x264-grpa.mkv"])
-    assert need.query == "show 2016 s03e02"
+    # the episode, its resolution and its group - then, while nothing fits, the show and episode alone
+    assert need.query == "show s03e02 720p grpa"
+    assert need.broad == ["show s03e02 720p", "show s03e02"]
     # E04 is GRPB in the torrent: that is the group an E04 replacement must come from
     assert need_for(t, "Show.2016.S03E04.720p.HDTV.x264-GRPA", False).group == "grpb"
 
@@ -644,7 +646,8 @@ def test_a_season_with_a_year_in_its_name_searches_without_it():
     t = parse(make_torrent("Show (2004) S06 Bluray 1080p x265-GRPI",
                            {f"Show.S06E0{i}.1080p.Bluray.x265-GRPI.mkv": b"x" * (1000 + i) for i in (1, 2)}))
     root = pipeline.build_units(t, t.name)
-    assert root.need.query == "show  s06" and "2004" not in root.children[0].need.query
+    assert root.need.query == "show s06 1080p grpi" and "2004" not in root.children[0].need.query
+    assert "2004" not in " ".join(root.need.broad)
     assert pipeline.drop_year("1890.") == "1890."                 # a title that is a year stays
 
 
@@ -911,3 +914,44 @@ def test_a_group_in_front_is_another_groups_post_not_an_obfuscated_one():
     assert same_show(matching.norm("[1 10] 'Oldfilm.1992.720p.MAX.WEB-DL-QzW.mkv'"), "oldfilm.1992")
     assert group_of("[Fansuba] Glow Party - S01E02 (WEB 1080p AAC) [2AC53A9D]") != "xiqma"
 
+
+@pytest.mark.parametrize("name,group", [
+    ("Some.Film.2002.1080p.BluRay.DTS.5.1.x264.-.GrE.mkv", "gre"),     # the scene dash spaced out
+    ("[tracker.example] Some Film 2002 1080p BluRay DTS x264 - GrE", "gre"),
+    ("[tracker.example] Film 2002 1080p BluRay x264", None),                  # a tracker's tag is no group
+    ("Show S03 - Heat B", None),                                           # a description, not a group
+])
+def test_a_spaced_out_dash_and_a_trackers_tag(name, group):
+    assert pipeline.group_of(name) == group
+
+
+def test_a_release_is_searched_by_what_makes_it_not_only_by_its_whole_name():
+    # the torrent says DTS.5.1, every post says DD5.1: an indexer matches every word, so the
+    # whole name finds nothing - title, year, resolution and group find the group's posts
+    always, broad = pipeline.usenet_queries("Some.Film.2002.1080p.BluRay.DTS.5.1.x264.-.GrE.mkv",
+                                            "gre", "1080p")
+    assert always == ["Some Film 2002 1080p BluRay DTS 5 1 x264 GrE", "some film 2002 1080p gre"]
+    assert broad == ["some film 1080p gre", "some film 2002 1080p"]
+    assert pipeline.name_parts("1890.2019.2160p.UHD.BluRay.x265-GRP") == ("1890", "2019", None)
+
+
+def test_the_broader_searches_run_only_while_nothing_fits(tmp_path):
+    post = Release("Some.Film.2002.1080p.BluRay.DD5.1.x264-GrE", "usenet", "IndexerA", 1, 1100, "g1",
+                   "", "", "", 5, None, None)
+
+    class PR:
+        asked = []
+
+        def usenet_ids(self):
+            return [1]
+
+        def search(self, q, *a):
+            self.asked.append(q)
+            return [post] if q == "some film 2002 1080p gre" else []
+    t = parse(make_torrent("Some.Film.2002.1080p.BluRay.DTS.5.1.x264.-.GrE.mkv",
+                           {"Some.Film.2002.1080p.BluRay.DTS.5.1.x264.-.GrE.mkv": b"x" * 1000}))
+    need = pipeline.need_for(t, t.name, whole_torrent=True)
+    assert need.group == "gre"
+    pr = PR()
+    assert pipeline.usenet_results(Config(path=str(tmp_path / "c.toml")), pr, need, []) == [post]
+    assert pr.asked == ["Some Film 2002 1080p BluRay DTS 5 1 x264 GrE", "some film 2002 1080p gre"]

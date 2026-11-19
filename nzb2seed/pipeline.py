@@ -128,7 +128,7 @@ def search(cfg: Config, query: str, trackers: list[str] | None = None,
             seen = {r.guid for r in nzbs}
             nzbs += [r for r in pr.search(bare, usenet_indexers(cfg, pr), cfg.categories)
                      if r.protocol == "usenet" and r.guid not in seen]
-        return [r for r in results if r.protocol == "torrent"], nzbs
+        return [r for r in results if r.protocol == "torrent"], _also_by_parts(cfg, pr, bare, nzbs)
     found: list[Release] = []
     if torrents:
         by_name = {n.strip().lower(): i for i, n in pr.indexers() if n}
@@ -138,7 +138,28 @@ def search(cfg: Config, query: str, trackers: list[str] | None = None,
         found = [r for r in pr.search(query, ids, cfg.categories) if r.protocol == "torrent"]
     usenet = usenet_indexers(cfg, pr)
     nzbs = [r for r in pr.search(bare, usenet, cfg.categories) if r.protocol == "usenet"]
-    return found, nzbs
+    return found, _also_by_parts(cfg, pr, bare, nzbs)
+
+
+def _also_by_parts(cfg: Config, pr, query: str, nzbs: list[Release]) -> list[Release]:
+    """A search that is a release name ("Film.2002.1080p.BluRay.DTS.5.1.x264.-.GrE") is also
+    searched by what makes the release (usenet_queries): its posts are often written a little
+    differently, and an indexer matches every word. Not for search text typed as words - that
+    is searched as it is. The broader searches only when still nothing was found."""
+    group, res = group_of(query), _RES.search(matching.norm(query))
+    if not group or not res:
+        return nzbs
+    always, broad = usenet_queries(query, group, res.group(0))
+    seen = {r.guid for r in nzbs}
+    ids = usenet_indexers(cfg, pr)
+    for q in always[1:] + broad:
+        if q in broad and nzbs:
+            break
+        for r in pr.search(q, ids, cfg.categories):
+            if r.protocol == "usenet" and r.guid not in seen:
+                seen.add(r.guid)
+                nzbs.append(r)
+    return nzbs
 
 
 _FILE_EXT = re.compile(r"\.(?:mkv|mp4|avi|m4v|ts|m2ts|wmv|iso|torrent|nzb)$", re.I)
@@ -1404,6 +1425,14 @@ def _group_of(name: str) -> str | None:
             and not re.fullmatch(r"(?i)[xh]\.?26[45]|hevc|avc|av1|eng(lish)?|multi|proper|repack|"
                                  r"remux|hdr(10)?|dv|atmos|truehd|dts|aac|eac3|ddp?\d?", m.group(1)):
         return m.group(1).lower()
+    # "Film.2002.1080p.BluRay.DTS.5.1.x264.-.GrE.mkv", "... BluRay DTS x264 - GrE": a tracker
+    # spacing out the scene dash - the last word, straight after a tech tag, is the group
+    # (a spaced dash elsewhere is a description: 'Show S03 - Heat B')
+    m = re.search(r"(?:^|[\s._])([^\s._]+)[\s._]+-[\s._]+([A-Za-z][A-Za-z0-9]{1,19})"
+                  r"\s*(?:\.(?:mkv|mp4|m4v|avi|ts|m2ts|wmv|mov|iso))?\s*$", s, re.I)
+    if m and (_TECH.match(m.group(1)) or _RES.search(m.group(1).lower())) \
+            and m.group(2).lower() not in _NOT_GROUP and not _TECH.match(m.group(2)):
+        return m.group(2).lower()
     m_res, m_ep = _RES.search(matching.norm(s)), _EP.search(matching.norm(s))
     # find the anchor in the raw name (norm only swaps separators, so positions line up)
     anchor = 0
@@ -1435,6 +1464,8 @@ def _leading_group(s: str) -> str | None:
     g = m.group(1)
     if _TECH.match(g) or g.lower() in _NOT_GROUP or _RES.search(g.lower()):
         return None
+    if re.search(r"\.[A-Za-z]{2,10}$", g) or g.lower().startswith("www."):
+        return None                 # '[tracker.example] Film ...': the tracker's tag, not a group
     return g.lower()
 
 
@@ -1488,6 +1519,8 @@ class Need:
     season: int | None = None
     show: str = ""                  # normalised title prefix every fitting NZB starts with
     seasons: list = dataclasses.field(default_factory=list)   # for a multi-season whole
+    more: list = dataclasses.field(default_factory=list)      # searched with ``query``, always
+    broad: list = dataclasses.field(default_factory=list)     # searched in turn while nothing fits
 
 
 _FILE_EXT = re.compile(r"\.(mkv|mp4|m4v|avi|m2ts|ts|wmv|mov|iso|mpg|mpeg|webm)$", re.I)
@@ -1722,6 +1755,65 @@ def release_title(name: str) -> str:
     return _FILE_EXT.sub("", (name or "").strip())
 
 
+# where a release name's title ends: its year, season/episode, resolution or a source/codec tag
+_TITLE_END = re.compile(r"(?<![a-z0-9])(?:(?:19|20)\d\d|s\d{1,4}(?:e\d{1,4})?|(?:480|576|720|1080|2160)[pi]"
+                        r"|web(?:-?dl|rip)?|blu-?ray|bdrip|brrip|dvdrip|hdtv|remux|uhd|x26[45]|h\.?26[45]|hevc)"
+                        r"(?![a-z0-9])")
+_SE_TOKEN = re.compile(r"s\d{1,4}(?:e\d{1,4})?")
+
+
+def _words(s: str) -> str:
+    return re.sub(r"[\s._()\[\]-]+", " ", s or "").strip()
+
+
+def name_parts(name: str) -> tuple[str, str | None, str | None]:
+    """(title, year, season/episode) of a release name, in search words: "Some.Film.
+    2002.1080p.BluRay.DTS.5.1.x264.-.GrE.mkv" is ("some film", "2002", None), "Show.
+    2004.S01E02.720p..." ("show", "2004", "s01e02"). A tracker's "[tag]" in front is left
+    out; a title that is a year ("1890.2019...") is kept as the title."""
+    n = matching.norm(re.sub(r"^\s*(?:\[[^\]]*\][\s._-]*)+", "", release_title(name)))
+    title, year, se = n, None, None
+    for m in _TITLE_END.finditer(n):
+        if m.start() == 0:
+            continue
+        title, tok = n[:m.start()], m.group(0)
+        if re.fullmatch(r"(?:19|20)\d\d", tok):
+            year = tok
+            nxt = _TITLE_END.search(n, m.end())
+            if nxt and _SE_TOKEN.fullmatch(nxt.group(0)):
+                se = nxt.group(0)
+        elif _SE_TOKEN.fullmatch(tok):
+            se = tok
+        break
+    return _words(title), year, se
+
+
+def usenet_queries(name: str, group: str | None = None, res: str | None = None,
+                   show: str = "", unit: str = "") -> tuple[list[str], list[str]]:
+    """The searches that find a release's posts on Usenet: (always run, then in turn while
+    none of what was found fits). An indexer matches every word of a search, so the whole
+    release name finds nothing when a tracker writes a single tag its own way ("DTS.5.1"
+    where every post says "DD5.1"): it is searched, as an exact post may be there, and so is
+    what makes the release that release - title, year, season/episode, resolution and group
+    ("some film 2002 1080p gre"; a group often posts one title in several resolutions).
+    Then, while nothing fits: without the year (posts that leave it out), without the group
+    (a group whose name is written another way), and for a show's season or episode its
+    title and season/episode alone. ``show``/``unit``: a season ("s01") or episode
+    ("s01e02") of that show (a normalised title prefix), not the name's own."""
+    title, year, se = name_parts(name)
+    if show:
+        title, year = _words(drop_year(show)), None     # posts of a show often have no year
+    se = unit or se
+    j = lambda *xs: " ".join(x for x in xs if x)
+    exact = "" if unit else _words(re.sub(r"^\s*(?:\[[^\]]*\][\s._-]*)+", "", release_title(name)))
+    always = [q for q in dict.fromkeys([exact, j(title, year, se, res, group)]) if q]
+    broad = [j(title, se, res, group) if year else "",
+             j(title, year, se, res) if group else "",
+             j(title, year, se) if se else ""]
+    broad = [q for q in dict.fromkeys(broad) if q and q not in always and q != title]
+    return always, broad
+
+
 def _not_volumes(files: list) -> list:
     """Files whose names can tell the release group. RAR volumes cannot: scene archives are
     named group first ('grpx-abr11011261.rar'), so the dash-token after it is the short
@@ -1753,12 +1845,13 @@ def need_for(t: Torrent, title: str, whole_torrent: bool) -> Need:
         group = group_of(target_file.name) or group_of(title)
     res = _RES.search(n)
     if ep:
-        query = n[:ep.end()]
+        always, broad = usenet_queries(title, group, res.group(0) if res else None,
+                                       show=n[:ep.start()], unit=ep_tok)
     else:
-        query = n[:n.find("-", res.end() if res else 0)] if "-" in n else n
-    return Need(label=ep_tok.upper() if ep_tok else release_title(t.name), query=query.replace(".", " ").strip(),
+        always, broad = usenet_queries(title, group, res.group(0) if res else None)
+    return Need(label=ep_tok.upper() if ep_tok else release_title(t.name), query=always[0],
                 group=group, res=res.group(0) if res else None, ep=ep_tok,
-                min_size=min_size, target=target)
+                min_size=min_size, target=target, more=always[1:], broad=broad)
 
 
 def _fits(need: Need, r: Release) -> str | None:
@@ -1837,14 +1930,24 @@ def usenet_indexers(cfg: Config, pr) -> list[int]:
 
 
 def usenet_results(cfg: Config, pr: Prowlarr, need: Need, known: list[Release]) -> list[Release]:
-    """All Usenet results for the need's search, plus the ones already known; cached."""
+    """All Usenet results for the need's searches (see usenet_queries), plus the ones already
+    known; cached. The broader searches run, one at a time, only while nothing found fits."""
     if need.results is None:
-        found = [r for r in pr.search(need.query, usenet_indexers(cfg, pr), cfg.categories) if r.protocol == "usenet"]
+        ids = usenet_indexers(cfg, pr)
         seen, out = set(), []
-        for r in list(known) + found:
-            if r.guid not in seen:
-                seen.add(r.guid)
-                out.append(r)
+
+        def add(rs):
+            for r in rs:
+                if r.guid not in seen:
+                    seen.add(r.guid)
+                    out.append(r)
+        add(known)
+        for q in dict.fromkeys(x for x in [need.query, *need.more] if x):
+            add(r for r in pr.search(q, ids, cfg.categories) if r.protocol == "usenet")
+        for q in need.broad:
+            if any(_fits(need, r) is None for r in out):
+                break
+            add(r for r in pr.search(q, ids, cfg.categories) if r.protocol == "usenet")
         need.results = out
     return need.results
 
@@ -2012,16 +2115,18 @@ class Unit:
         n = matching.norm(title)
         res = _RES.search(n) or next((m for m in (_RES.search(matching.norm(f.name)) for f in videos) if m), None)
         main = max(files, key=lambda f: f.length)
-        if level == "episode":
-            label, query = ep.upper(), f"{drop_year(show)} {ep}"   # finds posts with the year or without
+        r = res.group(0) if res else None
+        if level == "episode":                  # the show without its year: finds posts with it or without
+            label, (always, broad) = ep.upper(), usenet_queries(title, group, r, show=show, unit=ep)
         elif level == "season":
-            label, query = f"S{season:02d}", f"{drop_year(show)} s{season:02d}"
+            label, (always, broad) = f"S{season:02d}", usenet_queries(title, group, r, show=show,
+                                                                      unit=f"s{season:02d}")
         else:
-            label, query = release_title(t.name), n
-        self.need = Need(label=label, query=query.replace(".", " ").strip(), group=group,
-                         res=res.group(0) if res else None, ep=ep, min_size=sum(f.length for f in files),
+            label, (always, broad) = release_title(t.name), usenet_queries(title, group, r)
+        self.need = Need(label=label, query=always[0], group=group,
+                         res=r, ep=ep, min_size=sum(f.length for f in files),
                          target=main.name, level=level, season=season, show=show,
-                         seasons=seasons or [])
+                         seasons=seasons or [], more=always[1:], broad=broad)
 
     # the interface bad-piece repair and next_post() rely on
     @property

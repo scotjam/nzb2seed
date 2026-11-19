@@ -69,7 +69,10 @@ def test_usenet_is_asked_without_a_file_names_extension(monkeypatch):
     monkeypatch.setattr(pipeline, "Prowlarr", Pr)
     name = "Some.Film.2022.2160p.WEB-DL.DDP5.1.H.265-Grp"
     t, n = pipeline.search(CFG, name + ".mkv", torrents=False)
-    assert [r.title for r in n] == [name] and asked == [(name, [10, 11])]
+    # and by what makes the release (an indexer matches every word of a search)
+    parts = "some film 2022 2160p grp"
+    assert [r.title for r in n] == [name, parts] and asked == [(name, [10, 11]), (parts, [10, 11])]
     asked.clear()
     t, n = pipeline.search(CFG, name + ".mkv")                 # every indexer: the torrent by its file name too
-    assert [r.title for r in n] == [name] and asked == [(name + ".mkv", []), (name, [10, 11])]
+    assert [r.title for r in n] == [name, parts] and asked == [(name + ".mkv", []), (name, [10, 11]),
+                                                               (parts, [10, 11])]

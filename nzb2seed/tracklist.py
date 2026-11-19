@@ -408,6 +408,11 @@ def facets(name: str) -> dict:
     se = _SE.search(c)
     res = _RES.search(c)
     grp = _GROUP.search(c.strip())
+    if grp is None and re.search(r"\s-\s+\S+$", c):
+        # "... BluRay DTS x264 - GrE": the scene dash spaced out (pipeline's reading of it)
+        from .pipeline import group_of
+        g = group_of(c)
+        grp = re.search(r"-\s+(" + re.escape(g) + r")$", c, re.I) if g else None
     return {"title": loose(title), "year": year[-1] if year else None,
             "season": int(se.group(1)) if se else None,
             "episode": int(se.group(2)) if se and se.group(2) else None,
@@ -545,7 +550,14 @@ def check_usenet(cfg: Config, pr: Prowlarr, name: str, tracker: str, usenet_ids:
         # a tracker that writes release names its own way ("DD+ 5.1", "iT", spaces) is
         # matched by what the release is, from a search by its title - and by its title
         # and year alone, as an edition after the year is written in many ways
-        found = nzbs + [r for q in (short_query(name), title_year(name) if rule("title_year_search") else None)
+        # first by title, year, season/episode, resolution and group: the posts of just that
+        # release, which a search by title alone can bury under a thousand others
+        from .pipeline import usenet_queries
+        f = facets(name)
+        parts = (usenet_queries(name, f["group"], f["res"] + "p")[0][1:]
+                 if f["group"] and f["res"] else [])
+        found = nzbs + [r for q in dict.fromkeys([*parts, short_query(name),
+                                                   title_year(name) if rule("title_year_search") else None])
                         if q for r in usenet(q)]
         exact = matching.rank_nzbs([n for n in found if alike(n.title, name)])
         if not exact:
